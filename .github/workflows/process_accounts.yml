@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       list_file:
-        description: 'File danh sách tk (vd acc.txt / acc3.txt). Để trống nếu muốn tự sinh theo dải'
+        description: 'File danh sách tk (vd acc1.txt). Để trống = tự tìm acc*.txt'
         required: false
-        default: 'acc.txt'
+        default: ''
       prefix:
         description: 'Tên đầu nếu KHÔNG dùng file (vd test). Kết hợp với start/end'
         required: false
@@ -87,9 +87,15 @@ jobs:
               --password "$PW" --dest "$DEST_ID" --execute --phase all --prune \
               --batch-size "$BATCH" --batch-pause 30 --phase-gap 60 \
               --workers "$WORKERS" --append --skip-done
-          else
+          elif [ -n "$LIST_FILE" ]; then
             echo "▶ File danh sách: $LIST_FILE"
             python spin_and_transfer.py --list "$LIST_FILE" \
+              --password "$PW" --dest "$DEST_ID" --execute --phase all --prune \
+              --batch-size "$BATCH" --batch-pause 30 --phase-gap 60 \
+              --workers "$WORKERS" --append --skip-done
+          else
+            echo "▶ Tự tìm acc*.txt trong repo"
+            python spin_and_transfer.py \
               --password "$PW" --dest "$DEST_ID" --execute --phase all --prune \
               --batch-size "$BATCH" --batch-pause 30 --phase-gap 60 \
               --workers "$WORKERS" --append --skip-done

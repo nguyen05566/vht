@@ -355,18 +355,26 @@ def load_users(args):
               f"{' (bỏ ' + str(sorted(excl)) + ')' if excl else ''}")
         return users
     # --list được chỉ định, hoặc TỰ TÌM file danh sách có sẵn trong thư mục hiện tại
-    import os
-    candidates = [args.list] if args.list else ["acc.txt", "acc_valid.txt",
-                                                "acc_test.txt", "acc2.txt"]
+    import os as _os, glob as _glob
+    candidates = [args.list] if args.list else []
+    # Nếu --list chỉ định nhưng file không tồn tại → fallback glob
+    if args.list and not _os.path.exists(args.list):
+        print(f"⚠️  File '{args.list}' không tồn tại, thử tìm acc*.txt...")
+        candidates = []
+    if not candidates:
+        # Ưu tiên: file cụ thể → glob acc*.txt → acc_all/acc_valid/...
+        candidates = (sorted(_glob.glob("acc*.txt"))
+                      + ["acc_all.txt", "acc_valid.txt", "acc_test.txt"])
+        candidates = list(dict.fromkeys(candidates))  # deduplicate giữ thứ tự
     for c in candidates:
-        if c and os.path.exists(c):
+        if c and _os.path.exists(c):
             with open(c, encoding="utf-8") as f:
                 users = [ln.strip().split("\t")[0] for ln in f
                          if ln.strip() and not ln.startswith("#")]
             if users:
                 print(f"📄 Dùng danh sách: {c} ({len(users)} tk)")
                 return users
-    print("❗ Không tìm thấy file danh sách tk trong thư mục hiện tại!")
+    print("❗ Không tìm thấy file danh sách tk nào (acc*.txt) trong thư mục hiện tại!")
     print("   Cách dùng:")
     print("   • Chỉ rõ file:      python3 spin_and_transfer.py --list acc.txt --execute")
     print("   • Tự sinh theo dải: python3 spin_and_transfer.py --range \"test 1 5138\" --execute")
