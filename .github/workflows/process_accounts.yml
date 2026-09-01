@@ -1,0 +1,120 @@
+name: Quay & Chuyển x & Xóa tin nhắn
+
+on:
+  workflow_dispatch:
+    inputs:
+      list_file:
+        description: 'File danh sách tk (vd acc.txt / acc3.txt). Để trống nếu muốn tự sinh theo dải'
+        required: false
+        default: 'acc.txt'
+      prefix:
+        description: 'Tên đầu nếu KHÔNG dùng file (vd test). Kết hợp với start/end'
+        required: false
+        default: ''
+      start:
+        description: 'Số bắt đầu (vd 1)'
+        required: false
+        default: '1'
+      end:
+        description: 'Số kết thúc (vd 5138)'
+        required: false
+        default: '5138'
+      pwd:
+        description: 'Mk chung các tk'
+        required: true
+        default: ''
+      dest_id:
+        description: 'PlayerId nhận x'
+        required: true
+        default: '65692738'
+      pm_user:
+        description: 'Tk cần xóa tin nhắn. Gõ n/a để BỎ QUA bước xóa tin'
+        required: false
+        default: ''
+      pm_pass:
+        description: 'Mk tk xóa tin'
+        required: false
+        default: ''
+      workers:
+        description: 'Số luồng (Android/runner: 5-12)'
+        required: false
+        default: '12'
+      batch_size:
+        description: 'Account mỗi lô'
+        required: false
+        default: '1300'
+
+env:
+  LIST_FILE: ${{ github.event.inputs.list_file || 'acc.txt' }}
+  PREFIX: ${{ github.event.inputs.prefix || '' }}
+  START: ${{ github.event.inputs.start || '1' }}
+  END: ${{ github.event.inputs.end || '5138' }}
+  PW: ${{ github.event.inputs.pwd }}
+  DEST_ID: ${{ github.event.inputs.dest_id || '65692738' }}
+  PM_USER: ${{ github.event.inputs.pm_user || '' }}
+  PM_PW: ${{ github.event.inputs.pm_pass || '' }}
+  WORKERS: ${{ github.event.inputs.workers || '12' }}
+  BATCH: ${{ github.event.inputs.batch_size || '1300' }}
+
+permissions:
+  contents: write
+
+jobs:
+  process:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Quay vòng quay + Chuyển toàn bộ x
+        run: |
+          if [ -n "$PREFIX" ]; then
+            echo "▶ Dải tên: $PREFIX $START..$END"
+            python spin_and_transfer.py --range "$PREFIX $START $END" \
+              --pwd "$PW" --dest "$DEST_ID" --execute --phase all --prune \
+              --batch-size "$BATCH" --batch-pause 30 --phase-gap 60 \
+              --workers "$WORKERS" --append --skip-done
+          else
+            echo "▶ File danh sách: $LIST_FILE"
+            python spin_and_transfer.py --list "$LIST_FILE" \
+              --pwd "$PW" --dest "$DEST_ID" --execute --phase all --prune \
+              --batch-size "$BATCH" --batch-pause 30 --phase-gap 60 \
+              --workers "$WORKERS" --append --skip-done
+          fi
+
+      - name: Xóa tin nhắn nhận x
+        if: env.PM_USER != '' && env.PM_USER != 'n/a'
+        run: |
+          python pm_clean_all.py --user "$PM_USER" --pwd "$PM_PW" || echo "⚠️ Xóa tin thất bại (chạy lại sau)"
+
+      - name: Commit kết quả
+        if: always()
+        run: |
+          git config user.email "bot@users.noreply.github.com"
+          git config user.name "bot"
+          git add phase1_spin.csv phase2_transfer.csv acc_invalid.txt 2>/dev/null || true
+          git diff --cached --quiet || git commit -m "update spin/transfer results" && git push
+
+      - name: Upload kết quả
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ket-qua-${{ github.run_id }}
+          path: |
+            phase1_spin.csv
+            phase2_transfer.csv
+            acc_invalid.txt
+          if-no-files-found: ignore

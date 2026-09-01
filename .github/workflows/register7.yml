@@ -1,0 +1,71 @@
+name: Register Accounts7
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_name:
+        description: 'Tên cơ sở - BẤT KỲ (vd: test / nguyen7 / vip...)'
+        required: true
+        default: 'test'
+      count:
+        description: 'Số lượng tk'
+        required: true
+        default: '10000'
+      pwd:
+        description: 'mk chung cac tk moi'
+        required: true
+
+env:
+  REGISTER_USER: ${{ github.event.inputs.base_name || 'test' }}
+  REGISTER_COUNT: ${{ github.event.inputs.count || '10000' }}
+  REGISTER_PW: ${{ github.event.inputs.pwd }}
+  REGISTER_LEDGER_PATH: acc7.txt
+
+jobs:
+  register:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install websockets ddddocr
+
+      - name: Register acc
+        run: python register7.py
+
+      - name: Upload ledger artifact (dự phòng — kể cả khi push thất bại vẫn còn bản sao)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ledger-${{ github.run_id }}
+          path: |
+            acc7.txt
+            /tmp/new_acc.txt
+          if-no-files-found: ignore
+
+      - name: Commit ledger (pull --rebase + retry 5 lần, chống xung đột khi chạy song song)
+        if: always()
+        run: |
+          git config user.email "bot@users.noreply.github.com"
+          git config user.name "bot"
+          git add acc7.txt
+          git diff --cached --quiet || git commit -m "update acc7.txt ledger"
+          ok=0
+          for i in 1 2 3 4 5; do
+            if git push; then ok=1; echo "✅ push OK (lần thử $i)"; break; fi
+            echo "⚠️ lần $i push bị từ chối — rebase rồi thử lại"
+            git pull --rebase --autostash || true
+            sleep 15
+          done
+          [ "$ok" = "1" ] || { echo "❌ push thất bại sau 5 lần — dữ liệu vẫn ở artifact ledger-${{ github.run_id }}"; exit 1; }

@@ -1,0 +1,4 @@
+requests>=2.31
+websocket-client>=1.7
+websockets>=12.0
+ddddocr>=1.4
