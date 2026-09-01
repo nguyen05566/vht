@@ -116,8 +116,8 @@ jobs:
           echo "▶ Quay + Chuyển x từ acc.txt về playerId $DEST_ID"
           python spin_and_transfer.py --list acc.txt \
             --password "$PW" --dest "$DEST_ID" --execute --phase all --prune \
-            --batch-size 750 --batch-pause 20 --phase-gap 60 \
-            --workers "$WORKERS" --append --skip-done
+            --batch-size 500 --workers "$WORKERS" --pipeline \
+            --append --skip-done
 
       # ==================== PHA 3: XÓA TIN NHẮN ====================
       - name: PHA 3 - Xóa tin nhắn nhận x

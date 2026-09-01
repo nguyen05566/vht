@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       list_file:
-        description: 'File danh sách tk (vd acc1.txt). Để trống = tự tìm acc*.txt'
+        description: 'File danh sách tk (vd accfast1.txt). Để trống = tự tìm acc*.txt'
         required: false
         default: ''
       prefix:
@@ -36,16 +36,21 @@ on:
         required: false
         default: ''
       workers:
-        description: 'Số luồng (Android/runner: 5-12)'
+        description: 'Số luồng (5-50, default 30)'
         required: false
-        default: '12'
+        default: '30'
       batch_size:
-        description: 'Account mỗi lô'
+        description: 'Account mỗi lô (default 500)'
         required: false
-        default: '1300'
+        default: '500'
+      pipeline:
+        description: 'Pipeline: quay lô sau song song chuyển lô trước (gấp 2x)'
+        required: false
+        type: boolean
+        default: true
 
 env:
-  LIST_FILE: ${{ github.event.inputs.list_file || 'acc.txt' }}
+  LIST_FILE: ${{ github.event.inputs.list_file || '' }}
   PREFIX: ${{ github.event.inputs.prefix || '' }}
   START: ${{ github.event.inputs.start || '1' }}
   END: ${{ github.event.inputs.end || '5138' }}
@@ -53,8 +58,9 @@ env:
   DEST_ID: ${{ github.event.inputs.dest_id || '65692738' }}
   PM_USER: ${{ github.event.inputs.pm_user || '' }}
   PM_PW: ${{ github.event.inputs.pm_pass || '' }}
-  WORKERS: ${{ github.event.inputs.workers || '12' }}
-  BATCH: ${{ github.event.inputs.batch_size || '1300' }}
+  WORKERS: ${{ github.event.inputs.workers || '30' }}
+  BATCH: ${{ github.event.inputs.batch_size || '500' }}
+  PIPELINE: ${{ github.event.inputs.pipeline || 'true' }}
 
 permissions:
   contents: write
@@ -62,7 +68,7 @@ permissions:
 jobs:
   process:
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    timeout-minutes: 360
 
     steps:
       - name: Checkout
@@ -73,7 +79,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12'
 
       - name: Install dependencies
         run: |
@@ -81,24 +87,29 @@ jobs:
 
       - name: Quay vòng quay + Chuyển toàn bộ x
         run: |
+          PIPELINE_FLAG=""
+          if [ "$PIPELINE" = "true" ]; then
+            PIPELINE_FLAG="--pipeline"
+          fi
+
           if [ -n "$PREFIX" ]; then
-            echo "▶ Dải tên: $PREFIX $START..$END"
+            echo "▶ Dải tên: $PREFIX $START..$END (pipeline: $PIPELINE)"
             python spin_and_transfer.py --range "$PREFIX $START $END" \
               --password "$PW" --dest "$DEST_ID" --execute --phase all --prune \
-              --batch-size "$BATCH" --batch-pause 30 --phase-gap 60 \
-              --workers "$WORKERS" --append --skip-done
+              --batch-size "$BATCH" --workers "$WORKERS" $PIPELINE_FLAG \
+              --append --skip-done
           elif [ -n "$LIST_FILE" ]; then
-            echo "▶ File danh sách: $LIST_FILE"
+            echo "▶ File danh sách: $LIST_FILE (pipeline: $PIPELINE)"
             python spin_and_transfer.py --list "$LIST_FILE" \
               --password "$PW" --dest "$DEST_ID" --execute --phase all --prune \
-              --batch-size "$BATCH" --batch-pause 30 --phase-gap 60 \
-              --workers "$WORKERS" --append --skip-done
+              --batch-size "$BATCH" --workers "$WORKERS" $PIPELINE_FLAG \
+              --append --skip-done
           else
-            echo "▶ Tự tìm acc*.txt trong repo"
+            echo "▶ Tự tìm acc*.txt trong repo (pipeline: $PIPELINE)"
             python spin_and_transfer.py \
               --password "$PW" --dest "$DEST_ID" --execute --phase all --prune \
-              --batch-size "$BATCH" --batch-pause 30 --phase-gap 60 \
-              --workers "$WORKERS" --append --skip-done
+              --batch-size "$BATCH" --workers "$WORKERS" $PIPELINE_FLAG \
+              --append --skip-done
           fi
 
       - name: Xóa tin nhắn nhận x

@@ -435,14 +435,16 @@ def main():
     ap.add_argument("--password", "--pwd", default="")
     ap.add_argument("--dest", type=int, default=DEST_ID)
     ap.add_argument("--max", type=int, default=0, help="giới hạn số acc (0 = hết)")
-    ap.add_argument("--workers", type=int, default=5)
-    ap.add_argument("--batch-size", type=int, default=250,
-                    help="số acc mỗi lô (khuyến nghị 200-300 cho vài ngàn acc)")
-    ap.add_argument("--batch-pause", type=int, default=45,
-                    help="nghỉ giữa các lô (giây), giảm tải server")
+    ap.add_argument("--workers", type=int, default=30)
+    ap.add_argument("--batch-size", type=int, default=500,
+                    help="số acc mỗi lô (default 500)")
+    ap.add_argument("--batch-pause", type=int, default=3,
+                    help="nghỉ giữa các lô (giây)")
     ap.add_argument("--phase", choices=["spin", "transfer", "all"], default="all")
-    ap.add_argument("--phase-gap", type=int, default=90,
-                    help="nghỉ giữa pha quay và pha chuyển trong cùng lô (giây)")
+    ap.add_argument("--phase-gap", type=int, default=15,
+                    help="nghỉ giữa pha quay và pha chuyển (giây)")
+    ap.add_argument("--pipeline", action="store_true",
+                    help="pipeline: quay lô sau song song với chuyển lô trước (gấp 2x nhanh)")
     ap.add_argument("--prune", action="store_true",
                     help="tự kiểm tra & lọc bỏ tk không đăng nhập được trước khi chạy")
     ap.add_argument("--skip-done", action="store_true",
@@ -510,32 +512,103 @@ def main():
     # ===== CHIA LÔ =====
     batches = [users[i:i + args.batch_size] for i in range(0, len(users), args.batch_size)]
     log(f"📦 Tổng {len(batches)} lô, mỗi lô tối đa {args.batch_size} acc")
+    if args.pipeline:
+        log(f"🚀 PIPELINE MODE — quay & chuyển song song lô khác nhau")
+    log(f"👷 {args.workers} luồng | nghỉ lô {args.batch_pause}s | phase_gap {args.phase_gap}s\n")
 
     all_spin, all_trans = [], []
-    for bi, chunk in enumerate(batches, 1):
-        log(f"\n{'='*70}\n🔶 LÔ {bi}/{len(batches)} — {len(chunk)} acc\n{'='*70}")
-        if args.phase in ("spin", "all") and execute:
-            log("PHA 1 — QUAY...")
-            all_spin += run_phase(phase_spin, chunk)
-            s = [r for r in all_spin if r["user"] in [c for c in chunk] and r["status"] == "SPUN"]
-            log(f"✅ lô {bi}: quay xong ({len(s)} quay được)")
-        if args.phase in ("transfer", "all"):
-            if args.phase == "all" and execute and len(chunk) > 1:
-                log(f"⏳ Nghỉ {args.phase_gap}s giữa quay và chuyển (chống chặn)...")
+
+    if args.pipeline and args.phase == "all" and execute:
+        # ===== PIPELINE: quay lô N+1 song song với chuyển lô N =====
+        from queue import Queue as _Queue
+        spin_q = _Queue()  # (batch_index, chunk)
+        for i, chunk in enumerate(batches):
+            spin_q.put((i, chunk))
+
+        spin_results = {}  # batch_index -> results
+        trans_results = {}
+        spin_done = threading.Event()
+        spin_lock = threading.Lock()
+        trans_lock = threading.Lock()
+        next_transfer = [0]  # mutable counter
+
+        def spin_worker_loop():
+            """Lay lo tu queue, quay, day ket qua."""
+            while True:
+                try:
+                    bi, chunk = spin_q.get_nowait()
+                except Exception:
+                    break
+                log(f"\n{'='*70}\n🔶 LÔ {bi+1}/{len(batches)} — QUAY {len(chunk)} acc\n{'='*70}")
+                results = run_phase(phase_spin, chunk)
+                with spin_lock:
+                    spin_results[bi] = results
+                    s = [r for r in results if r["status"] == "SPUN"]
+                log(f"✅ lô {bi+1}: quay xong ({len(s)} quay được)")
+                spin_q.task_done()
+            spin_done.set()
+
+        def transfer_worker_loop():
+            """Chờ lô quay xong -> sleep gap -> chuyển."""
+            nonlocal all_trans
+            while next_transfer[0] < len(batches):
+                bi = next_transfer[0]
+                # Chờ lô này quay xong
+                while bi not in spin_results:
+                    if spin_done.is_set() and bi not in spin_results:
+                        return
+                    time.sleep(1)
+                chunk = batches[bi]
+                # Nghỉ gap giữa quay và chuyển
+                log(f"⏳ Lô {bi+1}: nghỉ {args.phase_gap}s trước khi chuyển...")
                 time.sleep(args.phase_gap)
-            if execute:
-                log("PHA 2 — CHUYỂN...")
-                all_trans += run_phase(phase_transfer, chunk)
-                okb = [r for r in all_trans if r["user"] in [c for c in chunk] and r["status"] == "OK"]
-                log(f"✅ lô {bi}: chuyển xong ({len(okb)} OK)")
-            else:
-                for u in chunk:
-                    ld = http_login(u, args.password)
-                    log(f"  DRY {u}: balance={ld['balance'] if ld else 0:,}")
-        # nghỉ giữa các lô (trừ lô cuối)
-        if bi < len(batches):
-            log(f"😴 Nghỉ {args.batch_pause}s giữa lô {bi} và {bi+1}...")
-            time.sleep(args.batch_pause)
+                log(f"\n{'='*70}\n💎 LÔ {bi+1}/{len(batches)} — CHUYỂN {len(chunk)} acc\n{'='*70}")
+                results = run_phase(phase_transfer, chunk)
+                with trans_lock:
+                    trans_results[bi] = results
+                    all_trans.extend(results)
+                    okb = [r for r in results if r["status"] == "OK"]
+                log(f"✅ lô {bi+1}: chuyển xong ({len(okb)} OK)")
+                next_transfer[0] += 1
+
+        # Chạy 2 thread song song
+        t_spin = threading.Thread(target=spin_worker_loop, daemon=True)
+        t_trans = threading.Thread(target=transfer_worker_loop, daemon=True)
+        t_spin.start()
+        time.sleep(2)  # để spin thread bắt đầu trước
+        t_trans.start()
+        t_spin.join()
+        t_trans.join()
+
+        # Gộp kết quả spin
+        for bi in sorted(spin_results.keys()):
+            all_spin.extend(spin_results[bi])
+
+    else:
+        # ===== CHẾ ĐỘ THƯỜNG (tuần tự) =====
+        for bi, chunk in enumerate(batches, 1):
+            log(f"\n{'='*70}\n🔶 LÔ {bi}/{len(batches)} — {len(chunk)} acc\n{'='*70}")
+            if args.phase in ("spin", "all") and execute:
+                log("PHA 1 — QUAY...")
+                all_spin += run_phase(phase_spin, chunk)
+                s = [r for r in all_spin if r["user"] in [c for c in chunk] and r["status"] == "SPUN"]
+                log(f"✅ lô {bi}: quay xong ({len(s)} quay được)")
+            if args.phase in ("transfer", "all"):
+                if args.phase == "all" and execute and len(chunk) > 1:
+                    log(f"⏳ Nghỉ {args.phase_gap}s giữa quay và chuyển...")
+                    time.sleep(args.phase_gap)
+                if execute:
+                    log("PHA 2 — CHUYỂN...")
+                    all_trans += run_phase(phase_transfer, chunk)
+                    okb = [r for r in all_trans if r["user"] in [c for c in chunk] and r["status"] == "OK"]
+                    log(f"✅ lô {bi}: chuyển xong ({len(okb)} OK)")
+                else:
+                    for u in chunk:
+                        ld = http_login(u, args.password)
+                        log(f"  DRY {u}: balance={ld['balance'] if ld else 0:,}")
+            if bi < len(batches):
+                log(f"😴 Nghỉ {args.batch_pause}s giữa lô {bi} và {bi+1}...")
+                time.sleep(args.batch_pause)
 
     # ===== LƯU + BÁO CÁO =====
     if execute:
