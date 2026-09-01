@@ -84,13 +84,13 @@ jobs:
           if [ -n "$PREFIX" ]; then
             echo "▶ Dải tên: $PREFIX $START..$END"
             python spin_and_transfer.py --range "$PREFIX $START $END" \
-              --pwd "$PW" --dest "$DEST_ID" --execute --phase all --prune \
+              --password "$PW" --dest "$DEST_ID" --execute --phase all --prune \
               --batch-size "$BATCH" --batch-pause 30 --phase-gap 60 \
               --workers "$WORKERS" --append --skip-done
           else
             echo "▶ File danh sách: $LIST_FILE"
             python spin_and_transfer.py --list "$LIST_FILE" \
-              --pwd "$PW" --dest "$DEST_ID" --execute --phase all --prune \
+              --password "$PW" --dest "$DEST_ID" --execute --phase all --prune \
               --batch-size "$BATCH" --batch-pause 30 --phase-gap 60 \
               --workers "$WORKERS" --append --skip-done
           fi
@@ -98,7 +98,7 @@ jobs:
       - name: Xóa tin nhắn nhận x
         if: env.PM_USER != '' && env.PM_USER != 'n/a'
         run: |
-          python pm_clean_all.py --user "$PM_USER" --pwd "$PM_PW" || echo "⚠️ Xóa tin thất bại (chạy lại sau)"
+          python pm_clean_all.py --user "$PM_USER" --password "$PM_PW" || echo "⚠️ Xóa tin thất bại (chạy lại sau)"
 
       - name: Commit kết quả
         if: always()

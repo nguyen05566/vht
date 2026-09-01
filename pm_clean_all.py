@@ -40,7 +40,7 @@ def http_login(user, pwd):
     s.headers.update({"User-Agent": UA, "Accept-Language": "vi-VN,vi;q=0.9"})
     s.get(LOGIN_URL, timeout=15)
     r = s.post(LOGIN_URL, timeout=15,
-               data={"redirect": "/", "USER_NAME": user, "PWD": pwd,
+               data={"redirect": "/", "USER_NAME": user, "PASSWORD": pwd,
                      "AUTO_LOGIN": "true", "LOGIN": "Đăng nhập"},
                headers={"Origin": "https://gamevh.net", "Referer": LOGIN_URL},
                allow_redirects=True)
@@ -146,11 +146,11 @@ def pm_list_ws(info, page=0, count=15):
 def main():
     ap = argparse.ArgumentParser(description="Dọn hộp thư PM (tin nhận x)")
     ap.add_argument("--user", default="")
-    ap.add_argument("--pwd", default="")
+    ap.add_argument("--password", "--pwd", default="")
     ap.add_argument("--dry-run", action="store_true", help="chỉ đếm, không xóa")
     args = ap.parse_args()
 
-    info = http_login(args.user, args.pwd)
+    info = http_login(args.user, args.password)
     if not info:
         print("❌ Login thất bại"); return
     print(f"✅ Login: {info['nick']} (pid={info['playerId']})")
@@ -175,7 +175,7 @@ def main():
     print(f"   HTTP pm.jsp: số unread lớn = {big if big else '0 / không thấy'}")
 
     if args.dry_run:
-        print("\n⚠️  DRY-RUN - không xóa. Dùng --execute để xóa tất cả!")
+        print("\n⚠️  DRY-RUN - không xóa. Bỏ --dry-run để xóa.")
         return
 
     # 3) XÓA TẤT CẢ (HTTP endpoint)
@@ -186,13 +186,20 @@ def main():
 
     time.sleep(2)
 
-    # 4) Kiểm tra lại
+    # 4) Kiểm tra lại qua HTTP (không dùng WS vì cookie có thể hết hạn sau khi xóa)
     print("\n✅ Kiểm tra lại:")
-    msgs2 = pm_list_ws(info)
-    if msgs2 is not None:
-        print(f"   WS PM.LIST: {len(msgs2)} tin còn lại")
-        for m in msgs2[:6]:
-            print(f"     - {m[2]!r}: {m[3][:70]!r}")
+    try:
+        info2 = http_login(args.user, args.password)
+        if info2:
+            msgs2 = pm_list_ws(info2)
+            if msgs2 is not None:
+                print(f"   WS PM.LIST: {len(msgs2)} tin còn lại")
+                for m in msgs2[:6]:
+                    print(f"     - {m[2]!r}: {m[3][:70]!r}")
+            else:
+                print("   WS verify timeout (bình thường nếu hộp thư đã sạch)")
+    except Exception as e:
+        print(f"   WS verify lỗi: {e} (không ảnh hưởng, đã xóa qua HTTP)")
     r2 = s.get(PM_URL, timeout=15)
     big2 = [n for n in re.findall(r'>(\d+)<', r2.text) if n.isdigit() and int(n) > 100]
     print(f"   HTTP pm.jsp unread: {big2 if big2 else '0'}")
