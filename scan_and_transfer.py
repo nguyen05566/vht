@@ -158,7 +158,7 @@ def main():
             with open("phase2_transfer.csv", encoding="utf-8") as f:
                 for row in _csv.DictReader(f):
                     if row.get("status") in ("OK", "BALANCE_TOO_LOW"):
-                        done.add(row["account"])
+                        done.add(row["acc"])
         except FileNotFoundError:
             pass
         if done:

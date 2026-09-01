@@ -114,7 +114,7 @@ def http_login(user, passwd):
     try:
         sess.get(LOGIN_URL, timeout=15)
         r = sess.post(LOGIN_URL, timeout=15,
-                      data={"redirect": "/", "USER_NAME": user, "PWD": passwd,
+                      data={"redirect": "/", "USER_NAME": user, "PASSWORD": passwd,
                             "AUTO_LOGIN": "true", "LOGIN": "Đăng nhập"},
                       headers={"Origin": "https://gamevh.net", "Referer": LOGIN_URL},
                       allow_redirects=True)
@@ -424,7 +424,7 @@ def main():
                     help='tự sinh dải tên+số, vd: --range "test 1 3000" hoặc "test:1:3000"')
     ap.add_argument("--exclude", default="", help="số cần loại khỏi --range, vd: 1,25")
     ap.add_argument("--user", default=None)
-    ap.add_argument("--pwd", default="")
+    ap.add_argument("--password", "--pwd", default="")
     ap.add_argument("--dest", type=int, default=DEST_ID)
     ap.add_argument("--max", type=int, default=0, help="giới hạn số acc (0 = hết)")
     ap.add_argument("--workers", type=int, default=5)
@@ -476,7 +476,7 @@ def main():
     try:
         sess0.get(LOGIN_URL, timeout=15)
         sess0.post(LOGIN_URL, timeout=15,
-                   data={"redirect": "/", "USER_NAME": users[0], "PWD": args.pwd,
+                   data={"redirect": "/", "USER_NAME": users[0], "PASSWORD": args.pwd,
                          "AUTO_LOGIN": "true", "LOGIN": "Đăng nhập"},
                    headers={"Origin": "https://gamevh.net", "Referer": LOGIN_URL},
                    allow_redirects=True)
