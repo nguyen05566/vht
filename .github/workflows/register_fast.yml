@@ -8,30 +8,30 @@ on:
         required: true
         default: 'test'
       count:
-        description: 'Số lượng tk (max 3000)'
+        description: 'Số lượng tk (max 50000)'
         required: true
-        default: '3000'
+        default: '50000'
       pwd:
         description: 'MK chung cho mọi tk mới'
         required: true
       concurrency:
-        description: 'Số luống song song (5-80, default 40)'
+        description: 'Số luồng song song (5-80, default 40)'
         required: false
         default: '40'
-      dest_id:
-        description: 'PlayerId nhận x (để trống = bỏ qua chuyển x)'
+      chunk_size:
+        description: 'Tk mỗi file (default 5000)'
         required: false
-        default: '65692738'
+        default: '5000'
       skip_spin:
         description: 'Bỏ qua quay số?'
         required: false
         type: boolean
-        default: false
+        default: true
       skip_transfer:
         description: 'Bỏ qua chuyển x?'
         required: false
         type: boolean
-        default: false
+        default: true
       pm_user:
         description: 'TK cần xóa tin (để trống = bỏ qua)'
         required: false
@@ -40,28 +40,21 @@ on:
         description: 'MK TK xóa tin'
         required: false
         default: ''
-      workers:
-        description: 'Số luống quay/chuyển (5-12)'
-        required: false
-        default: '10'
 
 env:
   REGISTER_USER: ${{ github.event.inputs.base_name || 'test' }}
-  REGISTER_COUNT: ${{ github.event.inputs.count || '3000' }}
+  REGISTER_COUNT: ${{ github.event.inputs.count || '50000' }}
   REGISTER_PW: ${{ github.event.inputs.pwd }}
-  REGISTER_LEDGER_PATH: acc.txt
   REGISTER_CONCURRENCY: ${{ github.event.inputs.concurrency || '40' }}
-  DEST_ID: ${{ github.event.inputs.dest_id || '65692738' }}
-  PW: ${{ github.event.inputs.pwd }}
+  CHUNK_SIZE: ${{ github.event.inputs.chunk_size || '5000' }}
   PM_USER: ${{ github.event.inputs.pm_user || '' }}
   PM_PW: ${{ github.event.inputs.pm_pass || '' }}
-  WORKERS: ${{ github.event.inputs.workers || '10' }}
 
 permissions:
   contents: write
 
 jobs:
-  fast_pipeline:
+  fast_register:
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
@@ -80,52 +73,70 @@ jobs:
         run: |
           pip install websockets ddddocr websocket-client requests
 
-      # ==================== PHA 0: ĐĂNG KÝ FAST ====================
-      - name: PHA 0 - Đăng ký nhanh ${{ github.event.inputs.count }} tk
-        run: python register_fast.py
-
-      - name: Upload ledger (dự phòng)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ledger-fast-${{ github.run_id }}
-          path: |
-            acc.txt
-            /tmp/new_acc.txt
-          if-no-files-found: ignore
-
-      - name: Commit ledger
-        if: always()
+      # ==================== ĐĂNG KÝ + COMMIT SONG SONG ====================
+      - name: Đăng ký nhanh + tự commit
+        env:
+          GIT_AUTHOR_NAME: bot
+          GIT_AUTHOR_EMAIL: bot@users.noreply.github.com
+          GIT_COMMITTER_NAME: bot
+          GIT_COMMITTER_EMAIL: bot@users.noreply.github.com
         run: |
+          # Cài git config
           git config user.email "bot@users.noreply.github.com"
           git config user.name "bot"
-          git add acc.txt
-          git diff --cached --quiet || git commit -m "register_fast: +$REGISTER_COUNT tk $REGISTER_USER"
-          ok=0
-          for i in 1 2 3 4 5; do
-            if git push; then ok=1; echo "push OK (lần $i)"; break; fi
-            echo "lần $i bị chặn — rebase rồi thử lại"
-            git pull --rebase --autostash || true
-            sleep 15
+
+          # Chạy register_fast.py ở background
+          python register_fast.py &
+          PID=$!
+          echo "Register PID: $PID"
+
+          # Background committer: mỗi 30s kiểm tra file mới -> commit + push
+          while kill -0 $PID 2>/dev/null; do
+            sleep 30
+            if [ -f .commit_ready ]; then
+              rm -f .commit_ready
+              echo "--- Commit checkpoint ---"
+              git add accfast*.txt
+              if ! git diff --cached --quiet; then
+                files=$(git diff --cached --name-only | tr '\n' ' ')
+                git commit -m "register_fast: $files"
+                git push 2>/dev/null || {
+                  echo "push bị chặn, rebase..."
+                  git pull --rebase --autostash 2>/dev/null || true
+                  sleep 10
+                  git push 2>/dev/null || true
+                }
+              fi
+            fi
           done
-          [ "$ok" = "1" ] || { echo "push thất bại — dữ liệu ở artifact"; exit 1; }
 
-      # ==================== PHA 1+2: QUAY + CHUYỂN X ====================
-      - name: PHA 1+2 - Quay số + Chuyển toàn bộ x
-        if: >-
-          !cancelled() &&
-          env.DEST_ID != '' &&
-          !${{ github.event.inputs.skip_spin }} &&
-          !${{ github.event.inputs.skip_transfer }}
-        run: |
-          echo "▶ Quay + Chuyển x từ acc.txt về playerId $DEST_ID"
-          python spin_and_transfer.py --list acc.txt \
-            --password "$PW" --dest "$DEST_ID" --execute --phase all --prune \
-            --batch-size 750 --batch-pause 20 --phase-gap 60 \
-            --workers "$WORKERS" --append --skip-done
+          # Chờ Python xong
+          wait $PID
+          EXIT_CODE=$?
+          echo "Register exit code: $EXIT_CODE"
 
-      # ==================== PHA 3: XÓA TIN NHẮN ====================
-      - name: PHA 3 - Xóa tin nhắn nhận x
+          # Commit cuối cùng
+          echo "--- Final commit ---"
+          rm -f .commit_ready .register_done
+          git add accfast*.txt
+          if ! git diff --cached --quiet; then
+            files=$(git diff --cached --name-only | tr '\n' ' ')
+            git commit -m "register_fast DONE: $files"
+            ok=0
+            for i in 1 2 3 4 5; do
+              if git push; then ok=1; break; fi
+              git pull --rebase --autostash 2>/dev/null || true
+              sleep 15
+            done
+            [ "$ok" = "1" ] || echo "CẢNH BÁO: push cuối thất bại"
+          else
+            echo "Không có file mới để commit"
+          fi
+
+          exit $EXIT_CODE
+
+      # ==================== XÓA TIN NHẮN (nếu có) ====================
+      - name: Xóa tin nhắn
         if: >-
           !cancelled() &&
           env.PM_USER != '' &&
@@ -133,22 +144,11 @@ jobs:
         run: |
           python pm_clean_all.py --user "$PM_USER" --password "$PM_PW" || echo "Xóa tin thất bại"
 
-      # ==================== KẾT QUẢ ====================
-      - name: Commit kết quả
-        if: always()
-        run: |
-          git config user.email "bot@users.noreply.github.com"
-          git config user.name "bot"
-          git add phase1_spin.csv phase2_transfer.csv 2>/dev/null || true
-          git diff --cached --quiet || git commit -m "results: fast spin+transfer $REGISTER_USER" && git push || true
-
+      # ==================== UPLOAD KẾT QUẢ ====================
       - name: Upload kết quả
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ket-qua-fast-${{ github.run_id }}
-          path: |
-            acc.txt
-            phase1_spin.csv
-            phase2_transfer.csv
-          if-no-files-found: ignore
+          name: accfast-${{ github.run_id }}
+          path: accfast*.txt
+          if-no-files-found: warn

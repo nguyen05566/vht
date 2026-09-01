@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-REGISTER FAST - Đăng ký tk GameVH concurrent (10x nhanh hơn register.py)
-=============================================================
-Khác biệt chính vs register.py:
-  - 30-50 luồng đăng ký song song (asyncio.Semaphore)
-  - Bỏ sleep 1s giữa các tk
-  - Ghi ledger theo lô (mỗi 100 tk) thay vì từng cái
-  - Cùng giao thức WebSocket, cùng captcha, cùng output
+REGISTER FAST - Đăng ký tk GameVH concurrent, lưu accfast*.txt
+===============================================================
+- 40 luồng song song (asyncio.Semaphore)
+- Mỗi 5000 tk -> ghi accfast1.txt, accfast2.txt... + signal commit
+- Max 50,000 tk / lần chạy
+- Tự tìm số accfast tiếp theo (không ghi đè)
 
-Cách dùng (giống register.py):
-  python register_fast.py              # đọc env vars
-  python register_fast.py tenday       # base_name=tenday
-  python register_fast.py tenday 500   # base_name + count
+File output:
+  accfast1.txt  (tk 1-5000)
+  accfast2.txt  (tk 5001-10000)
+  ...
+  .commit_ready  (signal file cho YAML biết có data mới)
 """
 import asyncio
 import websockets
@@ -19,20 +19,15 @@ import struct
 import os
 import random
 import sys
-import pathlib
 import time
 import re
 import glob
-from datetime import datetime, timezone
-from collections import deque
 
 WS_URL = "wss://gamevh.net/ws/gameServer"
-MAX_REGISTER_COUNT = 3000
-
-# ===== TUNING =====
-DEFAULT_CONCURRENCY = 40   # số luồng đăng ký song song
-CAPTCHA_RETRIES = 3        # số lần thử lại nếu sai captcha
-LEDGER_FLUSH_EVERY = 100   # ghi ledger mỗi N tk thành công
+MAX_REGISTER_COUNT = 50000
+CHUNK_SIZE = 5000          # mỗi file chứa 5000 tk
+DEFAULT_CONCURRENCY = 40
+CAPTCHA_RETRIES = 3
 
 # OCR singleton
 _ocr_instance = None
@@ -49,7 +44,6 @@ def get_ocr():
 
 
 def solve_captcha(img_bytes):
-    """Giải captcha từ bytes (không cần ghi file). ddddocr -> None."""
     ocr = get_ocr()
     if ocr:
         try:
@@ -62,7 +56,7 @@ def solve_captcha(img_bytes):
     return None
 
 
-# ===== PROTOCOL (same as register.py) =====
+# ===== PROTOCOL =====
 class Writer:
     def __init__(self): self.parts=[]
     def i8(self,v): self.parts.append(struct.pack('>b',v))
@@ -109,39 +103,44 @@ async def do_register(ws, user, pwd, captcha, clientId):
     return False, "unknown_response"
 
 
-# ===== NAME UTILS (same as register.py) =====
+# ===== NAME UTILS =====
 def split_name_number(name):
     m = re.search(r'^(.*?)(\d+)$', name)
     if m: return m.group(1), int(m.group(2))
     return name, None
 
 def find_latest_number(prefix):
+    """Tìm số lớn nhất của {prefix}{N} trong mọi acc*.txt."""
     pat = re.compile(r"^" + re.escape(prefix) + r"(\d+)$", re.I)
     mx = 0
-    files = []
-    lp = os.environ.get("REGISTER_LEDGER_PATH", "").strip()
-    if lp: files.append(lp)
-    try: files += sorted(glob.glob("acc*.txt"))
+    try:
+        for fp in sorted(glob.glob("acc*.txt")):
+            try:
+                with open(fp, encoding="utf-8", errors="replace") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith("#"): continue
+                        m = pat.match(line.split("\t")[0].strip())
+                        if m: mx = max(mx, int(m.group(1)))
+            except OSError: continue
     except: pass
-    seen = set()
-    for fp in files:
-        if not fp or fp in seen: continue
-        seen.add(fp)
-        try:
-            with open(fp, encoding="utf-8", errors="replace") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith("#"): continue
-                    m = pat.match(line.split("\t")[0].strip())
-                    if m: mx = max(mx, int(m.group(1)))
-        except OSError: continue
     return mx
+
+def find_next_accfast_number():
+    """Tìm số tiếp theo cho accfast{N}.txt (1-based)."""
+    mx = 0
+    try:
+        for fp in glob.glob("accfast*.txt"):
+            m = re.search(r'accfast(\d+)\.txt$', fp)
+            if m: mx = max(mx, int(m.group(1)))
+    except: pass
+    return mx + 1
 
 
 def get_config():
-    base_name = (sys.argv[1] if len(sys.argv) > 1 
+    base_name = (sys.argv[1] if len(sys.argv) > 1
                  else os.environ.get("REGISTER_USER") or "test")
-    raw_count = (sys.argv[2] if len(sys.argv) > 2 
+    raw_count = (sys.argv[2] if len(sys.argv) > 2
                  else os.environ.get("REGISTER_COUNT", str(MAX_REGISTER_COUNT)))
     try: count = int(raw_count)
     except: count = MAX_REGISTER_COUNT
@@ -150,28 +149,65 @@ def get_config():
     prefix, start_num = split_name_number(base_name)
     latest = find_latest_number(prefix)
     if latest >= 1:
-        print(f"[CONTINUE] {prefix}1..{prefix}{latest} đã có -> bắt đầu từ {prefix}{latest+1}")
+        print(f"[CONTINUE] {prefix}1..{prefix}{latest} đã có -> từ {prefix}{latest+1}")
         start_num = latest + 1
     elif start_num is None:
         start_num = 1
     return base_name, prefix, start_num, count, pwd
 
 
-# ===== FAST REGISTRATION =====
+# ===== FILE WRITER =====
+class AccFastWriter:
+    """Ghi accfast{N}.txt mỗi CHUNK_SIZE tk, signal YAML commit."""
+    def __init__(self, chunk_size=CHUNK_SIZE):
+        self.chunk_size = chunk_size
+        self.file_index = find_next_accfast_number()
+        self.buffer = []
+        self.files_written = []
+        self.lock = asyncio.Lock()
+
+    @property
+    def current_filename(self):
+        return f"accfast{self.file_index}.txt"
+
+    async def add(self, username):
+        async with self.lock:
+            self.buffer.append(username)
+            if len(self.buffer) >= self.chunk_size:
+                await self._flush()
+
+    async def flush_remaining(self):
+        async with self.lock:
+            if self.buffer:
+                await self._flush()
+
+    async def _flush(self):
+        if not self.buffer:
+            return
+        fname = self.current_filename
+        with open(fname, "w", encoding="utf-8") as f:
+            for u in self.buffer:
+                f.write(f"{u}\n")
+        total = len(self.files_written) * self.chunk_size + len(self.buffer)
+        print(f"\n  💾 Đã ghi {fname} ({len(self.buffer)} tk, tổng đã lưu: {total})")
+        self.files_written.append(fname)
+        self.buffer.clear()
+        self.file_index += 1
+        # Signal cho YAML background committer
+        try:
+            open(".commit_ready", "w").close()
+        except: pass
+
+
+# ===== WORKER =====
 async def register_one(user, pwd, semaphore, stats):
-    """Đăng ký 1 tk với semaphore giới hạn concurrent."""
     async with semaphore:
         for attempt in range(1, CAPTCHA_RETRIES + 1):
             try:
-                # Mỗi lần thử: mở WS, lấy captcha, giải, đăng ký, đóng WS
                 ws = await websockets.connect(
                     WS_URL,
-                    additional_headers={
-                        "Origin": "https://gamevh.net",
-                        "User-Agent": "Mozilla/5.0"
-                    },
-                    max_size=2**20, ping_interval=None
-                )
+                    additional_headers={"Origin": "https://gamevh.net", "User-Agent": "Mozilla/5.0"},
+                    max_size=2**20, ping_interval=None)
                 try:
                     img, clientId = await get_captcha(ws)
                 finally:
@@ -182,15 +218,10 @@ async def register_one(user, pwd, semaphore, stats):
                     stats['captcha_fail'] += 1
                     continue
 
-                # WS mới cho REGISTER
                 ws2 = await websockets.connect(
                     WS_URL,
-                    additional_headers={
-                        "Origin": "https://gamevh.net",
-                        "User-Agent": "Mozilla/5.0"
-                    },
-                    max_size=2**20, ping_interval=None
-                )
+                    additional_headers={"Origin": "https://gamevh.net", "User-Agent": "Mozilla/5.0"},
+                    max_size=2**20, ping_interval=None)
                 try:
                     ok, msg = await do_register(ws2, user, pwd, captcha, clientId)
                 finally:
@@ -198,81 +229,51 @@ async def register_one(user, pwd, semaphore, stats):
 
                 if ok:
                     return True, ""
-                
-                # Username đã tồn tại -> không thử lại
                 if isinstance(msg, str) and "already exist" in msg.lower():
                     return False, "already_exist"
-                
-                # Sai captcha -> thử lại
                 stats['captcha_wrong'] += 1
                 continue
-
             except asyncio.TimeoutError:
                 stats['timeout'] += 1
                 continue
-            except Exception as e:
+            except Exception:
                 stats['error'] += 1
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.3)
                 continue
-
         return False, "max_retries"
 
 
-async def worker(queue, pwd, semaphore, stats, results, done_event):
-    """Worker lấy username từ queue, đăng ký, ghi kết quả."""
+async def worker(queue, pwd, semaphore, stats, writer, target, done_event):
     while not done_event.is_set():
         try:
             user = queue.get_nowait()
         except asyncio.QueueEmpty:
             break
-        
         ok, msg = await register_one(user, pwd, semaphore, stats)
-        
         if ok:
-            results['created'].append(user)
             stats['ok'] += 1
-            print(f"  ✅ [{stats['ok']}/{results['target']}] {user}")
+            await writer.add(user)
+            if stats['ok'] % 500 == 0:
+                print(f"  📊 [{stats['ok']}/{target}] ...")
         elif msg == "already_exist":
             stats['exist'] += 1
         else:
-            results['failed'].append(user)
             stats['fail'] += 1
-            print(f"  ❌ [{stats['ok']}/{results['target']}] {user} ({msg})")
-
-
-def flush_ledger(usernames, ledger_path):
-    """Ghi batch usernames vào ledger."""
-    if not usernames or not ledger_path: return
-    ledger = pathlib.Path(ledger_path)
-    ledger.parent.mkdir(parents=True, exist_ok=True)
-    needs_header = not ledger.exists() or ledger.stat().st_size == 0
-    ts = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-    run_id = os.environ.get("GITHUB_RUN_ID", "local")
-    seen = set()
-    with ledger.open("a", encoding="utf-8", newline="\n") as out:
-        if needs_header:
-            out.write("# Username ledger\n")
-            out.write("# username\tcreated_at_utc\tgithub_run_id\n")
-        for u in usernames:
-            if u.lower() not in seen:
-                seen.add(u.lower())
-                out.write(f"{u}\t{ts}\t{run_id}\n")
 
 
 async def main():
     t0 = time.time()
     base_name, prefix, start_num, count, pwd = get_config()
     concurrency = int(os.environ.get("REGISTER_CONCURRENCY", DEFAULT_CONCURRENCY))
-    concurrency = max(5, min(concurrency, 80))  # clamp 5-80
-    ledger_path = os.environ.get("REGISTER_LEDGER_PATH", "acc.txt").strip() or "acc.txt"
+    concurrency = max(5, min(concurrency, 80))
 
     print("=" * 60)
-    print(f"REGISTER FAST - {count} tk, {concurrency} luồng song song")
-    print(f"Prefix    : {prefix}, bắt đầu từ {prefix}{start_num}")
-    print(f"Ledger    : {ledger_path}")
+    print(f"REGISTER FAST - {count} tk, {concurrency} luồng")
+    print(f"Prefix : {prefix}{start_num} -> {prefix}{start_num + count - 1}")
+    print(f"File   : accfast*.txt (mỗi {CHUNK_SIZE} tk/file)")
+    print(f"Max    : {MAX_REGISTER_COUNT}")
     print("=" * 60)
 
-    # Tạo queue usernames
     queue = asyncio.Queue()
     for i in range(count):
         queue.put_nowait(f"{prefix}{start_num + i}")
@@ -280,54 +281,33 @@ async def main():
     semaphore = asyncio.Semaphore(concurrency)
     stats = {'ok': 0, 'fail': 0, 'exist': 0, 'captcha_fail': 0,
              'captcha_wrong': 0, 'timeout': 0, 'error': 0}
-    results = {'created': [], 'failed': [], 'target': count}
+    writer = AccFastWriter(chunk_size=CHUNK_SIZE)
     done_event = asyncio.Event()
 
-    # Ledger flush timer
-    ledger_buffer = []
-    last_flush = time.time()
-
-    async def ledger_flusher():
-        nonlocal ledger_buffer, last_flush
-        while not done_event.is_set():
-            await asyncio.sleep(5)
-            if ledger_buffer and (time.time() - last_flush >= 5 or len(ledger_buffer) >= LEDGER_FLUSH_EVERY):
-                batch = ledger_buffer[:]
-                ledger_buffer.clear()
-                flush_ledger(batch, ledger_path)
-                last_flush = time.time()
-
-    # Chạy workers + flusher
     workers = [asyncio.create_task(
-        worker(queue, pwd, semaphore, stats, results, done_event)
+        worker(queue, pwd, semaphore, stats, writer, count, done_event)
     ) for _ in range(concurrency)]
-    flusher = asyncio.create_task(ledger_flusher())
 
     await asyncio.gather(*workers)
     done_event.set()
-    await flusher
+    await writer.flush_remaining()
 
-    # Flush cuối
-    if ledger_buffer:
-        flush_ledger(ledger_buffer, ledger_path)
+    # Signal cuối cùng
+    try: open(".commit_ready", "w").close()
+    except: pass
+    # Tạo .done để YAML biết script đã xong
+    try: open(".register_done", "w").close()
+    except: pass
 
     elapsed = time.time() - t0
     rate = stats['ok'] / elapsed * 60 if elapsed > 0 else 0
+    files = writer.files_written
 
     print("\n" + "=" * 60)
-    print(f"TỔNG KẾT: {stats['ok']}/{count} tk thành công ({elapsed:.1f}s = {rate:.0f} tk/phút)")
-    print(f"  Đã tồn tại  : {stats['exist']}")
-    print(f"  Thất bại    : {stats['fail']} (captcha sai: {stats['captcha_wrong']}, "
-          f"không giải: {stats['captcha_fail']}, timeout: {stats['timeout']}, lỗi: {stats['error']})")
-    print(f"  Tốc độ      : {rate:.0f} tk/phút ({elapsed/count:.2f}s/tk)")
-
-    # Ghi file tạm danh sách mới
-    if results['created']:
-        with open("/tmp/new_acc.txt", "w", encoding="utf-8") as f:
-            for u in results['created']:
-                f.write(f"{u}\n")
-        print(f"  /tmp/new_acc.txt: {len(results['created'])} tk")
-    print(f"  Ledger: {ledger_path}")
+    print(f"HOÀN TẤT: {stats['ok']}/{count} tk ({elapsed:.1f}s = {rate:.0f} tk/phút)")
+    print(f"  Đã tồn tại : {stats['exist']}")
+    print(f"  Thất bại   : {stats['fail']}")
+    print(f"  File tạo   : {', '.join(files) if files else '(none)'}")
     print("=" * 60)
 
 
