@@ -339,6 +339,9 @@ async def main():
         print(f"\n[{len(created)+1}/{count}] Đang đăng ký {user} (lần thử tổng: {total_attempts}) ...")
         try:
             ok, msg = await register_single(user, pwd, captcha_arg)
+        if not ok and isinstance(msg, str) and "already exist" in msg.lower():
+            print(f"  ⏭️  {user} đã tồn tại — bỏ qua (không tốn thời gian)")
+            continue
         except Exception as exc:
             print(f"  LỖI {type(exc).__name__}: {exc}")
             ok = False
