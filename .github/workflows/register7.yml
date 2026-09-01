@@ -1,71 +1,149 @@
-name: Register Accounts7
+name: TK + Quay + Chuyển X + Xóa Tin 7
 
 on:
   workflow_dispatch:
     inputs:
       base_name:
-        description: 'Tên cơ sở - BẤT KỲ (vd: test / nguyen7 / vip...)'
+        description: 'Tên cơ sở (vd: test / nguyen / vip...)'
         required: true
         default: 'test'
       count:
-        description: 'Số lượng tk'
+        description: 'Số lượng tk cần tạo (max 3000)'
         required: true
-        default: '10000'
+        default: '3000'
       pwd:
-        description: 'mk chung cac tk moi'
+        description: 'MK chung cho mọi tk mới'
         required: true
+      dest_id:
+        description: 'PlayerId nhận x (để trống = bỏ qua chuyển x)'
+        required: false
+        default: '65692738'
+      skip_spin:
+        description: 'Bỏ qua quay số?'
+        required: false
+        type: boolean
+        default: false
+      skip_transfer:
+        description: 'Bỏ qua chuyển x?'
+        required: false
+        type: boolean
+        default: false
+      pm_user:
+        description: 'TK cần xóa tin (để trống = bỏ qua)'
+        required: false
+        default: ''
+      pm_pass:
+        description: 'MK TK xóa tin'
+        required: false
+        default: ''
+      workers:
+        description: 'Số luồng (5-12 khuyến nghị)'
+        required: false
+        default: '10'
 
 env:
-  REGISTER_USER: ${{ github.event.inputs.base_name || 'test' }}
-  REGISTER_COUNT: ${{ github.event.inputs.count || '10000' }}
-  REGISTER_PW: ${{ github.event.inputs.pwd }}
+  REGISTER_USER: ${{{{ github.event.inputs.base_name || 'test' }}}}
+  REGISTER_COUNT: ${{{{ github.event.inputs.count || '3000' }}}}
+  REGISTER_PW: ${{{{ github.event.inputs.pwd }}}}
   REGISTER_LEDGER_PATH: acc7.txt
+  DEST_ID: ${{{{ github.event.inputs.dest_id || '65692738' }}}}
+  PW: ${{{{ github.event.inputs.pwd }}}}
+  PM_USER: ${{{{ github.event.inputs.pm_user || '' }}}}
+  PM_PW: ${{{{ github.event.inputs.pm_pass || '' }}}}
+  WORKERS: ${{{{ github.event.inputs.workers || '10' }}}}
+
+permissions:
+  contents: write
 
 jobs:
-  register:
+  full_pipeline:
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    timeout-minutes: 360
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GH_PAT }}
+          token: ${{{{ secrets.GH_PAT }}}}
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12'
 
       - name: Install dependencies
         run: |
-          pip install websockets ddddocr
+          pip install websockets ddddocr websocket-client requests
 
-      - name: Register acc
+      # ==================== PHA 0: ĐĂNG KÝ ====================
+      - name: PHA 0 - Đăng ký ${{{{ github.event.inputs.count }}}} tk
         run: python register7.py
 
-      - name: Upload ledger artifact (dự phòng — kể cả khi push thất bại vẫn còn bản sao)
+      - name: Upload ledger (dự phòng)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ledger-${{ github.run_id }}
+          name: ledger-7-${{{{ github.run_id }}}}
           path: |
             acc7.txt
             /tmp/new_acc.txt
           if-no-files-found: ignore
 
-      - name: Commit ledger (pull --rebase + retry 5 lần, chống xung đột khi chạy song song)
+      - name: Commit ledger
         if: always()
         run: |
           git config user.email "bot@users.noreply.github.com"
           git config user.name "bot"
           git add acc7.txt
-          git diff --cached --quiet || git commit -m "update acc7.txt ledger"
+          git diff --cached --quiet || git commit -m "register: +tk acc7.txt"
           ok=0
           for i in 1 2 3 4 5; do
-            if git push; then ok=1; echo "✅ push OK (lần thử $i)"; break; fi
-            echo "⚠️ lần $i push bị từ chối — rebase rồi thử lại"
+            if git push; then ok=1; echo "push OK (lần $i)"; break; fi
+            echo "lần $i bị chặn — rebase rồi thử lại"
             git pull --rebase --autostash || true
             sleep 15
           done
-          [ "$ok" = "1" ] || { echo "❌ push thất bại sau 5 lần — dữ liệu vẫn ở artifact ledger-${{ github.run_id }}"; exit 1; }
+          [ "$ok" = "1" ] || {{ echo "push thất bại — dữ liệu ở artifact"; exit 1; }}
+
+      # ==================== PHA 1+2: QUAY + CHUYỂN X ====================
+      - name: PHA 1+2 - Quay số + Chuyển toàn bộ x
+        if: >-
+          !cancelled() &&
+          env.DEST_ID != '' &&
+          !${{{{ github.event.inputs.skip_spin }}}} &&
+          !${{{{ github.event.inputs.skip_transfer }}}}
+        run: |
+          echo "▶ Quay + Chuyển x từ acc7.txt về playerId $DEST_ID"
+          python spin_and_transfer.py --list acc7.txt \
+            --password "$PW" --dest "$DEST_ID" --execute --phase all --prune \
+            --batch-size 750 --batch-pause 20 --phase-gap 60 \
+            --workers "$WORKERS" --append --skip-done
+
+      # ==================== PHA 3: XÓA TIN NHẮN ====================
+      - name: PHA 3 - Xóa tin nhắn nhận x
+        if: >-
+          !cancelled() &&
+          env.PM_USER != '' &&
+          env.PM_USER != 'n/a'
+        run: |
+          python pm_clean_all.py --user "$PM_USER" --password "$PM_PW" || echo "Xóa tin thất bại"
+
+      # ==================== KẾT QUẢ ====================
+      - name: Commit kết quả
+        if: always()
+        run: |
+          git config user.email "bot@users.noreply.github.com"
+          git config user.name "bot"
+          git add phase1_spin.csv phase2_transfer.csv 2>/dev/null || true
+          git diff --cached --quiet || git commit -m "results: spin+transfer acc7" && git push || true
+
+      - name: Upload kết quả
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ket-qua-7-${{{{ github.run_id }}}}
+          path: |
+            acc7.txt
+            phase1_spin.csv
+            phase2_transfer.csv
+          if-no-files-found: ignore

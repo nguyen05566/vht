@@ -12,7 +12,21 @@ from datetime import datetime, timezone
 
 WS_URL = "wss://gamevh.net/ws/gameServer"
 # Mức đã chọn cho workflow này. Không cố vượt quota/rate-limit của dịch vụ.
-MAX_REGISTER_COUNT = 10000
+MAX_REGISTER_COUNT = 3000
+
+# OCR singleton – khởi tạo 1 lần, dùng lại cho mọi captcha (nhanh gấp 10x)
+_ocr_instance = None
+
+def get_ocr():
+    global _ocr_instance
+    if _ocr_instance is None:
+        try:
+            import ddddocr
+            _ocr_instance = ddddocr.DdddOcr(show_ad=False)
+            print("[OCR] ddddocr initialized OK")
+        except Exception as e:
+            print(f"[OCR] ddddocr init fail: {e}")
+    return _ocr_instance
 
 
 def split_name_number(name):
@@ -90,7 +104,7 @@ def gen_user():
     return f"{prefix}{random.randint(10000,99999)}"
 
 def gen_pass():
-    return ""  # mk cố định
+    return os.environ.get("REGISTER_PW", "nhat123456")
 
 
 def get_requested_count():
@@ -139,22 +153,20 @@ def append_username_ledger(usernames):
 
 def solve_captcha_auto(image_path):
     """Thử giải captcha tự động: ddddocr -> pytesseract -> None"""
-    # 1. ddddocr (chính xác nhất)
-    try:
-        import ddddocr
-        ocr = ddddocr.DdddOcr(show_ad=False)
-        with open(image_path, 'rb') as f:
-            res = ocr.classification(f.read())
-        # Protocol chỉ nhận ASCII; str.isalnum() cũng nhận ký tự Unicode (vd 一),
-        # khiến Writer.write_ascii() lỗi và có thể làm mất phần tổng kết/ledger.
-        clean = ''.join(c for c in res if c.isascii() and c.isalnum())
-        if len(clean) >= 3:
-            print(f"[OCR] ddddocr: {res!r} -> clean {clean!r}")
-            return clean
-    except Exception as e:
-        print(f"[OCR] ddddocr fail: {e}")
+    # 1. ddddocr (chính xác nhất) – dùng singleton đã khởi tạo
+    ocr = get_ocr()
+    if ocr:
+        try:
+            with open(image_path, 'rb') as f:
+                res = ocr.classification(f.read())
+            clean = ''.join(c for c in res if c.isascii() and c.isalnum())
+            if len(clean) >= 3:
+                print(f"[OCR] ddddocr: {res!r} -> clean {clean!r}")
+                return clean
+        except Exception as e:
+            print(f"[OCR] ddddocr fail: {e}")
 
-    # 2. pytesseract fallback
+    # 2. pytesseract fallback (yếu hơn nhiều, chỉ dùng khi ddddocr không có)
     try:
         from PIL import Image
         import pytesseract
