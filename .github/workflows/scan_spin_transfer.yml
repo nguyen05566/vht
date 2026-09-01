@@ -1,0 +1,100 @@
+name: Do + Quay + Chuyen X
+
+on:
+  workflow_dispatch:
+    inputs:
+      password:
+        description: 'MK chung cac tk'
+        required: true
+      dest_id:
+        description: 'PlayerId nhan x'
+        required: false
+        default: '65692738'
+      pattern:
+        description: 'Pattern file tk (default: acc*.txt)'
+        required: false
+        default: 'acc*.txt'
+      batch_size:
+        description: 'Tk moi lo (default: 750)'
+        required: false
+        default: '750'
+      workers:
+        description: 'So luong quay/chuyen (default: 12)'
+        required: false
+        default: '12'
+      scan_workers:
+        description: 'So luong do tk (default: 80)'
+        required: false
+        default: '80'
+      batch_pause:
+        description: 'Nghi giua cac lo (giay, default: 20)'
+        required: false
+        default: '20'
+      skip_scan:
+        description: 'Bo qua buoc do, dung thang acc*.txt?'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  PW: ${{ github.event.inputs.password }}
+  DEST_ID: ${{ github.event.inputs.dest_id || '65692738' }}
+  PATTERN: ${{ github.event.inputs.pattern || 'acc*.txt' }}
+  BATCH_SIZE: ${{ github.event.inputs.batch_size || '750' }}
+  WORKERS: ${{ github.event.inputs.workers || '12' }}
+  SCAN_WORKERS: ${{ github.event.inputs.scan_workers || '80' }}
+  BATCH_PAUSE: ${{ github.event.inputs.batch_pause || '20' }}
+
+permissions:
+  contents: write
+
+jobs:
+ scan_and_transfer:
+   runs-on: ubuntu-latest
+   timeout-minutes: 360
+
+   steps:
+     - name: Checkout
+       uses: actions/checkout@v4
+       with:
+         token: ${{ secrets.GH_PAT }}
+
+     - name: Setup Python
+       uses: actions/setup-python@v5
+       with:
+         python-version: '3.12'
+
+     - name: Install dependencies
+       run: |
+         pip install -r requirements.txt
+
+     - name: Do + Chia lo + Quay + Chuyen xu
+       run: |
+         ARGS="--password '$PW' --dest $DEST_ID --pattern '$PATTERN'"
+         ARGS="$ARGS --batch-size $BATCH_SIZE --workers $WORKERS"
+         ARGS="$ARGS --scan-workers $SCAN_WORKERS --batch-pause $BATCH_PAUSE"
+         if [ "${{ github.event.inputs.skip_scan }}" = "true" ]; then
+           ARGS="$ARGS --skip-scan"
+         fi
+         python scan_and_transfer.py $ARGS --skip-done
+
+     - name: Commit ket qua
+       if: always()
+       run: |
+         git config user.email "bot@users.noreply.github.com"
+         git config user.name "bot"
+         git add phase1_spin.csv phase2_transfer.csv acc_scanned_valid.txt scan_report.csv 2>/dev/null || true
+         git diff --cached --quiet || git commit -m "scan+transfer: $PATTERN" && git push || true
+
+     - name: Upload ket qua
+       if: always()
+       uses: actions/upload-artifact@v4
+       with:
+         name: scan-ket-qua-${{ github.run_id }}
+         path: |
+           acc_scanned_valid.txt
+           phase1_spin.csv
+           phase2_transfer.csv
+           scan_report.csv
+           batch_scanned_*
+         if-no-files-found: ignore
