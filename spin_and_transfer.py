@@ -473,7 +473,7 @@ def main():
             log(f"⏭️  Bỏ qua {len(skip)} acc đã xử lý xong (--skip-done)")
             users = [u for u in users if u not in done]
     if args.prune:
-        users = prune_invalid(users, args.pwd, log)
+        users = prune_invalid(users, args.password, log)
     if not users:
         print("🤷 Không còn acc nào để chạy.")
         return
@@ -484,7 +484,7 @@ def main():
     try:
         sess0.get(LOGIN_URL, timeout=15)
         sess0.post(LOGIN_URL, timeout=15,
-                   data={"redirect": "/", "USER_NAME": users[0], "PASSWORD": args.pwd,
+                   data={"redirect": "/", "USER_NAME": users[0], "PASSWORD": args.password,
                          "AUTO_LOGIN": "true", "LOGIN": "Đăng nhập"},
                    headers={"Origin": "https://gamevh.net", "Referer": LOGIN_URL},
                    allow_redirects=True)
@@ -501,7 +501,7 @@ def main():
     def run_phase(fn, chunk):
         results = []
         with ThreadPoolExecutor(max_workers=args.workers) as ex:
-            futs = [ex.submit(fn, u, args.pwd, args.dest, log) for u in chunk]
+            futs = [ex.submit(fn, u, args.password, args.dest, log) for u in chunk]
             for f in as_completed(futs):
                 r = f.result()
                 results.append(r[0] if isinstance(r, tuple) else r)
@@ -530,7 +530,7 @@ def main():
                 log(f"✅ lô {bi}: chuyển xong ({len(okb)} OK)")
             else:
                 for u in chunk:
-                    ld = http_login(u, args.pwd)
+                    ld = http_login(u, args.password)
                     log(f"  DRY {u}: balance={ld['balance'] if ld else 0:,}")
         # nghỉ giữa các lô (trừ lô cuối)
         if bi < len(batches):
