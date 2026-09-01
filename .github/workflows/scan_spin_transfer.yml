@@ -70,12 +70,13 @@ jobs:
 
      - name: Do + Chia lo + Quay + Chuyen xu
        run: |
-         ARGS="--password '$PW' --dest $DEST_ID --pattern '$PATTERN'"
+         ARGS="--password $PW --dest $DEST_ID --pattern \"$PATTERN\""
          ARGS="$ARGS --batch-size $BATCH_SIZE --workers $WORKERS"
          ARGS="$ARGS --scan-workers $SCAN_WORKERS --batch-pause $BATCH_PAUSE"
          if [ "${{ github.event.inputs.skip_scan }}" = "true" ]; then
            ARGS="$ARGS --skip-scan"
          fi
+         echo "Running: python scan_and_transfer.py $ARGS --skip-done"
          python scan_and_transfer.py $ARGS --skip-done
 
      - name: Commit ket qua

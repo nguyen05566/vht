@@ -102,37 +102,8 @@ def main():
         print(f"\n{'=' * 70}")
         print(f"BƯỚC 2: Dò {len(users)} tk ({args.scan_workers} luồng HTTP)")
         print("=" * 70)
-
-        # Ghi tạm danh sách gộp để dò
-        merged_file = "_merged_all.txt"
-        with open(merged_file, "w", encoding="utf-8") as f:
-            for u in users:
-                f.write(f"{u}\n")
-
-        # Dùng discover_accounts ở chế độ --fast --no-ws (chỉ HTTP, không đọc balance)
-        # nhưng cần sửa: discover_accounts.py dùng --prefix/start/end, không dùng --list
-        # Nên dùng spin_and_transfer --prune (tự dò + lọc)
-        # HOẶC chạy HTTP check trực tiếp
         print("Đang dò nhanh (HTTP login check)...")
-        result = subprocess.run(
-            [sys.executable, "discover_accounts.py",
-             "--prefix", "_dummy_scan",
-             "--start", "1", "--end", "1",
-             "--password", args.password,
-             "--workers", str(args.scan_workers),
-             "--no-ws", "--fast",
-             "--out-valid", valid_file],
-            capture_output=True, text=True, timeout=600
-        )
-        # discover_accounts không hỗ trợ --list, nên dò bằng cách khác
-        # → dùng spin_and_transfer.py --prune (nó có prune_invalid dùng HTTP check)
-        # Ghi danh sách gộp vào 1 file rồi dùng --list
 
-        # Thực ra cách nhanh nhất: dùng --prune của spin_and_transfer
-        # Nhưng trước tiên cần dò bằng script đơn giản
-        os.remove(merged_file)
-
-        # Dò trực tiếp bằng ThreadPoolExecutor
         import requests as _req
         from concurrent.futures import ThreadPoolExecutor, as_completed
         LOGIN_URL = "https://gamevh.net/login.jsp"
