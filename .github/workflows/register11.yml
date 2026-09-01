@@ -42,15 +42,15 @@ on:
         default: '10'
 
 env:
-  REGISTER_USER: ${{{{ github.event.inputs.base_name || 'test' }}}}
-  REGISTER_COUNT: ${{{{ github.event.inputs.count || '3000' }}}}
-  REGISTER_PW: ${{{{ github.event.inputs.pwd }}}}
+  REGISTER_USER: ${{ github.event.inputs.base_name || 'test' }}
+  REGISTER_COUNT: ${{ github.event.inputs.count || '3000' }}
+  REGISTER_PW: ${{ github.event.inputs.pwd }}
   REGISTER_LEDGER_PATH: acc11.txt
-  DEST_ID: ${{{{ github.event.inputs.dest_id || '65692738' }}}}
-  PW: ${{{{ github.event.inputs.pwd }}}}
-  PM_USER: ${{{{ github.event.inputs.pm_user || '' }}}}
-  PM_PW: ${{{{ github.event.inputs.pm_pass || '' }}}}
-  WORKERS: ${{{{ github.event.inputs.workers || '10' }}}}
+  DEST_ID: ${{ github.event.inputs.dest_id || '65692738' }}
+  PW: ${{ github.event.inputs.pwd }}
+  PM_USER: ${{ github.event.inputs.pm_user || '' }}
+  PM_PW: ${{ github.event.inputs.pm_pass || '' }}
+  WORKERS: ${{ github.event.inputs.workers || '10' }}
 
 permissions:
   contents: write
@@ -64,7 +64,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          token: ${{{{ secrets.GH_PAT }}}}
+          token: ${{ secrets.GH_PAT }}
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -76,14 +76,14 @@ jobs:
           pip install websockets ddddocr websocket-client requests
 
       # ==================== PHA 0: ĐĂNG KÝ ====================
-      - name: PHA 0 - Đăng ký ${{{{ github.event.inputs.count }}}} tk
+      - name: PHA 0 - Đăng ký ${{ github.event.inputs.count }} tk
         run: python register11.py
 
       - name: Upload ledger (dự phòng)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ledger-11-${{{{ github.run_id }}}}
+          name: ledger-11-${{ github.run_id }}
           path: |
             acc11.txt
             /tmp/new_acc.txt
@@ -110,8 +110,8 @@ jobs:
         if: >-
           !cancelled() &&
           env.DEST_ID != '' &&
-          !${{{{ github.event.inputs.skip_spin }}}} &&
-          !${{{{ github.event.inputs.skip_transfer }}}}
+          !${{ github.event.inputs.skip_spin }} &&
+          !${{ github.event.inputs.skip_transfer }}
         run: |
           echo "▶ Quay + Chuyển x từ acc11.txt về playerId $DEST_ID"
           python spin_and_transfer.py --list acc11.txt \
@@ -141,7 +141,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ket-qua-11-${{{{ github.run_id }}}}
+          name: ket-qua-11-${{ github.run_id }}
           path: |
             acc11.txt
             phase1_spin.csv
