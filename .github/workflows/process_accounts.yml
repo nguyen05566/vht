@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       list_file:
-        description: 'File danh sách tk (vd accfast1.txt). Để trống = tự tìm acc*.txt'
+        description: 'File danh sách tk, nhiều file cách nhau dấu phẩy (vd accfast1.txt,accfast2.txt). Để trống = tự tìm acc*.txt'
         required: false
         default: ''
       prefix:
@@ -99,7 +99,10 @@ jobs:
               --batch-size "$BATCH" --workers "$WORKERS" $PIPELINE_FLAG \
               --append --skip-done
           elif [ -n "$LIST_FILE" ]; then
-            echo "▶ File danh sách: $LIST_FILE (pipeline: $PIPELINE)"
+            # Hỗ trợ nhiều file cách nhau dấu phẩy: accfast1.txt,accfast2.txt
+            FILES=$(echo "$LIST_FILE" | tr ',' '\n')
+            FILE_COUNT=$(echo "$FILES" | wc -l)
+            echo "▶ $FILE_COUNT file danh sách: $LIST_FILE (pipeline: $PIPELINE)"
             python spin_and_transfer.py --list "$LIST_FILE" \
               --password "$PW" --dest "$DEST_ID" --execute --phase all --prune \
               --batch-size "$BATCH" --workers "$WORKERS" $PIPELINE_FLAG \
