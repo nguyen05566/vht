@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       list_file:
-        description: 'File danh sách tk, nhiều file cách nhau dấu phẩy (vd accfast1.txt,accfast2.txt). Để trống = tự tìm acc*.txt'
+        description: 'File danh sách, nhiều file cách nhau dấu phẩy (vd accfast1.txt,accfast2.txt). Để trống = tự tìm acc*.txt'
         required: false
         default: ''
       prefix:
@@ -16,9 +16,9 @@ on:
         required: false
         default: '1'
       end:
-        description: 'Số kết thúc (vd 5138)'
+        description: 'Số kết thúc'
         required: false
-        default: '5138'
+        default: ''
       pwd:
         description: 'Mk chung các tk'
         required: true
@@ -94,19 +94,40 @@ jobs:
 
           if [ -n "$PREFIX" ]; then
             echo "▶ Dải tên: $PREFIX $START..$END (pipeline: $PIPELINE)"
+            if [ -z "$END" ]; then
+              echo "❌ Thiếu số kết thúc (end). Gõ prefix + start + end."
+              exit 1
+            fi
             python spin_and_transfer.py --range "$PREFIX $START $END" \
               --password "$PW" --dest "$DEST_ID" --execute --phase all --prune \
               --batch-size "$BATCH" --workers "$WORKERS" $PIPELINE_FLAG \
               --append --skip-done
           elif [ -n "$LIST_FILE" ]; then
-            # Hỗ trợ nhiều file cách nhau dấu phẩy: accfast1.txt,accfast2.txt
-            FILES=$(echo "$LIST_FILE" | tr ',' '\n')
-            FILE_COUNT=$(echo "$FILES" | wc -l)
-            echo "▶ $FILE_COUNT file danh sách: $LIST_FILE (pipeline: $PIPELINE)"
-            python spin_and_transfer.py --list "$LIST_FILE" \
-              --password "$PW" --dest "$DEST_ID" --execute --phase all --prune \
-              --batch-size "$BATCH" --workers "$WORKERS" $PIPELINE_FLAG \
-              --append --skip-done
+            # Chạy TỪNG FILE lần lượt, không gộp
+            FILE_IDX=0
+            TOTAL=$(echo "$LIST_FILE" | tr ',' '\n' | wc -l)
+            echo "$LIST_FILE" | tr ',' '\n' | while read -r ONE_FILE; do
+              ONE_FILE=$(echo "$ONE_FILE" | xargs)  # trim whitespace
+              if [ -z "$ONE_FILE" ]; then continue; fi
+              FILE_IDX=$((FILE_IDX + 1))
+              echo ""
+              echo "============================================"
+              echo "▶ FILE $FILE_IDX/$TOTAL: $ONE_FILE"
+              echo "============================================"
+              if [ ! -f "$ONE_FILE" ]; then
+                echo "❌ File '$ONE_FILE' không tồn tại, BỎ QUA"
+                continue
+              fi
+              ACC_COUNT=$(grep -c '.' "$ONE_FILE" 2>/dev/null || echo 0)
+              echo "📄 $ONE_FILE: $ACC_COUNT dòng"
+              python spin_and_transfer.py --list "$ONE_FILE" \
+                --password "$PW" --dest "$DEST_ID" --execute --phase all --prune \
+                --batch-size "$BATCH" --workers "$WORKERS" $PIPELINE_FLAG \
+                --append --skip-done
+              echo "✅ Xong file $ONE_FILE"
+            done
+            echo ""
+            echo "🎉 Đã xử lý xong tất cả file"
           else
             echo "▶ Tự tìm acc*.txt trong repo (pipeline: $PIPELINE)"
             python spin_and_transfer.py \

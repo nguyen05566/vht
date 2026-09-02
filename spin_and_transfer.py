@@ -354,22 +354,17 @@ def load_users(args):
         print(f"🔍 Sinh {len(users)} ứng viên từ dải {prefix}{start}..{prefix}{end}"
               f"{' (bỏ ' + str(sorted(excl)) + ')' if excl else ''}")
         return users
-    # --list được chỉ định (hỗ trợ nhiều file cách nhau dấu phẩy), hoặc TỰ TÌM
+    # --list được chỉ định, hoặc TỰ TÌM file danh sách có sẵn trong thư mục hiện tại
     import os as _os, glob as _glob
-    candidates = []
-    if args.list:
-        # Tách theo dấu phẩy, strip khoảng trắng
-        candidates = [f.strip() for f in args.list.split(",") if f.strip()]
-        # Nếu TẤT CẢ file đều không tồn tại → fallback glob
-        if candidates and not any(_os.path.exists(c) for c in candidates):
-            print(f"⚠️  Không file nào trong '{args.list}' tồn tại, thử tìm acc*.txt...")
-            candidates = []
+    candidates = [f.strip() for f in args.list.split(",")] if args.list else []
+    # Nếu TẤT CẢ file đều không tồn tại → fallback glob
+    if candidates and not any(_os.path.exists(c) for c in candidates):
+        print(f"⚠️  Không file nào trong '{args.list}' tồn tại, thử tìm acc*.txt...")
+        candidates = []
     if not candidates:
-        # Ưu tiên: file cụ thể → glob acc*.txt → acc_all/acc_valid/...
         candidates = (sorted(_glob.glob("acc*.txt"))
                       + ["acc_all.txt", "acc_valid.txt", "acc_test.txt"])
-        candidates = list(dict.fromkeys(candidates))  # deduplicate giữ thứ tự
-    # Đọc TẤT CẢ file candidate, gộp acc lại (loại trùng)
+        candidates = list(dict.fromkeys(candidates))
     seen = set()
     users = []
     for c in candidates:
@@ -377,20 +372,18 @@ def load_users(args):
             with open(c, encoding="utf-8") as f:
                 file_users = [ln.strip().split("\t")[0] for ln in f
                               if ln.strip() and not ln.startswith("#")]
-                new_count = 0
                 for u in file_users:
                     if u not in seen:
                         seen.add(u)
                         users.append(u)
-                        new_count += 1
-                print(f"📄 {c}: {len(file_users)} tk ({new_count} mới thêm)")
+                print(f"📄 {c}: {len(file_users)} tk")
     if users:
-        print(f"📋 Tổng cộng: {len(users)} tk từ {len([c for c in candidates if c and _os.path.exists(c)])} file")
+        print(f"📋 Tổng cộng: {len(users)} tk")
         return users
     print("❗ Không tìm thấy file danh sách tk nào (acc*.txt) trong thư mục hiện tại!")
     print("   Cách dùng:")
     print("   • 1 file:        python3 spin_and_transfer.py --list acc.txt --execute")
-    print("   • Nhiều file:    python3 spin_and_transfer.py --list \"accfast1.txt,accfast2.txt,accfast3.txt\" --execute")
+    print("   • Nhiều file:    python3 spin_and_transfer.py --list \"accfast1.txt,accfast2.txt\" --execute")
     print("   • Tự sinh dải:   python3 spin_and_transfer.py --range \"test 1 5138\" --execute")
     print("   • Chạy 1 tk:     python3 spin_and_transfer.py --user test50 --execute")
     sys.exit(1)
