@@ -637,9 +637,6 @@ class PikafishBot:
         self._score_regex = re.compile(r"depth (\d+).*score (cp|mate) (-?\d+)")
         self._last_score = "?"
         self._last_depth = "?"
-        self._opponent_id = None         # playerId đối thủ (để spam CHAT)
-        self._opponent_nick = None       # nickname đối thủ
-        self._spam_chat_running = False  # đang spam tin nhắn riêng?
         self._init_engine()
 
     def _init_engine(self):
@@ -1166,105 +1163,6 @@ class PikafishBot:
         # vì đây là lệnh hiếm, gửi sai dạng là server bỏ qua im lặng.
         self.send_message(410, bytes(data))
 
-    def send_chat_player(self, player_id, message="test"):
-        """Gửi tin nhắn riêng qua CHAT.SEND đến playerId đối thủ - thử nhiều format."""
-        data = bytearray()
-        data.extend(struct.pack('>q', int(player_id)))
-        data.extend(self.conn.pack_string(message))
-        self.send_message("CHAT.SEND", bytes(data))
-
-    def send_chat_format(self, fmt_id, player_id, nick, message):
-        """Thử format CHAT.SEND khác nhau."""
-        data = bytearray()
-        if fmt_id == 1:  # long(id) + string(msg)
-            data.extend(struct.pack('>q', int(player_id)))
-            data.extend(self.conn.pack_string(message))
-        elif fmt_id == 2:  # ascii(nick) + string(msg)
-            data.extend(self.conn.pack_ascii(nick))
-            data.extend(self.conn.pack_string(message))
-        elif fmt_id == 3:  # string(nick) + string(msg)
-            data.extend(self.conn.pack_string(nick))
-            data.extend(self.conn.pack_string(message))
-        elif fmt_id == 4:  # int(id) + string(msg)
-            data.extend(struct.pack('>i', int(player_id)))
-            data.extend(self.conn.pack_string(message))
-        elif fmt_id == 5:  # opcode 331 số + long(id) + string(msg)
-            data.extend(struct.pack('>q', int(player_id)))
-            data.extend(self.conn.pack_string(message))
-            self.send_message(331, bytes(data))
-            return
-        elif fmt_id == 6:  # opcode 331 số + ascii(nick) + string(msg)
-            data.extend(self.conn.pack_ascii(nick))
-            data.extend(self.conn.pack_string(message))
-            self.send_message(331, bytes(data))
-            return
-        elif fmt_id == 7:  # opcode 331 số + string(nick) + string(msg)
-            data.extend(self.conn.pack_string(nick))
-            data.extend(self.conn.pack_string(message))
-            self.send_message(331, bytes(data))
-            return
-        elif fmt_id == 8:  # byte(1=target_type=private) + long(id) + string(msg)
-            data.extend(self.conn.pack_byte(1))
-            data.extend(struct.pack('>q', int(player_id)))
-            data.extend(self.conn.pack_string(message))
-        elif fmt_id == 9:  # string(msg) + string(nick) - reversed
-            data.extend(self.conn.pack_string(message))
-            data.extend(self.conn.pack_string(nick))
-        self.send_message("CHAT.SEND", bytes(data))
-
-    def _start_spam_chat(self):
-        """Test các format CHAT.SEND, spam liên tục format thành công."""
-        if self._spam_chat_running:
-            return
-        self._spam_chat_running = True
-        def spam_loop():
-            opponent_id = self._opponent_id
-            opponent_nick = self._opponent_nick or ""
-            if not opponent_id:
-                print(f"[SPAM] ❌ Không biết đối thủ ID")
-                self._spam_chat_running = False
-                return
-            
-            print(f"\n{'='*60}")
-            print(f"[SPAM] 🚀 TEST CÁC FORMAT CHAT.SEND → {opponent_nick} (ID={opponent_id})")
-            print(f"{'='*60}\n")
-            
-            # Thử từng format, mỗi format 3 tin
-            format_labels = {
-                1: 'string "CHAT.SEND" + long(id) + string(msg)',
-                2: 'string "CHAT.SEND" + ascii(nick) + string(msg)',
-                3: 'string "CHAT.SEND" + string(nick) + string(msg)',
-                4: 'string "CHAT.SEND" + int(id) + string(msg)',
-                5: 'opcode 331 + long(id) + string(msg)',
-                6: 'opcode 331 + ascii(nick) + string(msg)',
-                7: 'opcode 331 + string(nick) + string(msg)',
-                8: 'string "CHAT.SEND" + byte(1) + long(id) + string(msg)',
-                9: 'string "CHAT.SEND" + string(msg) + string(nick)',
-            }
-            
-            working_format = None
-            for fmt_id in range(1, 10):
-                label = format_labels.get(fmt_id, f"fmt{fmt_id}")
-                print(f"[SPAM] Test format {fmt_id}: {label}")
-                for i in range(3):
-                    self.send_chat_format(fmt_id, opponent_id, opponent_nick, f"F{fmt_id}#{i+1}")
-                    time.sleep(0.1)
-                time.sleep(0.5)
-            
-            # Sau khi test xong, nếu không format nào ok → spam format 5 (opcode 331 + long)
-            print(f"\n[SPAM] Tiếp tục spam liên tục bằng opcode 331 + long(id)...")
-            count = 0
-            while self._spam_chat_running and self.board.is_playing:
-                count += 1
-                self.send_chat_format(5, opponent_id, opponent_nick, f"SPAM#{count} " + "x" * 50)
-                if count % 50 == 0:
-                    print(f"[SPAM] Đã gửi {count} tin nhắn...")
-                time.sleep(0.02)
-            print(f"[SPAM] Dừng spam sau {count} tin nhắn")
-            self._spam_chat_running = False
-        threading.Thread(target=spam_loop, daemon=True).start()
-        print(f"[SPAM] 🚀 Bắt đầu test spam tin nhắn riêng → đối thủ ID={self._opponent_id}")
-
     def send_ready(self, is_ready=1):
         if self.board.is_playing: return
         print("[GAME] ⏳ Gửi trạng thái READY...")
@@ -1290,18 +1188,6 @@ class PikafishBot:
             elif cmd == "SET_TURN": self._handle_set_turn(msg)
             elif cmd == "GAMEOVER": self._handle_gameover(msg)
             elif cmd == "KICK_PLAYER": self._handle_kick_response(msg)
-            elif cmd == "CHAT.SEND":
-                try:
-                    status = msg.read_byte()
-                    if status != 0:
-                        print(f"[CHAT] ❌ CHAT.SEND bị từ chối status={status}")
-                except: pass
-            elif cmd == "CHAT.MSG":
-                try:
-                    sender = msg.read_string()
-                    content = msg.read_string()
-                    print(f"[CHAT] 📩 Tin nhắn từ {sender}: {content[:80]}")
-                except: pass
             elif cmd == "ALERT":
                 try: print(f"[SERVER] ALERT: {msg.read_string()}")
                 except Exception: pass
@@ -1428,8 +1314,6 @@ class PikafishBot:
             name = msg.read_string()
             if pid > 0 and pid != CURRENT_PLAYER_ID:
                 self.player_names[pid] = name
-                self._opponent_id = pid
-                self._opponent_nick = name
                 print(f"[PLAYER] 👤 Người chơi '{name}' (id={pid}) vào bàn/phòng (level={place_level})")
                 if not self.board.is_playing and self.is_family_bot(name) and self.opponent_player_id() == pid:
                     print(f"[AVOID] ⚠️ Phát hiện đồng đội '{name}' ở ghế đối diện! Rời bàn ngay + giảm cược...")
@@ -1452,8 +1336,6 @@ class PikafishBot:
             else:
                 if player_id > 0:
                     name = self.player_names.get(player_id, "")
-                    self._opponent_id = player_id
-                    self._opponent_nick = name
                     print(f"[TABLE] 👤 Ghế đối diện (slot={slot_id}): playerId={player_id}{f', name={name}' if name else ''}")
                     if not self.board.is_playing and self.is_family_bot(name):
                         print(f"[AVOID] ⚠️ Đối thủ '{name}' là bot đồng đội! Rời bàn + giảm cược...")
@@ -1488,10 +1370,6 @@ class PikafishBot:
         self.in_game = True
         self._joining_table = False
         self.last_action_timestamp = time.time()
-        
-        # Bắt đầu spam tin nhắn riêng nếu biết đối thủ
-        if self._opponent_id:
-            self._start_spam_chat()
 
         try:
             player_count = msg.read_byte()
@@ -1677,10 +1555,7 @@ class PikafishBot:
         self.in_game = True  
         self._joining_table = False
         self.last_action_timestamp = time.time()
-        
-        # Dừng spam tin nhắn riêng khi ván kết thúc
-        self._spam_chat_running = False
-        
+
         if getattr(self, '_engine_proc', None) and self._engine_proc.poll() is None:
             self._fsf_cmd("ucinewgame")
             self._fsf_cmd("isready")
