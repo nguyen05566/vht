@@ -40,11 +40,11 @@ on:
         required: false
         default: '69284649'
       pm_user:
-        description: 'Tk cần xóa tin nhắn. Gõ n/a để BỎ QUA bước xóa tin'
+        description: 'Tk cần xóa tin nhắn. Mặc định = dest_user (nguyenpy1). Gõ n/a để BỎ QUA'
         required: false
-        default: ''
+        default: 'nguyenpy1'
       pm_pass:
-        description: 'Mk tk xóa tin'
+        description: 'Mk tk xóa tin. RỖNG = dùng DEST_PASS (nhat434241)'
         required: false
         default: ''
       workers:
@@ -200,10 +200,37 @@ jobs:
               --append --skip-done
           fi
 
-      - name: Xóa tin nhắn nhận x
+      - name: Xóa tin nhắn nhận x (wipe PM inbox)
         if: env.PM_USER != '' && env.PM_USER != 'n/a'
         run: |
-          python pm_clean_all.py --user "$PM_USER" --password "$PM_PW" || echo "⚠️ Xóa tin thất bại (chạy lại sau)"
+          PM_USER_ACTUAL="$PM_USER"
+          PM_PASS_ACTUAL="$PM_PW"
+          # Default: dùng DEST_USER / DEST_PASS (đồng bộ với tk nhận xu cấp 1)
+          if [ "$PM_USER_ACTUAL" = "nguyenpy1" ] || [ -z "$PM_USER_ACTUAL" ]; then
+            if [ -n "$DEST_USER" ]; then
+              PM_USER_ACTUAL="$DEST_USER"
+            else
+              PM_USER_ACTUAL="nguyenpy1"
+            fi
+            # Nếu pm_pass rỗng, dùng dest_pass (script sẽ fallback tiếp DEST_PASS)
+            if [ -z "$PM_PASS_ACTUAL" ] && [ -n "$DEST_PW" ]; then
+              PM_PASS_ACTUAL="$DEST_PW"
+            fi
+            echo "📌 pm_user auto = $PM_USER_ACTUAL (đồng bộ với dest_user)"
+          fi
+          if [ -z "$PM_PASS_ACTUAL" ]; then
+            # Last resort: hardcode MK của nguyenpy1 (DEST_PASS trong code)
+            PM_PASS_ACTUAL="nhat434241"
+            echo "📌 pm_pass auto = DEST_PASS constant trong spin_and_transfer.py"
+          fi
+          echo "🗑️  Wipe PM inbox: $PM_USER_ACTUAL"
+          # Wipe 3 lần (mỗi lần cách 5s) để đảm bảo sạch + bắt tin mới dồn về
+          python pm_clean_all.py --user "$PM_USER_ACTUAL" --password "$PM_PASS_ACTUAL" || echo "⚠️ Lần 1 thất bại"
+          sleep 5
+          python pm_clean_all.py --user "$PM_USER_ACTUAL" --password "$PM_PASS_ACTUAL" || echo "⚠️ Lần 2 thất bại"
+          sleep 5
+          python pm_clean_all.py --user "$PM_USER_ACTUAL" --password "$PM_PASS_ACTUAL" || echo "⚠️ Lần 3 thất bại"
+          echo "✅ Wipe xong (3 lần)"
 
       - name: Commit kết quả
         if: always()
