@@ -28,13 +28,13 @@ on:
         required: true
         default: '69282667'
       dest_user:
-        description: 'Username tk nhận cấp 1 (để chuyển tiếp cấp 2). Rỗng = dùng DEST_NAME mặc định trong code (nhancap1)'
+        description: 'Username tk nhận cấp 1 (để chuyển tiếp cấp 2). Rỗng = dùng default trong code (nguyenpy1)'
         required: false
-        default: ''
+        default: 'nguyenpy1'
       dest_pass:
-        description: 'Mật khẩu tk nhận cấp 1. Rỗng = dùng cùng --password (MK chung)'
+        description: 'Mật khẩu tk nhận cấp 1. Rỗng = dùng default trong code (nhat123456)'
         required: false
-        default: ''
+        default: 'nhat123456'
       dest2_id:
         description: 'PlayerId nhận x cấp 2 (chuyển tiếp từ cấp 1). Rỗng hoặc 0 = TẮT chuyển tiếp'
         required: false
