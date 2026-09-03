@@ -53,13 +53,13 @@ PLACE_PATH = 'Lobby.xiangqi.0'
 
 # Số nhánh engine phân tích song song. MultiPV=1: chỉ tin nước tốt nhất của engine
 # (mạnh nhất & nhanh nhất). MultiPV>1: bật thêm lớp lọc xu hướng TrendAnalyzer.
-ENGINE_MULTIPV = 3
+ENGINE_MULTIPV = 1
 
 # Thoi gian TOI THIEU tu luc toi luot den khi gui nuoc di (giay).
 # Engine tim ra nuoc thang/sat cuc se tra loi gan nhu tuc thi; neu di ngay
 # thi nhip di nhanh bat thuong. Chi bu phan CON THIEU - engine da nghi lau
 # hon MIN_MOVE_SECONDS roi thi di luon, khong cong them.
-MIN_MOVE_SECONDS = 2.0
+MIN_MOVE_SECONDS = 0.2
 
 # Kick đối phương sau khi hết ván (giống nguyen1..nguyen6):
 #   "when_lose" - bot THUA thì kick người thắng (đúng hành vi nguyen1..6, mặc định)
@@ -69,7 +69,7 @@ MIN_MOVE_SECONDS = 2.0
 KICK_MODE = "when_lose"
 KICK_DELAY = 5.0
 
-BOT_BET_XU = 1000
+BOT_BET_XU = 50000
 BOT_USE_CREATE_TABLE = True
 BOT_MATCH_DURATION = '10'
 BOT_TURN_DURATION = '60'
