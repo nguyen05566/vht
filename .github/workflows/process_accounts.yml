@@ -32,9 +32,9 @@ on:
         required: false
         default: 'nguyenpy1'
       dest_pass:
-        description: 'Mật khẩu tk nhận cấp 1. Rỗng = dùng default trong code (nhat123456)'
+        description: 'Mật khẩu tk nhận cấp 1. RỖNG = dùng cùng pwd (MK chung). Gán nếu nguyenpy1 có MK khác'
         required: false
-        default: 'nhat123456'
+        default: ''
       dest2_id:
         description: 'PlayerId nhận x cấp 2 (chuyển tiếp từ cấp 1). Rỗng hoặc 0 = TẮT chuyển tiếp'
         required: false
@@ -119,7 +119,8 @@ jobs:
       - name: Quay vòng quay + Chuyển toàn bộ x
         run: |
           # Xây dựng cờ chuyển tiếp cấp 2 (luôn bật nếu DEST2_ID != empty và != 0)
-          # Nếu DEST_USER / DEST_PASS rỗng, script sẽ tự dùng DEST_NAME mặc định + --password.
+          # Nếu DEST_USER rỗng -> script dùng DEST_NAME mặc định (nguyenpy1).
+          # Nếu DEST_PASS rỗng -> script dùng --password (MK chung).
           DEST_FLAGS=""
           if [ -n "$DEST2_ID" ] && [ "$DEST2_ID" != "0" ]; then
             DEST_FLAGS="--dest2 $DEST2_ID"
@@ -129,7 +130,10 @@ jobs:
             if [ -n "$DEST_PW" ]; then
               DEST_FLAGS="$DEST_FLAGS --dest-pass \"$DEST_PW\""
             fi
-            echo "🔄 Bật chuyển tiếp cấp 2: tk=[$DEST_USER hoặc mặc định] (id=$DEST_ID) -> id=$DEST2_ID"
+            echo "🔄 Bật chuyển tiếp cấp 2: tk=[$DEST_USER hoặc mặc định nguyenpy1] (id=$DEST_ID) -> id=$DEST2_ID"
+            if [ -z "$DEST_PW" ]; then
+              echo "📌 dest_pass rỗng -> dùng MK chung (--password)"
+            fi
           else
             echo "⏭️  DEST2_ID rỗng -> TẮT chuyển tiếp cấp 2"
           fi

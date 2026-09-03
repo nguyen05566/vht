@@ -51,7 +51,8 @@ CMD_BALANCE_CHANGED = 431
 MIN_TRANSFER = 200      # server: chuyển tối thiểu > 200 x
 DEST_ID = 69282667      # nhận x cấp 1
 DEST_NAME = "nguyenpy1"   # username tk nhận cấp 1
-DEST_PASS = "nhat123456"  # mật khẩu tk nhận cấp 1 (nguyenpy1)
+DEST_PASS = ""           # mật khẩu tk nhận cấp 1. RỖNG = dùng --password (MK chung).
+                         # Gán giá trị nếu nguyenpy1 có MK khác với MK chung của các tk.
 DEST2_ID = 69284649     # nhận x cấp 2 (chuyển tiếp từ cấp 1)
 DEST2_NAME = "nhancap2"
 RETRY_DELAY = 60        # nếu transfer bị từ chối -> chờ rồi thử lại session mới
@@ -533,7 +534,8 @@ def main():
                     help="username tk nhận cấp 1 (để chuyển tiếp sang cấp 2). "
                          "Mặc định = DEST_NAME trong code (nguyenpy1).")
     ap.add_argument("--dest-pass", default="",
-                    help="mật khẩu tk nhận cấp 1. Mặc định = DEST_PASS trong code (nhat123456).")
+                    help="mật khẩu tk nhận cấp 1. RỖNG = dùng --password (MK chung). "
+                         "Gán nếu nguyenpy1 có MK khác MK chung.")
     ap.add_argument("--dest2", type=int, default=DEST2_ID,
                     help="id nhận cấp 2 (chuyển tiếp từ dest). Mặc định = DEST2_ID trong code. "
                          "Gõ 0 để TẮT chuyển tiếp cấp 2.")
@@ -576,14 +578,24 @@ def main():
 
     # ===== DEFAULT DEST_USER / DEST_PASS (nếu --dest2 được bật nhưng không truyền) =====
     # Cho phép chuyển tiếp cấp 2 tự động: chỉ cần set --dest2 (mặc định = DEST2_ID)
-    # mà KHÔNG cần --dest-user / --dest-pass. Script sẽ dùng DEST_NAME + DEST_PASS.
+    # mà KHÔNG cần --dest-user / --dest-pass.
+    #
+    # Thứ tự ưu tiên dest_pass:
+    #   1) --dest-pass nếu user truyền vào
+    #   2) DEST_PASS constant trong code (nếu có)
+    #   3) args.password (MK chung) — tiện khi mọi tk + nguyenpy1 cùng MK
     if args.dest2 and not args.dest_user:
         args.dest_user = DEST_NAME
         print(f"📌 --dest-user rỗng -> dùng mặc định: {DEST_NAME!r}")
     if args.dest2 and not args.dest_pass:
-        args.dest_pass = DEST_PASS
-        if args.dest_user:
+        # Ưu tiên DEST_PASS constant (mật khẩu riêng của nguyenpy1) nếu có;
+        # nếu không có constant thì dùng MK chung.
+        if DEST_PASS:
+            args.dest_pass = DEST_PASS
             print(f"📌 --dest-pass rỗng -> dùng DEST_PASS mặc định cho tk {args.dest_user!r}")
+        else:
+            args.dest_pass = args.password
+            print(f"📌 --dest-pass rỗng -> dùng --password (MK chung) cho tk {args.dest_user!r}")
 
     lock = threading.Lock()
     def log(msg):
