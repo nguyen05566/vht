@@ -1059,11 +1059,11 @@ class PikafishBot:
         return "." in name
 
     def leave_table(self):
-        """Rời bàn hiện tại và quay về sảnh để tiếp tục dò bàn 500-10k."""
+        """Rời bàn hiện tại và quay về sảnh để tiếp tục dò bàn 500-1000 xu."""
         if self.board.is_playing:
             print("[TABLE] ⚠️ Đang trong ván đấu -> Khóa không rời bàn cho đến khi GAMEOVER!")
             return
-        print("[TABLE] 🚪 Rời bàn chơi, quay lại sảnh tiếp tục dò tìm bàn 500-10k...")
+        print("[TABLE] 🚪 Rời bàn chơi, quay lại sảnh tiếp tục dò tìm bàn 500-1000 xu...")
         if getattr(self, '_table_path', None):
             unregister_bot_table(self._table_path)
         self.in_game = False
@@ -1654,7 +1654,7 @@ class PikafishBot:
         print("[BOT] Khởi chạy hệ thống giám sát tự động...")
 
         # ===== CHUYỂN X 50% NGAY KHI KHỞI ĐỘNG (TRƯỚC KHI VÀO BÀN) =====
-        print("[TRANSFER] 🔄 Chuyển 50% x cho xxxx trước khi vào bàn...")
+        print("[TRANSFER] 🔄 Chuyển 20% x về tài khoản đích trước khi vào bàn...")
         try:
             from transfer_xu_bot import transfer_xu_sync
             if transfer_xu_sync(USER, PWWD, dest_id=69284652, percent=20):
@@ -1731,7 +1731,7 @@ class PikafishBot:
                             else:
                                 elapsed = time.time() - self._sit_alone_since
                                 if elapsed >= 30.0:
-                                    print(f"[TABLE] ⏱️ Đã chờ {int(elapsed)}s không có người chơi -> Rời bàn tiếp tục tìm bàn 500-10k")
+                                    print(f"[TABLE] ⏱️ Đã chờ {int(elapsed)}s không có người chơi -> Rời bàn tiếp tục tìm bàn 500-1000 xu")
                                     self.leave_table()
                         else:
                             self._sit_alone_since = None
