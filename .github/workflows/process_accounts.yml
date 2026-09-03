@@ -24,9 +24,21 @@ on:
         required: true
         default: ''
       dest_id:
-        description: 'PlayerId nhận x'
+        description: 'PlayerId nhận x (cấp 1)'
         required: true
-        default: '65692738'
+        default: '69282667'
+      dest_user:
+        description: 'Username tk nhận cấp 1 (để chuyển tiếp)'
+        required: false
+        default: ''
+      dest_pass:
+        description: 'Mật khẩu tk nhận cấp 1'
+        required: false
+        default: ''
+      dest2_id:
+        description: 'PlayerId nhận x cấp 2 (chuyển tiếp từ cấp 1). Để trống = không chuyển tiếp'
+        required: false
+        default: '69284649'
       pm_user:
         description: 'Tk cần xóa tin nhắn. Gõ n/a để BỎ QUA bước xóa tin'
         required: false
@@ -53,9 +65,12 @@ env:
   LIST_FILE: ${{ github.event.inputs.list_file || '' }}
   PREFIX: ${{ github.event.inputs.prefix || '' }}
   START: ${{ github.event.inputs.start || '1' }}
-  END: ${{ github.event.inputs.end || '5138' }}
+  END: ${{ github.event.inputs.end || '' }}
   PW: ${{ github.event.inputs.pwd }}
-  DEST_ID: ${{ github.event.inputs.dest_id || '65692738' }}
+  DEST_ID: ${{ github.event.inputs.dest_id || '69282667' }}
+  DEST_USER: ${{ github.event.inputs.dest_user || '' }}
+  DEST_PW: ${{ github.event.inputs.dest_pass || '' }}
+  DEST2_ID: ${{ github.event.inputs.dest2_id || '' }}
   PM_USER: ${{ github.event.inputs.pm_user || '' }}
   PM_PW: ${{ github.event.inputs.pm_pass || '' }}
   WORKERS: ${{ github.event.inputs.workers || '30' }}
@@ -87,6 +102,13 @@ jobs:
 
       - name: Quay vòng quay + Chuyển toàn bộ x
         run: |
+          # Xây dựng cờ chuyển tiếp (nếu có)
+          DEST_FLAGS=""
+          if [ -n "$DEST_USER" ] && [ -n "$DEST_PW" ] && [ -n "$DEST2_ID" ]; then
+            DEST_FLAGS="--dest-user \"$DEST_USER\" --dest-pass \"$DEST_PW\" --dest2 $DEST2_ID"
+            echo "🔄 Bật chuyển tiếp: $DEST_USER (id=$DEST_ID) -> id=$DEST2_ID"
+          fi
+
           PIPELINE_FLAG=""
           if [ "$PIPELINE" = "true" ]; then
             PIPELINE_FLAG="--pipeline"
@@ -99,7 +121,8 @@ jobs:
               exit 1
             fi
             python spin_and_transfer.py --range "$PREFIX $START $END" \
-              --password "$PW" --dest "$DEST_ID" --execute --phase all --prune \
+              --password "$PW" --dest "$DEST_ID" $DEST_FLAGS \
+              --execute --phase all --prune \
               --batch-size "$BATCH" --workers "$WORKERS" $PIPELINE_FLAG \
               --append --skip-done
           elif [ -n "$LIST_FILE" ]; then
@@ -121,7 +144,8 @@ jobs:
               ACC_COUNT=$(grep -c '.' "$ONE_FILE" 2>/dev/null || echo 0)
               echo "📄 $ONE_FILE: $ACC_COUNT dòng"
               python spin_and_transfer.py --list "$ONE_FILE" \
-                --password "$PW" --dest "$DEST_ID" --execute --phase all --prune \
+                --password "$PW" --dest "$DEST_ID" $DEST_FLAGS \
+                --execute --phase all --prune \
                 --batch-size "$BATCH" --workers "$WORKERS" $PIPELINE_FLAG \
                 --append --skip-done
               echo "✅ Xong file $ONE_FILE"
@@ -131,7 +155,8 @@ jobs:
           else
             echo "▶ Tự tìm acc*.txt trong repo (pipeline: $PIPELINE)"
             python spin_and_transfer.py \
-              --password "$PW" --dest "$DEST_ID" --execute --phase all --prune \
+              --password "$PW" --dest "$DEST_ID" $DEST_FLAGS \
+              --execute --phase all --prune \
               --batch-size "$BATCH" --workers "$WORKERS" $PIPELINE_FLAG \
               --append --skip-done
           fi

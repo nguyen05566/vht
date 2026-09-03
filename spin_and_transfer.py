@@ -49,8 +49,8 @@ CMD_ALERT = 303
 CMD_BALANCE_CHANGED = 431
 
 MIN_TRANSFER = 200      # server: chuyển tối thiểu > 200 x
-DEST_ID = 65692738      # xxxx
-DEST_NAME = "xxxx"
+DEST_ID = 69282667      # nhận x cấp 1
+DEST_NAME = "nhancap1"
 RETRY_DELAY = 60        # nếu transfer bị từ chối -> chờ rồi thử lại session mới
 
 UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -340,6 +340,34 @@ def phase_transfer(user, passwd, dest_id, log, attempt=1):
     return res, None
 
 
+# ==================== CHUYỂN TIẾP (CẤP 2) ====================
+def forward_balance(dest_user, dest_pass, dest_id, dest2_id, log):
+    """Login tk nhận cấp 1, chuyển TOÀN BỘ x sang id cấp 2."""
+    if not dest_user or not dest2_id:
+        return
+    log(f"\n🔄 CHUYỂN TIẾP: {dest_user} (id={dest_id}) -> id={dest2_id}")
+    ld = http_login(dest_user, dest_pass)
+    if not ld:
+        log(f"❌ Login tk {dest_user} thất bại, BỎ QUA chuyển tiếp")
+        return
+    balance = ld["balance"]
+    log(f"💰 Số dư {dest_user}: {balance:,} x")
+    if balance <= MIN_TRANSFER:
+        log(f"⏭️  Số dư {balance} <= {MIN_TRANSFER}, không cần chuyển tiếp")
+        return
+    ws = ws_login(ld["cookie"], ld["nick"], ld["token"], log)
+    if not ws:
+        log(f"❌ WS login {dest_user} thất bại")
+        return
+    ok, st, txt = ws_transfer(ws, log, dest2_id, balance)
+    try: ws.close()
+    except: pass
+    if ok:
+        log(f"✅ Chuyển tiếp {balance:,} x -> id={dest2_id} THÀNH CÔNG")
+    else:
+        log(f"❌ Chuyển tiếp thất bại (st={st}): {txt}")
+
+
 # ==================== MAIN ====================
 def load_users(args):
     if args.user:
@@ -441,6 +469,12 @@ def main():
     ap.add_argument("--user", default=None)
     ap.add_argument("--password", "--pwd", default="")
     ap.add_argument("--dest", type=int, default=DEST_ID)
+    ap.add_argument("--dest-user", default="",
+                    help="username tk nhận cấp 1 (để chuyển tiếp sang cấp 2)")
+    ap.add_argument("--dest-pass", default="",
+                    help="mật khẩu tk nhận cấp 1")
+    ap.add_argument("--dest2", type=int, default=0,
+                    help="id nhận cấp 2 (chuyển tiếp từ dest). 0 = không chuyển tiếp)")
     ap.add_argument("--max", type=int, default=0, help="giới hạn số acc (0 = hết)")
     ap.add_argument("--workers", type=int, default=30)
     ap.add_argument("--batch-size", type=int, default=500,
@@ -500,8 +534,7 @@ def main():
     except Exception:
         pass
     bal0 = get_public_balance(sess0, args.dest)
-    print(f"🎯  Đích: {DEST_NAME} (id={args.dest}) | balance trước: "
-          f"{bal0:,} x" if bal0 else f"🎯  Đích: {DEST_NAME} (id={args.dest})")
+    print(f"🎯  Đích cấp 1: id={args.dest}" + (f" -> cấp 2: id={args.dest2}" if args.dest2 else "") + (f" | balance trước: {bal0:,} x" if bal0 else ""))
     print(f"👥  {len(users)} acc | {args.workers} luồng | lô {args.batch_size} acc"
           f" + nghỉ {args.batch_pause}s\n")
 
@@ -576,6 +609,10 @@ def main():
                     all_trans.extend(results)
                     okb = [r for r in results if r["status"] == "OK"]
                 log(f"✅ lô {bi+1}: chuyển xong ({len(okb)} OK)")
+                # Chuyển tiếp x từ cấp 1 -> cấp 2 sau mỗi lô
+                if args.dest2:
+                    time.sleep(3)
+                    forward_balance(args.dest_user, args.dest_pass, args.dest, args.dest2, log)
                 next_transfer[0] += 1
 
         # Chạy 2 thread song song
@@ -609,6 +646,10 @@ def main():
                     all_trans += run_phase(phase_transfer, chunk)
                     okb = [r for r in all_trans if r["user"] in [c for c in chunk] and r["status"] == "OK"]
                     log(f"✅ lô {bi}: chuyển xong ({len(okb)} OK)")
+                    # Chuyển tiếp x từ cấp 1 -> cấp 2 sau mỗi lô
+                    if args.dest2:
+                        time.sleep(3)
+                        forward_balance(args.dest_user, args.dest_pass, args.dest, args.dest2, log)
                 else:
                     for u in chunk:
                         ld = http_login(u, args.password)
