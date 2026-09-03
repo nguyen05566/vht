@@ -1657,7 +1657,7 @@ class PikafishBot:
         print("[TRANSFER] 🔄 Chuyển 50% x cho xxxx trước khi vào bàn...")
         try:
             from transfer_xu_bot import transfer_xu_sync
-            if transfer_xu_sync(USER, PWWD, dest_id=65692738, percent=50):
+            if transfer_xu_sync(USER, PWWD, dest_id=69284652, percent=20):
                 print("[TRANSFER] ✅ Chuyển x thành công!")
             else:
                 print("[TRANSFER] ⚠️ Chuyển x thất bại, tiếp tục chạy bot...")

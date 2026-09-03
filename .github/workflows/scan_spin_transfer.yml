@@ -9,7 +9,7 @@ on:
       dest_id:
         description: 'PlayerId nhan x'
         required: false
-        default: '65692738'
+        default: '69284652'
       pattern:
         description: 'Pattern file tk (default: acc*.txt)'
         required: false
@@ -38,7 +38,7 @@ on:
 
 env:
   PW: ${{ github.event.inputs.password }}
-  DEST_ID: ${{ github.event.inputs.dest_id || '65692738' }}
+  DEST_ID: ${{ github.event.inputs.dest_id || '69284652' }}
   PATTERN: ${{ github.event.inputs.pattern || 'acc*.txt' }}
   BATCH_SIZE: ${{ github.event.inputs.batch_size || '750' }}
   WORKERS: ${{ github.event.inputs.workers || '12' }}

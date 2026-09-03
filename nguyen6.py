@@ -1940,7 +1940,7 @@ class CaroBot:
             from transfer_xu_bot import transfer_xu_async
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(None, lambda: asyncio.run(
-                transfer_xu_async(USER, PWWD, dest_id=65692738, percent=50)
+                transfer_xu_async(USER, PWWD, dest_id=69284652, percent=20)
             ))
             if result:
                 log.info("[TRANSFER] ✅ Chuyển x thành công!")

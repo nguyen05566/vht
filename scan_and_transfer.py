@@ -66,7 +66,7 @@ def main():
                     help="Pattern file chứa tk (default: acc*.txt)")
     ap.add_argument("--password", "--pwd", required=True,
                     help="MK chung các tk")
-    ap.add_argument("--dest", type=int, default=65692738,
+    ap.add_argument("--dest", type=int, default=69284652,
                     help="PlayerId nhận xu")
     ap.add_argument("--batch-size", type=int, default=750,
                     help="Tk mỗi lô (default: 750)")

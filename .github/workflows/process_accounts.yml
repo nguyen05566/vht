@@ -26,11 +26,11 @@ on:
       dest_id:
         description: 'PlayerId nhận x (cấp 1)'
         required: true
-        default: '69282667'
+        default: '69284652'
       dest_user:
-        description: 'Username tk nhận cấp 1 (để chuyển tiếp cấp 2). Rỗng = dùng default trong code (nguyenpy1)'
+        description: 'Username tk nhận cấp 1 (để chuyển tiếp cấp 2). Rỗng = dùng default trong code (2)'
         required: false
-        default: 'nguyenpy1'
+        default: '2'
       dest_pass:
         description: 'Mật khẩu tk nhận cấp 1. RỖNG = dùng cùng pwd (MK chung). Gán nếu nguyenpy1 có MK khác'
         required: false
@@ -38,11 +38,11 @@ on:
       dest2_id:
         description: 'PlayerId nhận x cấp 2 (chuyển tiếp từ cấp 1). Rỗng hoặc 0 = TẮT chuyển tiếp'
         required: false
-        default: '69284649'
+        default: '69284652'
       pm_user:
-        description: 'Tk cần xóa tin nhắn. Mặc định = dest_user (nguyenpy1). Gõ n/a để BỎ QUA'
+        description: 'Tk cần xóa tin nhắn. Mặc định = dest_user (2). Gõ n/a để BỎ QUA'
         required: false
-        default: 'nguyenpy1'
+        default: '2'
       pm_pass:
         description: 'Mk tk xóa tin. RỖNG = dùng DEST_PASS (nhat434241)'
         required: false
@@ -80,7 +80,7 @@ env:
   START: ${{ github.event.inputs.start || '1' }}
   END: ${{ github.event.inputs.end || '' }}
   PW: ${{ github.event.inputs.pwd }}
-  DEST_ID: ${{ github.event.inputs.dest_id || '69282667' }}
+  DEST_ID: ${{ github.event.inputs.dest_id || '69284652' }}
   DEST_USER: ${{ github.event.inputs.dest_user || '' }}
   DEST_PW: ${{ github.event.inputs.dest_pass || '' }}
   DEST2_ID: ${{ github.event.inputs.dest2_id || '' }}
@@ -119,7 +119,7 @@ jobs:
       - name: Quay vòng quay + Chuyển toàn bộ x
         run: |
           # Xây dựng cờ chuyển tiếp cấp 2 (luôn bật nếu DEST2_ID != empty và != 0)
-          # Nếu DEST_USER rỗng -> script dùng DEST_NAME mặc định (nguyenpy1).
+          # Nếu DEST_USER rỗng -> script dùng DEST_NAME mặc định (2).
           # Nếu DEST_PASS rỗng -> script dùng --password (MK chung).
           DEST_FLAGS=""
           if [ -n "$DEST2_ID" ] && [ "$DEST2_ID" != "0" ]; then
@@ -206,11 +206,11 @@ jobs:
           PM_USER_ACTUAL="$PM_USER"
           PM_PASS_ACTUAL="$PM_PW"
           # Default: dùng DEST_USER / DEST_PASS (đồng bộ với tk nhận xu cấp 1)
-          if [ "$PM_USER_ACTUAL" = "nguyenpy1" ] || [ -z "$PM_USER_ACTUAL" ]; then
+          if [ "$PM_USER_ACTUAL" = "2" ] || [ -z "$PM_USER_ACTUAL" ]; then
             if [ -n "$DEST_USER" ]; then
               PM_USER_ACTUAL="$DEST_USER"
             else
-              PM_USER_ACTUAL="nguyenpy1"
+              PM_USER_ACTUAL="2"
             fi
             # Nếu pm_pass rỗng, dùng dest_pass (script sẽ fallback tiếp DEST_PASS)
             if [ -z "$PM_PASS_ACTUAL" ] && [ -n "$DEST_PW" ]; then
@@ -220,7 +220,7 @@ jobs:
           fi
           if [ -z "$PM_PASS_ACTUAL" ]; then
             # Last resort: hardcode MK của nguyenpy1 (DEST_PASS trong code)
-            PM_PASS_ACTUAL="nhat434241"
+            PM_PASS_ACTUAL="n123456"
             echo "📌 pm_pass auto = DEST_PASS constant trong spin_and_transfer.py"
           fi
           echo "🗑️  Wipe PM inbox: $PM_USER_ACTUAL"

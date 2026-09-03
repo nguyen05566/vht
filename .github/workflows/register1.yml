@@ -17,7 +17,7 @@ on:
       dest_id:
         description: 'PlayerId nhận x (để trống = bỏ qua chuyển x)'
         required: false
-        default: '65692738'
+        default: '69284652'
       skip_spin:
         description: 'Bỏ qua quay số?'
         required: false
@@ -46,7 +46,7 @@ env:
   REGISTER_COUNT: ${{ github.event.inputs.count || '3000' }}
   REGISTER_PW: ${{ github.event.inputs.pwd }}
   REGISTER_LEDGER_PATH: acc1.txt
-  DEST_ID: ${{ github.event.inputs.dest_id || '65692738' }}
+  DEST_ID: ${{ github.event.inputs.dest_id || '69284652' }}
   PW: ${{ github.event.inputs.pwd }}
   PM_USER: ${{ github.event.inputs.pm_user || '' }}
   PM_PW: ${{ github.event.inputs.pm_pass || '' }}
