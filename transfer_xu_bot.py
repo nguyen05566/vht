@@ -21,6 +21,8 @@ CMD_NAMES = {
 WS_URL = "wss://gamevh.net/ws/gameServer"
 LOGIN_URL = "https://gamevh.net/login.jsp"
 GAME_URL = "https://gamevh.net/play/xiangqi/0"
+PROFILE_URL = "https://gamevh.net/com/ftl/game/profile/player_profile.jsp"
+MIN_TRANSFER = 200  # server: chuyển tối thiểu > 200 x
 
 
 # ==================== PACK HELPERS ====================
@@ -113,8 +115,21 @@ def parse_message(data):
 
 
 # ==================== HTTP LOGIN ====================
+def get_balance(session):
+    """Lấy số dư từ trang profile."""
+    try:
+        prof = session.get(PROFILE_URL, timeout=15)
+        m = re.search(r'(?is)<div\s+class=["\'][^"\']*chipBalance[^"\']*["\'][^>]*>(.*?)</div>',
+                      prof.text)
+        if m:
+            return int(re.sub(r"[^\d]", "", m.group(1)) or 0)
+    except Exception as e:
+        print(f"[TRANSFER] get_balance error: {e}")
+    return 0
+
+
 def http_login(user, passwd):
-    """Đăng nhập HTTP, trả về dict với cookie, nick, token hoặc None."""
+    """Đăng nhập HTTP, trả về dict với cookie, nick, token, balance hoặc None."""
     try:
         session = requests.Session()
         ua = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -144,10 +159,13 @@ def http_login(user, passwd):
         if not token_m or not nick_m:
             return None
 
+        balance = get_balance(session)
+
         return {
             "cookie": "; ".join(f"{k}={v}" for k, v in session.cookies.items()),
             "nick": nick_m.group(1),
             "token": int(token_m.group(1)),
+            "balance": balance,
         }
     except Exception as e:
         print(f"[TRANSFER] HTTP login error: {e}")
@@ -201,37 +219,9 @@ def ws_login(cookie, nick, token):
         return None
 
 
-def ws_get_balance(ws, timeout=10):
-    """Lấy số dư hiện tại từ ENTER_STATE hoặc CONFIG."""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            raw = ws.recv()
-            if not raw:
-                continue
-            name, rd = parse_message(raw)
-            if name == "PING":
-                ws.send_binary(pack_cmd("PONG"))
-                continue
-            if name == "ENTER_STATE":
-                # ENTER_STATE có balance ở đâu đó
-                try:
-                    rd.read_byte()  # status
-                    balance = rd.read_long()
-                    return balance
-                except:
-                    pass
-            if name == "CONFIG":
-                # CONFIG cũng có thể có balance
-                pass
-        except:
-            break
-    return None
-
-
 def ws_transfer(ws, dest_id, amount, timeout=12):
     """Gửi TRANSFER. Trả (ok, status, text)."""
-    ws.send_binary(pack_cmd("TRANSFER", pack_long(dest_id) + pack_long(amount)))
+    ws.send_binary(pack_cmd(317, pack_long(dest_id) + pack_long(amount)))
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -244,7 +234,7 @@ def ws_transfer(ws, dest_id, amount, timeout=12):
                 continue
             if name == "BALANCE_CHANGED":
                 return True, 0, "BALANCE_CHANGED"
-            if name == "TRANSFER":
+            if name == "TRANSFER" or name == "317":
                 st = rd.read_byte()
                 txt = rd.read_string() if rd.rem() > 0 else ""
                 return st == 0, st, txt
@@ -265,50 +255,39 @@ def transfer_xu_sync(user, passwd, dest_id=69284652, percent=20):
     """
     print(f"[TRANSFER] 🔄 {user}: Chuyển {percent}% xu về ID {dest_id}...")
 
-    # Bước 1: HTTP login
+    # Bước 1: HTTP login + lấy balance
     ld = http_login(user, passwd)
     if not ld:
         print(f"[TRANSFER] ❌ {user}: Đăng nhập HTTP thất bại")
         return False
 
-    print(f"[TRANSFER] ✅ {user}: Login OK, nick={ld['nick']}")
+    balance = ld["balance"]
+    print(f"[TRANSFER] ✅ {user}: Login OK, nick={ld['nick']}, balance={balance:,}")
 
-    # Bước 2: WS login
+    if balance <= MIN_TRANSFER:
+        print(f"[TRANSFER] ⏭️ {user}: Số dư {balance:,} <= {MIN_TRANSFER}, bỏ qua")
+        return True
+
+    # Bước 2: Tính lượng cần chuyển
+    transfer_amount = int(balance * percent / 100)
+    if transfer_amount < MIN_TRANSFER:
+        print(f"[TRANSFER] ⏭️ {user}: Lượng chuyển {transfer_amount:,} < {MIN_TRANSFER}, bỏ qua")
+        return True
+
+    # Bước 3: WS login
     ws = ws_login(ld["cookie"], ld["nick"], ld["token"])
     if not ws:
         print(f"[TRANSFER] ❌ {user}: Đăng nhập WS thất bại")
         return False
 
     print(f"[TRANSFER] ✅ {user}: WS connected")
+    print(f"[TRANSFER] 💰 {user}: Chuyển {transfer_amount:,} xu ({percent}% của {balance:,})")
 
     try:
-        # Bước 3: Lấy số dư
-        balance = ws_get_balance(ws, timeout=5)
-        if balance is None:
-            # Thử đoán balance từ cách khác - transfer 1 lượng nhỏ để test
-            print(f"[TRANSFER] ⚠️ {user}: Không lấy được số dư, thử transfer 1000x để test")
-            # Không transfer nếu không biết balance
-            ws.close()
-            return False
-
-        if balance <= 1000:
-            print(f"[TRANSFER] ⏭️ {user}: Số dư {balance} <= 1000, bỏ qua")
-            ws.close()
-            return True
-
-        # Bước 4: Tính lượng cần chuyển
-        transfer_amount = int(balance * percent / 100)
-        if transfer_amount < 100:
-            print(f"[TRANSFER] ⏭️ {user}: Lượng chuyển {transfer_amount} < 100, bỏ qua")
-            ws.close()
-            return True
-
-        print(f"[TRANSFER] 💰 {user}: Balance={balance}, chuyển {transfer_amount} ({percent}%)")
-
-        # Bước 5: Thực hiện transfer
+        # Bước 4: Thực hiện transfer
         ok, status, txt = ws_transfer(ws, dest_id, transfer_amount)
         if ok:
-            print(f"[TRANSFER] ✅ {user}: Chuyển {transfer_amount:,} xu thành công!")
+            print(f"[TRANSFER] ✅✅✅ {user}: CHUYỂN {transfer_amount:,} XU VỀ ID {dest_id} THÀNH CÔNG!")
             return True
         else:
             print(f"[TRANSFER] ❌ {user}: Transfer fail (status={status}): {txt}")
