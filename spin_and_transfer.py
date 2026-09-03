@@ -51,8 +51,8 @@ CMD_BALANCE_CHANGED = 431
 MIN_TRANSFER = 200      # server: chuyển tối thiểu > 200 x
 DEST_ID = 69282667      # nhận x cấp 1
 DEST_NAME = "nguyenpy1"   # username tk nhận cấp 1
-DEST_PASS = ""           # mật khẩu tk nhận cấp 1. RỖNG = dùng --password (MK chung).
-                         # Gán giá trị nếu nguyenpy1 có MK khác với MK chung của các tk.
+DEST_PASS = "nhat434241"  # mật khẩu riêng của nguyenpy1 (KHÁC MK chung nhat123456)
+                         # Để rỗng nếu nguyenpy1 cùng MK với các tk acc*.txt
 DEST2_ID = 69284649     # nhận x cấp 2 (chuyển tiếp từ cấp 1)
 DEST2_NAME = "nhancap2"
 RETRY_DELAY = 60        # nếu transfer bị từ chối -> chờ rồi thử lại session mới
