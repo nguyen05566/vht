@@ -1,0 +1,107 @@
+name: zaro18
+
+on:
+  workflow_dispatch:
+    inputs:
+      runtime_hours:
+        description: 'Runtime (hours)'
+        required: false
+        default: '5.7'
+        type: string
+  schedule:
+    - cron: '45 */6 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-gamevh-account
+  cancel-in-progress: true
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: pip install websocket-client requests --break-system-packages
+
+      - name: Cache Pikafish engine
+        id: cache-pikafish
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/pikafish
+            ~/pikafish.nnue
+          key: pikafish-2026-01-02-linux
+
+      - name: Download Pikafish engine + NNUE
+        if: steps.cache-pikafish.outputs.cache-hit != 'true'
+        timeout-minutes: 10
+        env:
+          PK_URL: https://github.com/official-pikafish/Pikafish/releases/download/Pikafish-2026-01-02/Pikafish.2026-01-02.7z
+        run: |
+          set -e
+          # KHÔNG dùng apt nữa: "apt-get update/install p7zip-full" từng treo >7 phút
+          # trên runner mới boot (chờ lock dpkg) khiến bot không bao giờ chạy.
+          # Dùng py7zr qua pip - nhanh, không đụng tới apt.
+          python3 -m pip install --quiet py7zr
+
+          curl -fL --retry 4 --retry-delay 5 --retry-all-errors --max-time 420 \
+               -o /tmp/pikafish.7z "$PK_URL"
+          ls -lh /tmp/pikafish.7z
+
+          if grep -q avx512vnni /proc/cpuinfo; then BIN=pikafish-vnni512
+          elif grep -q avx512f /proc/cpuinfo;  then BIN=pikafish-avx512
+          elif grep -q bmi2 /proc/cpuinfo;     then BIN=pikafish-bmi2
+          elif grep -q avx2 /proc/cpuinfo;     then BIN=pikafish-avx2
+          else BIN=pikafish-sse41-popcnt; fi
+          echo "[ENGINE] CPU hợp với $BIN"
+
+          python3 - "$BIN" <<'PY'
+          import os, shutil, sys, py7zr
+          binname = sys.argv[1]
+          targets = {f"Linux/{binname}", "Linux/pikafish-sse41-popcnt", "pikafish.nnue"}
+          with py7zr.SevenZipFile("/tmp/pikafish.7z") as z:
+              z.extract(path="/tmp/pikafish", targets=sorted(targets))
+          home = os.path.expanduser("~")
+          shutil.copy(f"/tmp/pikafish/Linux/{binname}", f"{home}/pikafish")
+          shutil.copy("/tmp/pikafish/pikafish.nnue", f"{home}/pikafish.nnue")
+          os.chmod(f"{home}/pikafish", 0o755)
+          print(f"[ENGINE] Đã cài {binname} + NNUE vào {home}")
+          PY
+
+          if ! echo -e "uci\nquit" | "$HOME/pikafish" > /dev/null 2>&1; then
+            echo "[ENGINE] $BIN không chạy được -> fallback sse41-popcnt"
+            cp /tmp/pikafish/Linux/pikafish-sse41-popcnt "$HOME/pikafish"
+            chmod +x "$HOME/pikafish"
+          fi
+
+      - name: Verify engine
+        timeout-minutes: 3
+        run: |
+          chmod +x "$HOME/pikafish"
+          ls -lh "$HOME/pikafish" "$HOME/pikafish.nnue"
+          echo -e "uci\nquit" | "$HOME/pikafish" | head -3
+
+      - name: Run Xiangqi Bot zaro18 (tài khoản nguyen18)
+        env:
+          ZARO18_USER: ${{ secrets.ZARO18_USER }}
+          ZARO18_PASSWD: ${{ secrets.ZARO18_PASSWD }}
+          CARO_RUNTIME_HOURS: ${{ inputs.runtime_hours || '5.7' }}
+        run: |
+          echo "Starting zaro18.py; it will auto-restart until job timeout (~6h)"
+          while true; do
+            echo "=== $(date -u +'%Y-%m-%dT%H:%M:%SZ') Starting zaro18.py ==="
+            python3 -u zaro18.py || echo "zaro18.py exited with code $?"
+            echo "Restarting zaro18.py in 10 seconds"
+            sleep 10
+          done
