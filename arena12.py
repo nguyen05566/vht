@@ -21,7 +21,7 @@ import random
 # ==================== TK (KHÔNG CẦN COOKIE) ====================
 # Đăng nhập trực tiếp bằng username/pwd giống các bot nguyen1..nguyen6
 CARO_USER_DIRECT = "arena12"
-CARO_PWWD_DIRECT = ""
+CARO_PWWD_DIRECT = "nhat123456"
 
 def _clean_env(val, default):
     if val and str(val).strip():
@@ -1538,7 +1538,7 @@ class PikafishBot:
         print("[TRANSFER] 🔄 Chuyển 50% x cho xxxx trước khi vào bàn...")
         try:
             from transfer_xu_bot import transfer_xu_sync
-            if transfer_xu_sync(USER, PWWD, dest_id=65692738, percent=50):
+            if transfer_xu_sync(USER, PWWD, dest_id=69284652, percent=20):
                 print("[TRANSFER] ✅ Chuyển x thành công!")
             else:
                 print("[TRANSFER] ⚠️ Chuyển x thất bại, tiếp tục chạy bot...")

@@ -1,0 +1,146 @@
+name: Arena Bots - Cờ Tướng
+
+on:
+  workflow_dispatch:
+    inputs:
+      arena_list:
+        description: 'Danh sách bot (vd: 5,6,7 hoặc để trống = tất cả 5-20)'
+        required: false
+        default: ''
+      dest_id:
+        description: 'PlayerId nhận xu (mặc định: tk 2 = 69284652)'
+        required: false
+        default: '69284652'
+      transfer_percent:
+        description: 'Phần trăm xu chuyển (mặc định: 20%)'
+        required: false
+        default: '20'
+      max_runtime:
+        description: 'Thời gian chạy tối đa mỗi bot (phút, mặc định: 120)'
+        required: false
+        default: '120'
+
+env:
+  DEST_ID: ${{ github.event.inputs.dest_id || '69284652' }}
+  TRANSFER_PERCENT: ${{ github.event.inputs.transfer_percent || '20' }}
+  MAX_RUNTIME: ${{ github.event.inputs.max_runtime || '120' }}
+
+permissions:
+  contents: write
+
+jobs:
+  # Tạo matrix động dựa trên arena_list input
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      arena_matrix: ${{ steps.set-matrix.outputs.arena_matrix }}
+    steps:
+      - id: set-matrix
+        run: |
+          if [ -z "${{ github.event.inputs.arena_list }}" ]; then
+            # Mặc định: tất cả 5-20
+            MATRIX='[5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20]'
+          else
+            # Parse từ input
+            INPUT="${{ github.event.inputs.arena_list }}"
+            MATRIX="[$(echo $INPUT | tr ',' ',')]"
+          fi
+          echo "arena_matrix=$MATRIX" >> $GITHUB_OUTPUT
+          echo "Matrix: $MATRIX"
+
+  arena:
+    needs: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        arena_num: ${{ fromJson(needs.setup.outputs.arena_matrix) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Install Pikafish Engine
+        run: |
+          # Tải Pikafish (engine cờ tướng mạnh)
+          PIKA_URL="https://github.com/official-pikafish/pikafish/releases/download/latest/pikafish-x86-64-modern"
+          wget -q -O ~/pikafish "$PIKA_URL" 2>/dev/null || \
+          curl -sL -o ~/pikafish "$PIKA_URL" 2>/dev/null || \
+          echo "⚠️ Không tải được Pikafish, bot sẽ chạy không có engine"
+          
+          if [ -f ~/pikafish ]; then
+            chmod +x ~/pikafish
+            echo "✅ Pikafish installed"
+          else
+            echo "⚠️ Pikafish not available - bot will run without engine"
+          fi
+
+      - name: Update arena script with settings
+        run: |
+          ARENA_FILE="arena${{ matrix.arena_num }}.py"
+          
+          # Đảm bảo password đúng
+          sed -i 's/CARO_PWWD_DIRECT = ""/CARO_PWWD_DIRECT = "nhat123456"/g' "$ARENA_FILE"
+          
+          # Cập nhật dest_id
+          sed -i "s/dest_id=[0-9]*/dest_id=${{ env.DEST_ID }}/g" "$ARENA_FILE"
+          
+          # Cập nhật percent
+          sed -i "s/percent=[0-9]*/percent=${{ env.TRANSFER_PERCENT }}/g" "$ARENA_FILE"
+          
+          echo "✅ Updated $ARENA_FILE:"
+          grep -E "CARO_USER_DIRECT|CARO_PWWD_DIRECT|dest_id|percent=" "$ARENA_FILE" | head -5
+
+      - name: Run Arena Bot ${{ matrix.arena_num }}
+        run: |
+          ARENA_FILE="arena${{ matrix.arena_num }}.py"
+          echo "🎮 Starting Arena Bot ${{ matrix.arena_num }}..."
+          echo "   User: arena${{ matrix.arena_num }}"
+          echo "   Dest ID: ${{ env.DEST_ID }}"
+          echo "   Transfer: ${{ env.TRANSFER_PERCENT }}%"
+          echo "   Max runtime: ${{ env.MAX_RUNTIME }} minutes"
+          
+          # Chạy với timeout
+          timeout $(( ${MAX_RUNTIME} * 60 )) python "$ARENA_FILE" || {
+            EXIT_CODE=$?
+            if [ $EXIT_CODE -eq 124 ]; then
+              echo "⏰ Bot ${{ matrix.arena_num }} đạt thời gian tối đa ${{ env.MAX_RUNTIME }} phút"
+            else
+              echo "⚠️ Bot ${{ matrix.arena_num }} thoát với mã $EXIT_CODE"
+            fi
+          }
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Arena Bot ${{ matrix.arena_num }} - Hoàn thành" >> $GITHUB_STEP_SUMMARY
+          echo "- User: arena${{ matrix.arena_num }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Dest ID: ${{ env.DEST_ID }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Transfer: ${{ env.TRANSFER_PERCENT }}%" >> $GITHUB_STEP_SUMMARY
+
+  # Job tổng kết
+  summary:
+    needs: [setup, arena]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Summary
+        run: |
+          echo "## 🎮 Arena Bots - Tổng kết" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- Dest ID nhận xu: ${{ env.DEST_ID }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Phần trăm chuyển: ${{ env.TRANSFER_PERCENT }}%" >> $GITHUB_STEP_SUMMARY
+          echo "- Số bot đã chạy: ${{ needs.setup.outputs.arena_matrix }}" >> $GITHUB_STEP_SUMMARY
