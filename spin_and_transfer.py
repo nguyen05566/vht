@@ -51,7 +51,10 @@ CMD_BALANCE_CHANGED = 431
 MIN_TRANSFER = 200      # server: chuyển tối thiểu > 200 x
 DEST_ID = 69282667      # nhận x cấp 1
 DEST_NAME = "nhancap1"
+DEST2_ID = 69284649     # nhận x cấp 2 (chuyển tiếp từ cấp 1)
+DEST2_NAME = "nhancap2"
 RETRY_DELAY = 60        # nếu transfer bị từ chối -> chờ rồi thử lại session mới
+FORWARD_RETRY = 2       # số lần thử lại khi forward_balance thất bại
 
 UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/139.0 Safari/537.36")
@@ -341,31 +344,56 @@ def phase_transfer(user, passwd, dest_id, log, attempt=1):
 
 
 # ==================== CHUYỂN TIẾP (CẤP 2) ====================
-def forward_balance(dest_user, dest_pass, dest_id, dest2_id, log):
-    """Login tk nhận cấp 1, chuyển TOÀN BỘ x sang id cấp 2."""
-    if not dest_user or not dest2_id:
-        return
-    log(f"\n🔄 CHUYỂN TIẾP: {dest_user} (id={dest_id}) -> id={dest2_id}")
+ForwardResult = {"ok": bool, "balance": int, "transferred": int, "note": str}
+
+def forward_balance(dest_user, dest_pass, dest_id, dest2_id, log, attempt=1):
+    """Login tk nhận cấp 1, chuyển TOÀN BỘ x sang id cấp 2.
+
+    Trả dict {ok, balance, transferred, note}.
+    Nếu dest_user rỗng -> dùng DEST_NAME; dest_pass rỗng -> trả lỗi (caller phải tự lấy).
+    """
+    out = {"ok": False, "balance": 0, "transferred": 0, "note": ""}
+    if not dest2_id:
+        out["note"] = "dest2_id=0, bỏ qua"
+        return out
+    if not dest_user:
+        out["note"] = "dest_user rỗng, bỏ qua"
+        return out
+    log(f"\n🔄 CHUYỂN TIẾP (cấp 2): {dest_user} (id={dest_id}) -> id={dest2_id}")
     ld = http_login(dest_user, dest_pass)
     if not ld:
+        out["note"] = f"login tk {dest_user} thất bại"
         log(f"❌ Login tk {dest_user} thất bại, BỎ QUA chuyển tiếp")
-        return
+        return out
     balance = ld["balance"]
+    out["balance"] = balance
     log(f"💰 Số dư {dest_user}: {balance:,} x")
     if balance <= MIN_TRANSFER:
+        out["note"] = f"balance={balance} <= {MIN_TRANSFER}"
         log(f"⏭️  Số dư {balance} <= {MIN_TRANSFER}, không cần chuyển tiếp")
-        return
+        return out
     ws = ws_login(ld["cookie"], ld["nick"], ld["token"], log)
     if not ws:
+        out["note"] = "ws_login thất bại"
         log(f"❌ WS login {dest_user} thất bại")
-        return
+        return out
     ok, st, txt = ws_transfer(ws, log, dest2_id, balance)
     try: ws.close()
     except: pass
     if ok:
+        out["ok"] = True
+        out["transferred"] = balance
+        out["note"] = f"OK: {txt}"
         log(f"✅ Chuyển tiếp {balance:,} x -> id={dest2_id} THÀNH CÔNG")
     else:
+        out["note"] = f"st={st}: {txt}"
         log(f"❌ Chuyển tiếp thất bại (st={st}): {txt}")
+        # thử lại 1 lần trong session mới (giống phase_transfer)
+        if attempt < FORWARD_RETRY:
+            log(f"🔁 chờ {RETRY_DELAY}s rồi thử lại forward lần {attempt+1}...")
+            time.sleep(RETRY_DELAY)
+            return forward_balance(dest_user, dest_pass, dest_id, dest2_id, log, attempt + 1)
+    return out
 
 
 # ==================== MAIN ====================
@@ -470,11 +498,16 @@ def main():
     ap.add_argument("--password", "--pwd", default="")
     ap.add_argument("--dest", type=int, default=DEST_ID)
     ap.add_argument("--dest-user", default="",
-                    help="username tk nhận cấp 1 (để chuyển tiếp sang cấp 2)")
+                    help="username tk nhận cấp 1 (để chuyển tiếp sang cấp 2). "
+                         "Mặc định = DEST_NAME trong code.")
     ap.add_argument("--dest-pass", default="",
-                    help="mật khẩu tk nhận cấp 1")
-    ap.add_argument("--dest2", type=int, default=0,
-                    help="id nhận cấp 2 (chuyển tiếp từ dest). 0 = không chuyển tiếp)")
+                    help="mật khẩu tk nhận cấp 1. Mặc định = --password (MK chung).")
+    ap.add_argument("--dest2", type=int, default=DEST2_ID,
+                    help="id nhận cấp 2 (chuyển tiếp từ dest). Mặc định = DEST2_ID trong code. "
+                         "Gõ 0 để TẮT chuyển tiếp cấp 2.")
+    ap.add_argument("--no-final-forward", action="store_true",
+                    help="không chạy forward_balance lần cuối sau khi xong tất cả lô "
+                         "(mặc định vẫn chạy sau mỗi lô và sau cùng)")
     ap.add_argument("--max", type=int, default=0, help="giới hạn số acc (0 = hết)")
     ap.add_argument("--workers", type=int, default=30)
     ap.add_argument("--batch-size", type=int, default=500,
@@ -500,6 +533,17 @@ def main():
     execute = args.execute and not args.dry_run
     if not execute:
         print("⚠️  CHẾ ĐỘ DRY-RUN. Dùng --execute để quay/chuyển thật!\n")
+
+    # ===== DEFAULT DEST_USER / DEST_PASS (nếu --dest2 được bật nhưng không truyền) =====
+    # Cho phép chuyển tiếp cấp 2 tự động: chỉ cần set --dest2 (mặc định = DEST2_ID)
+    # mà KHÔNG cần --dest-user / --dest-pass. Script sẽ dùng DEST_NAME + --password.
+    if args.dest2 and not args.dest_user:
+        args.dest_user = DEST_NAME
+        print(f"📌 --dest-user rỗng -> dùng mặc định: {DEST_NAME!r}")
+    if args.dest2 and not args.dest_pass:
+        args.dest_pass = args.password
+        if args.dest_user:
+            print(f"📌 --dest-pass rỗng -> dùng --password (MK chung) cho tk {args.dest_user!r}")
 
     lock = threading.Lock()
     def log(msg):
@@ -669,6 +713,19 @@ def main():
                           f"{r['transferred']},{r['ms']},{r['note']}" for r in sorted(all_trans, key=lambda x: x["user"])],
                          args.append)
 
+    # ===== CHUYỂN TIẾP CẤP 2 LẦN CUỐI (sau khi tất cả lô đã chuyển xong) =====
+    # Đảm bảo mọi x dồn về tk cấp 1 đều được chuyển tiếp sang cấp 2,
+    # kể cả khi có lô cuối chưa forward (vd: pipeline tắt, dest2 bật giữa chừng).
+    final_forward = None
+    if execute and args.dest2 and not args.no_final_forward and args.dest_user:
+        log(f"\n{'='*70}\n🔁 CHUYỂN TIẾP CẤP 2 LẦN CUỐI — {args.dest_user} (id={args.dest}) "
+            f"-> id={args.dest2}\n{'='*70}")
+        time.sleep(5)  # chờ server settle các transfer vừa xong
+        final_forward = forward_balance(args.dest_user, args.dest_pass,
+                                         args.dest, args.dest2, log)
+    elif execute and args.dest2 and not args.dest_user:
+        log("⚠️  Bỏ qua forward cuối: --dest-user rỗng và không có DEST_NAME mặc định")
+
     spun = [r for r in all_spin if r["status"] == "SPUN"]
     ok = [r for r in all_trans if r["status"] == "OK"]
     wall = time.time() - t_start
@@ -679,9 +736,23 @@ def main():
         print(f"  Quay được     : {len(spun)}/{len(all_spin)} (thưởng {sum(r['reward'] for r in spun):,} x)")
         print(f"  Chuyển thành công: {len(ok)}/{len(all_trans)}")
         print(f"  Tổng x gửi   : {sum(r['transferred'] for r in ok):,} (xxxx nhận ~90%)")
+        if args.dest2:
+            tag = "✅" if (final_forward and final_forward.get("ok")) else ("⏭️" if final_forward and final_forward.get("balance", 0) <= MIN_TRANSFER else "❌")
+            fwd_b = final_forward["balance"] if final_forward else 0
+            fwd_t = final_forward["transferred"] if final_forward else 0
+            print(f"  Chuyển tiếp cấp 2: {tag} {args.dest_user} (id={args.dest}) "
+                  f"-> id={args.dest2} | số dư {fwd_b:,} -> chuyển {fwd_t:,} x")
     bal1 = get_public_balance(sess0, args.dest)
     if execute and bal0 is not None and bal1 is not None:
         print(f"  Balance xxxx  : {bal0:,} -> {bal1:,} (+{bal1 - bal0:,} x)")
+    if execute and args.dest2:
+        bal2_0 = None
+        try:
+            bal2_0 = get_public_balance(sess0, args.dest2)
+        except Exception:
+            pass
+        if bal2_0 is not None:
+            print(f"  Balance cấp 2 (id={args.dest2}): {bal2_0:,} x")
     print(f"  ⏱️  TỔNG THỜI GIAN: {int(wall)}s = {wall/60:.1f} phút "
           f"({len(users)} acc, {len(batches)} lô)")
     print("💾  Chi tiết: phase1_spin.csv / phase2_transfer.csv")

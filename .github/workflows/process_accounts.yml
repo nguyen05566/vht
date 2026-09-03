@@ -28,15 +28,15 @@ on:
         required: true
         default: '69282667'
       dest_user:
-        description: 'Username tk nhận cấp 1 (để chuyển tiếp)'
+        description: 'Username tk nhận cấp 1 (để chuyển tiếp cấp 2). Rỗng = dùng DEST_NAME mặc định trong code (nhancap1)'
         required: false
         default: ''
       dest_pass:
-        description: 'Mật khẩu tk nhận cấp 1'
+        description: 'Mật khẩu tk nhận cấp 1. Rỗng = dùng cùng --password (MK chung)'
         required: false
         default: ''
       dest2_id:
-        description: 'PlayerId nhận x cấp 2 (chuyển tiếp từ cấp 1). Để trống = không chuyển tiếp'
+        description: 'PlayerId nhận x cấp 2 (chuyển tiếp từ cấp 1). Rỗng hoặc 0 = TẮT chuyển tiếp'
         required: false
         default: '69284649'
       pm_user:
@@ -102,11 +102,20 @@ jobs:
 
       - name: Quay vòng quay + Chuyển toàn bộ x
         run: |
-          # Xây dựng cờ chuyển tiếp (nếu có)
+          # Xây dựng cờ chuyển tiếp cấp 2 (luôn bật nếu DEST2_ID != empty và != 0)
+          # Nếu DEST_USER / DEST_PASS rỗng, script sẽ tự dùng DEST_NAME mặc định + --password.
           DEST_FLAGS=""
-          if [ -n "$DEST_USER" ] && [ -n "$DEST_PW" ] && [ -n "$DEST2_ID" ]; then
-            DEST_FLAGS="--dest-user \"$DEST_USER\" --dest-pass \"$DEST_PW\" --dest2 $DEST2_ID"
-            echo "🔄 Bật chuyển tiếp: $DEST_USER (id=$DEST_ID) -> id=$DEST2_ID"
+          if [ -n "$DEST2_ID" ] && [ "$DEST2_ID" != "0" ]; then
+            DEST_FLAGS="--dest2 $DEST2_ID"
+            if [ -n "$DEST_USER" ]; then
+              DEST_FLAGS="$DEST_FLAGS --dest-user \"$DEST_USER\""
+            fi
+            if [ -n "$DEST_PW" ]; then
+              DEST_FLAGS="$DEST_FLAGS --dest-pass \"$DEST_PW\""
+            fi
+            echo "🔄 Bật chuyển tiếp cấp 2: tk=[$DEST_USER hoặc mặc định] (id=$DEST_ID) -> id=$DEST2_ID"
+          else
+            echo "⏭️  DEST2_ID rỗng -> TẮT chuyển tiếp cấp 2"
           fi
 
           PIPELINE_FLAG=""
