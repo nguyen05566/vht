@@ -70,8 +70,8 @@ KICK_DELAY = 5.0
 
 BOT_BET_XU = 500
 BOT_USE_CREATE_TABLE = True
-BOT_MATCH_DURATION = '10'
-BOT_TURN_DURATION = '60'
+BOT_MATCH_DURATION = '99999'
+BOT_TURN_DURATION = '99999'
 BOT_ACC_DURATION = '0'
 BOT_BLOCK_SOFTWARE = '0'
 
@@ -271,7 +271,7 @@ def fetch_session_info():
         # B2: POST đăng nhập
         resp = session.post(
             LOGIN_URL, timeout=20,
-            data={"redirect": "/", "USER_NAME": USER, "PWD": PWWD,
+            data={"redirect": "/", "USER_NAME": USER, "PASSWORD": PWWD,
                   "AUTO_LOGIN": "true", "LOGIN": "Đăng nhập"},
             headers={"Origin": "https://gamevh.net",
                      "Referer": LOGIN_URL,
