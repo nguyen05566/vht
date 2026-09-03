@@ -29,7 +29,6 @@ permissions:
   contents: write
 
 jobs:
-  # Tạo matrix động dựa trên arena_list input
   setup:
     runs-on: ubuntu-latest
     outputs:
@@ -38,10 +37,8 @@ jobs:
       - id: set-matrix
         run: |
           if [ -z "${{ github.event.inputs.arena_list }}" ]; then
-            # Mặc định: tất cả 5-20
             MATRIX='[5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20]'
           else
-            # Parse từ input
             INPUT="${{ github.event.inputs.arena_list }}"
             MATRIX="[$(echo $INPUT | tr ',' ',')]"
           fi
@@ -69,36 +66,68 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: |
           pip install -r requirements.txt
 
-      - name: Install Pikafish Engine
+      - name: Install 7-Zip
         run: |
-          # Tải Pikafish (engine cờ tướng mạnh)
-          PIKA_URL="https://github.com/official-pikafish/pikafish/releases/download/latest/pikafish-x86-64-modern"
-          wget -q -O ~/pikafish "$PIKA_URL" 2>/dev/null || \
-          curl -sL -o ~/pikafish "$PIKA_URL" 2>/dev/null || \
-          echo "⚠️ Không tải được Pikafish, bot sẽ chạy không có engine"
+          sudo apt-get update -qq
+          sudo apt-get install -y p7zip-full
+
+      - name: Install Pikafish 2026-01-02 Engine
+        run: |
+          echo "📥 Tải Pikafish 2026-01-02..."
           
-          if [ -f ~/pikafish ]; then
+          PIKA_URL="https://github.com/official-pikafish/Pikafish/releases/download/Pikafish-2026-01-02/Pikafish.2026-01-02.7z"
+          NNUE_URL="https://github.com/official-pikafish/Networks/releases/download/master-net/pikafish.nnue"
+          
+          # Tải file 7z
+          wget -q --show-progress -O /tmp/pikafish.7z "$PIKA_URL" || \
+          curl -L -o /tmp/pikafish.7z "$PIKA_URL"
+          
+          # Giải nén
+          echo "📦 Giải nén..."
+          7z x /tmp/pikafish.7z -o/tmp/pikafish -y
+          
+          # Tìm binary linux x86_64
+          echo "🔍 Tìm binary..."
+          find /tmp/pikafish -type f -name "*linux*x86_64*" -o -name "*pikafish*" | head -10
+          
+          # Copy binary
+          LINUX_BIN=$(find /tmp/pikafish -type f -executable | grep -i "x86_64\|linux" | head -1)
+          if [ -z "$LINUX_BIN" ]; then
+            # Thử tìm tên khác
+            LINUX_BIN=$(find /tmp/pikafish -type f | grep -iE "(x86.64|linux)" | grep -v "\.nnue" | head -1)
+          fi
+          
+          if [ -n "$LINUX_BIN" ]; then
+            cp "$LINUX_BIN" ~/pikafish
             chmod +x ~/pikafish
-            echo "✅ Pikafish installed"
+            echo "✅ Pikafish installed: $LINUX_BIN"
+            ~/pikafish --version || echo "⚠️ Cannot get version"
           else
-            echo "⚠️ Pikafish not available - bot will run without engine"
+            echo "❌ Không tìm thấy binary Linux x86_64"
+            ls -laR /tmp/pikafish/
+          fi
+          
+          # Tải NNUE (network neural)
+          echo "📥 Tải NNUE network..."
+          wget -q --show-progress -O ~/pikafish.nnue "$NNUE_URL" || \
+          curl -L -o ~/pikafish.nnue "$NNUE_URL"
+          
+          if [ -f ~/pikafish.nnue ]; then
+            echo "✅ NNUE downloaded: $(ls -lh ~/pikafish.nnue | awk '{print $5}')"
+          else
+            echo "⚠️ NNUE download failed"
           fi
 
       - name: Update arena script with settings
         run: |
           ARENA_FILE="arena${{ matrix.arena_num }}.py"
           
-          # Đảm bảo password đúng
           sed -i 's/CARO_PWWD_DIRECT = ""/CARO_PWWD_DIRECT = "nhat123456"/g' "$ARENA_FILE"
-          
-          # Cập nhật dest_id
           sed -i "s/dest_id=[0-9]*/dest_id=${{ env.DEST_ID }}/g" "$ARENA_FILE"
-          
-          # Cập nhật percent
           sed -i "s/percent=[0-9]*/percent=${{ env.TRANSFER_PERCENT }}/g" "$ARENA_FILE"
           
           echo "✅ Updated $ARENA_FILE:"
@@ -112,8 +141,8 @@ jobs:
           echo "   Dest ID: ${{ env.DEST_ID }}"
           echo "   Transfer: ${{ env.TRANSFER_PERCENT }}%"
           echo "   Max runtime: ${{ env.MAX_RUNTIME }} minutes"
+          echo "   Pikafish: $(~/pikafish --version 2>/dev/null || echo 'N/A')"
           
-          # Chạy với timeout
           timeout $(( ${MAX_RUNTIME} * 60 )) python "$ARENA_FILE" || {
             EXIT_CODE=$?
             if [ $EXIT_CODE -eq 124 ]; then
@@ -131,7 +160,6 @@ jobs:
           echo "- Dest ID: ${{ env.DEST_ID }}" >> $GITHUB_STEP_SUMMARY
           echo "- Transfer: ${{ env.TRANSFER_PERCENT }}%" >> $GITHUB_STEP_SUMMARY
 
-  # Job tổng kết
   summary:
     needs: [setup, arena]
     runs-on: ubuntu-latest
@@ -143,4 +171,3 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "- Dest ID nhận xu: ${{ env.DEST_ID }}" >> $GITHUB_STEP_SUMMARY
           echo "- Phần trăm chuyển: ${{ env.TRANSFER_PERCENT }}%" >> $GITHUB_STEP_SUMMARY
-          echo "- Số bot đã chạy: ${{ needs.setup.outputs.arena_matrix }}" >> $GITHUB_STEP_SUMMARY

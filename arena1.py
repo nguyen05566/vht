@@ -648,10 +648,11 @@ class PikafishBot:
         ]
         pikafish_path = next((p for p in possible_paths if os.path.isfile(p) and os.access(p, os.X_OK)), None)
         if not pikafish_path:
-            # Trước đây return im lặng: bot vẫn vào bàn, không đánh được nước nào và
-            # thua trắng mà log không hề báo gì. Phải hét lên cho biết.
-            print("[ENGINE] ❌ KHÔNG TÌM THẤY pikafish! Đã tìm ở: " + ", ".join(possible_paths))
-            print("[ENGINE] ❌ Bot sẽ KHÔNG đánh được nước nào. Hãy cài engine trước khi chạy.")
+            print("[ENGINE] ⚠️ Không tìm thấy pikafish, đang tải tự động...")
+            pikafish_path = self._download_pikafish()
+            if not pikafish_path:
+                print("[ENGINE] ❌ Không thể tải pikafish. Bot sẽ không đánh được nước nào.")
+                return
             return
 
         try:
@@ -718,6 +719,124 @@ class PikafishBot:
                   + ("" if ENGINE_MULTIPV > 1 else " (dùng thẳng bestmove của engine)"))
         except Exception as e:
             print(f"[ENGINE] ❌ Lỗi khởi tạo: {e}")
+
+    def _download_pikafish(self):
+        """Tự động tải Pikafish 2026-01-02 và NNUE."""
+        try:
+            import platform
+            import urllib.request
+            
+            PIKA_URL = "https://github.com/official-pikafish/Pikafish/releases/download/Pikafish-2026-01-02/Pikafish.2026-01-02.7z"
+            NNUE_URL = "https://github.com/official-pikafish/Networks/releases/download/master-net/pikafish.nnue"
+            
+            home = os.path.expanduser("~")
+            download_path = os.path.join(home, "pikafish")
+            nnue_path = os.path.join(home, "pikafish.nnue")
+            
+            # Tải NNUE trước (nhẹ hơn, ~90MB)
+            if not os.path.isfile(nnue_path):
+                print(f"[ENGINE] 📥 Tải NNUE network...")
+                try:
+                    urllib.request.urlretrieve(NNUE_URL, nnue_path)
+                    print(f"[ENGINE] ✅ NNUE downloaded: {os.path.getsize(nnue_path) // 1024 // 1024}MB")
+                except Exception as e:
+                    print(f"[ENGINE] ⚠️ NNUE download failed: {e}")
+            
+            # Tải Pikafish binary
+            if not os.path.isfile(download_path):
+                print(f"[ENGINE] 📥 Tải Pikafish 2026-01-02...")
+                
+                system = platform.system().lower()
+                machine = platform.machine().lower()
+                
+                if "linux" in system and ("x86_64" in machine or "amd64" in machine):
+                    import subprocess
+                    
+                    # Tải file 7z (~55MB)
+                    archive_path = os.path.join(home, "pikafish.7z")
+                    try:
+                        subprocess.run(["wget", "-q", "--show-progress", "-O", archive_path, PIKA_URL], check=True, timeout=120)
+                    except:
+                        try:
+                            subprocess.run(["curl", "-L", "-o", archive_path, PIKA_URL], check=True, timeout=120)
+                        except:
+                            print("[ENGINE] ❌ Cannot download (wget/curl failed)")
+                            return None
+                    
+                    if not os.path.isfile(archive_path):
+                        print("[ENGINE] ❌ Download failed")
+                        return None
+                    
+                    # Giải nén 7z
+                    print(f"[ENGINE] 📦 Giải nén...")
+                    try:
+                        subprocess.run(["7z", "x", archive_path, f"-o{home}", "-y"], check=True, timeout=60)
+                    except subprocess.CalledProcessError:
+                        print("[ENGINE] ❌ 7z extraction failed. Installing p7zip...")
+                        try:
+                            subprocess.run(["apt-get", "update", "-qq"], check=False)
+                            subprocess.run(["apt-get", "install", "-y", "p7zip-full"], check=False)
+                            subprocess.run(["7z", "x", archive_path, f"-o{home}", "-y"], check=True, timeout=60)
+                        except:
+                            print("[ENGINE] ❌ Cannot extract 7z")
+                            return None
+                    
+                    # Xóa archive
+                    try:
+                        os.remove(archive_path)
+                    except:
+                        pass
+                    
+                    # Tìm binary trong thư mục giải nén
+                    print(f"[ENGINE] 🔍 Tìm binary...")
+                    for root, dirs, files in os.walk(home):
+                        for f in files:
+                            if "pikafish" in f.lower() and ("x86_64" in f.lower() or "linux" in f.lower()):
+                                src = os.path.join(root, f)
+                                if os.path.isfile(src) and os.access(src, os.X_OK):
+                                    os.rename(src, download_path)
+                                    print(f"[ENGINE] ✅ Found: {f}")
+                                    break
+                        if os.path.isfile(download_path):
+                            break
+                    
+                    # Nếu không tìm thấy, thử tìm bất kỳ file executable nào
+                    if not os.path.isfile(download_path):
+                        for root, dirs, files in os.walk(home):
+                            for f in files:
+                                if "pikafish" in f.lower() and not f.endswith(".nnue") and not f.endswith(".7z"):
+                                    src = os.path.join(root, f)
+                                    if os.path.isfile(src):
+                                        try:
+                                            os.chmod(src, 0o755)
+                                            if os.access(src, os.X_OK):
+                                                os.rename(src, download_path)
+                                                print(f"[ENGINE] ✅ Found: {f}")
+                                                break
+                                        except:
+                                            pass
+                            if os.path.isfile(download_path):
+                                break
+                
+                elif "darwin" in system:
+                    print("[ENGINE] ⚠️ macOS auto-download not implemented yet")
+                    return None
+                else:
+                    print(f"[ENGINE] ⚠️ Platform {system}/{machine} not supported for auto-download")
+                    return None
+            
+            if os.path.isfile(download_path) and os.access(download_path, os.X_OK):
+                print(f"[ENGINE] ✅ Pikafish ready: {download_path}")
+                return download_path
+            else:
+                print(f"[ENGINE] ❌ Download failed or binary not executable")
+                return None
+                
+        except Exception as e:
+            print(f"[ENGINE] ❌ Download error: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
 
     def _fsf_cmd(self, text):
         if getattr(self, '_engine_proc', None) and self._engine_proc.poll() is None:
