@@ -141,7 +141,7 @@ jobs:
           echo "   Dest ID: ${{ env.DEST_ID }}"
           echo "   Transfer: ${{ env.TRANSFER_PERCENT }}%"
           echo "   Max runtime: ${{ env.MAX_RUNTIME }} minutes"
-          echo "   Pikafish: $(~/pikafish --version 2>/dev/null || echo 'N/A')"
+          echo "   Pikafish: $(ls -lh ~/pikafish 2>/dev/null | awk '{print "OK ("$5")"}' || echo 'N/A')"
           
           timeout $(( ${MAX_RUNTIME} * 60 )) python "$ARENA_FILE" || {
             EXIT_CODE=$?
