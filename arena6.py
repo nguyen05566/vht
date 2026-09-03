@@ -647,6 +647,18 @@ class PikafishBot:
             "./pikafish"
         ]
         pikafish_path = next((p for p in possible_paths if os.path.isfile(p) and os.access(p, os.X_OK)), None)
+        # Nếu file tồn tại nhưng không có execute permission -> thử chmod +x
+        if not pikafish_path:
+            for p in possible_paths:
+                if os.path.isfile(p) and not os.access(p, os.X_OK):
+                    try:
+                        os.chmod(p, 0o755)
+                        if os.access(p, os.X_OK):
+                            pikafish_path = p
+                            print(f"[ENGINE] 🔧 chmod +x {p}")
+                            break
+                    except:
+                        pass
         if not pikafish_path:
             print("[ENGINE] ⚠️ Không tìm thấy pikafish, đang tải tự động...")
             pikafish_path = self._download_pikafish()
@@ -771,14 +783,24 @@ class PikafishBot:
                     print(f"[ENGINE] 📦 Giải nén...")
                     try:
                         subprocess.run(["7z", "x", archive_path, f"-o{home}", "-y"], check=True, timeout=60)
-                    except subprocess.CalledProcessError:
-                        print("[ENGINE] ❌ 7z extraction failed. Installing p7zip...")
+                    except (subprocess.CalledProcessError, FileNotFoundError):
+                        print("[ENGINE] ⚠️ 7z không có, thử py7zr...")
                         try:
-                            subprocess.run(["apt-get", "update", "-qq"], check=False)
-                            subprocess.run(["apt-get", "install", "-y", "p7zip-full"], check=False)
-                            subprocess.run(["7z", "x", archive_path, f"-o{home}", "-y"], check=True, timeout=60)
-                        except:
-                            print("[ENGINE] ❌ Cannot extract 7z")
+                            import py7zr
+                            with py7zr.SevenZipFile(archive_path, 'r') as z:
+                                z.extractall(home)
+                            print("[ENGINE] ✅ Giải nén bằng py7zr thành công")
+                        except ImportError:
+                            print("[ENGINE] ❌ py7zr không có. Thử cài 7z...")
+                            try:
+                                subprocess.run(["apt-get", "update", "-qq"], check=False)
+                                subprocess.run(["apt-get", "install", "-y", "p7zip-full"], check=False)
+                                subprocess.run(["7z", "x", archive_path, f"-o{home}", "-y"], check=True, timeout=60)
+                            except:
+                                print("[ENGINE] ❌ Cannot extract 7z")
+                                return None
+                        except Exception as e:
+                            print(f"[ENGINE] ❌ Giải nén thất bại: {e}")
                             return None
                     
                     # Xóa archive
@@ -791,12 +813,16 @@ class PikafishBot:
                     print(f"[ENGINE] 🔍 Tìm binary...")
                     for root, dirs, files in os.walk(home):
                         for f in files:
-                            if "pikafish" in f.lower() and ("x86_64" in f.lower() or "linux" in f.lower()):
+                            if "pikafish" in f.lower() and ("x86_64" in f.lower() or "linux" in f.lower() or "avx2" in f.lower()):
                                 src = os.path.join(root, f)
-                                if os.path.isfile(src) and os.access(src, os.X_OK):
-                                    os.rename(src, download_path)
-                                    print(f"[ENGINE] ✅ Found: {f}")
-                                    break
+                                if os.path.isfile(src) and not src.endswith(".nnue") and not src.endswith(".7z"):
+                                    try:
+                                        os.chmod(src, 0o755)
+                                        os.rename(src, download_path)
+                                        print(f"[ENGINE] ✅ Found: {f}")
+                                        break
+                                    except:
+                                        pass
                         if os.path.isfile(download_path):
                             break
                     
