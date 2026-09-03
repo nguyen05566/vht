@@ -60,6 +60,19 @@ on:
         required: false
         type: boolean
         default: true
+      per_batch_forward:
+        description: 'Forward sang cấp 2 sau MỖI lô (mặc định false -> chỉ forward 1 lần cuối, tránh server block)'
+        required: false
+        type: boolean
+        default: false
+      forward_retry:
+        description: 'Số lần retry forward (login/transfer fail) — default 3'
+        required: false
+        default: '3'
+      forward_retry_delay:
+        description: 'Giây chờ giữa các retry forward — default 30'
+        required: false
+        default: '30'
 
 env:
   LIST_FILE: ${{ github.event.inputs.list_file || '' }}
@@ -76,6 +89,9 @@ env:
   WORKERS: ${{ github.event.inputs.workers || '30' }}
   BATCH: ${{ github.event.inputs.batch_size || '500' }}
   PIPELINE: ${{ github.event.inputs.pipeline || 'true' }}
+  PER_BATCH_FORWARD: ${{ github.event.inputs.per_batch_forward || 'false' }}
+  FORWARD_RETRY: ${{ github.event.inputs.forward_retry || '3' }}
+  FORWARD_RETRY_DELAY: ${{ github.event.inputs.forward_retry_delay || '30' }}
 
 permissions:
   contents: write
@@ -123,6 +139,16 @@ jobs:
             PIPELINE_FLAG="--pipeline"
           fi
 
+          PER_BATCH_FLAG=""
+          if [ "$PER_BATCH_FORWARD" = "true" ]; then
+            PER_BATCH_FLAG="--per-batch-forward"
+            echo "📌 Bật forward sau mỗi lô"
+          else
+            echo "📌 Chỉ forward 1 lần cuối (mặc định)"
+          fi
+
+          FORWARD_FLAGS="$PER_BATCH_FLAG --forward-retry $FORWARD_RETRY --forward-retry-delay $FORWARD_RETRY_DELAY"
+
           if [ -n "$PREFIX" ]; then
             echo "▶ Dải tên: $PREFIX $START..$END (pipeline: $PIPELINE)"
             if [ -z "$END" ]; then
@@ -130,7 +156,7 @@ jobs:
               exit 1
             fi
             python spin_and_transfer.py --range "$PREFIX $START $END" \
-              --password "$PW" --dest "$DEST_ID" $DEST_FLAGS \
+              --password "$PW" --dest "$DEST_ID" $DEST_FLAGS $FORWARD_FLAGS \
               --execute --phase all --prune \
               --batch-size "$BATCH" --workers "$WORKERS" $PIPELINE_FLAG \
               --append --skip-done
@@ -153,7 +179,7 @@ jobs:
               ACC_COUNT=$(grep -c '.' "$ONE_FILE" 2>/dev/null || echo 0)
               echo "📄 $ONE_FILE: $ACC_COUNT dòng"
               python spin_and_transfer.py --list "$ONE_FILE" \
-                --password "$PW" --dest "$DEST_ID" $DEST_FLAGS \
+                --password "$PW" --dest "$DEST_ID" $DEST_FLAGS $FORWARD_FLAGS \
                 --execute --phase all --prune \
                 --batch-size "$BATCH" --workers "$WORKERS" $PIPELINE_FLAG \
                 --append --skip-done
@@ -164,7 +190,7 @@ jobs:
           else
             echo "▶ Tự tìm acc*.txt trong repo (pipeline: $PIPELINE)"
             python spin_and_transfer.py \
-              --password "$PW" --dest "$DEST_ID" $DEST_FLAGS \
+              --password "$PW" --dest "$DEST_ID" $DEST_FLAGS $FORWARD_FLAGS \
               --execute --phase all --prune \
               --batch-size "$BATCH" --workers "$WORKERS" $PIPELINE_FLAG \
               --append --skip-done

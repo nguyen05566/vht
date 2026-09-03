@@ -55,7 +55,8 @@ DEST_PASS = "nhat123456"  # mật khẩu tk nhận cấp 1 (nguyenpy1)
 DEST2_ID = 69284649     # nhận x cấp 2 (chuyển tiếp từ cấp 1)
 DEST2_NAME = "nhancap2"
 RETRY_DELAY = 60        # nếu transfer bị từ chối -> chờ rồi thử lại session mới
-FORWARD_RETRY = 2       # số lần thử lại khi forward_balance thất bại
+FORWARD_RETRY = 3       # số lần thử lại khi forward_balance thất bại (login/WS/transfer)
+FORWARD_RETRY_DELAY = 30  # giãn cách giữa các lần retry forward (tránh server block IP)
 
 UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/139.0 Safari/537.36")
@@ -347,12 +348,17 @@ def phase_transfer(user, passwd, dest_id, log, attempt=1):
 # ==================== CHUYỂN TIẾP (CẤP 2) ====================
 ForwardResult = {"ok": bool, "balance": int, "transferred": int, "note": str}
 
-def forward_balance(dest_user, dest_pass, dest_id, dest2_id, log, attempt=1):
+def forward_balance(dest_user, dest_pass, dest_id, dest2_id, log, attempt=1, max_attempts=None, retry_delay=None):
     """Login tk nhận cấp 1, chuyển TOÀN BỘ x sang id cấp 2.
 
     Trả dict {ok, balance, transferred, note}.
-    Nếu dest_user rỗng -> dùng DEST_NAME; dest_pass rỗng -> trả lỗi (caller phải tự lấy).
+    Retry khi login fail HOẶC transfer fail (server rate-limit / session kill).
+    Giãn cách giữa các lần retry = retry_delay (default FORWARD_RETRY_DELAY=30s) để tránh block IP.
     """
+    if max_attempts is None:
+        max_attempts = FORWARD_RETRY
+    if retry_delay is None:
+        retry_delay = FORWARD_RETRY_DELAY
     out = {"ok": False, "balance": 0, "transferred": 0, "note": ""}
     if not dest2_id:
         out["note"] = "dest2_id=0, bỏ qua"
@@ -360,12 +366,25 @@ def forward_balance(dest_user, dest_pass, dest_id, dest2_id, log, attempt=1):
     if not dest_user:
         out["note"] = "dest_user rỗng, bỏ qua"
         return out
-    log(f"\n🔄 CHUYỂN TIẾP (cấp 2): {dest_user} (id={dest_id}) -> id={dest2_id}")
+
+    tag = f"[attempt {attempt}/{max_attempts}] " if max_attempts > 1 else ""
+    log(f"\n🔄 CHUYỂN TIẾP (cấp 2): {tag}{dest_user} (id={dest_id}) -> id={dest2_id}")
+
+    # ----- Bước 1: HTTP login (retry nếu fail) -----
     ld = http_login(dest_user, dest_pass)
     if not ld:
         out["note"] = f"login tk {dest_user} thất bại"
-        log(f"❌ Login tk {dest_user} thất bại, BỎ QUA chuyển tiếp")
+        log(f"❌ Login tk {dest_user} thất bại (lần {attempt}/{max_attempts})")
+        if attempt < max_attempts:
+            wait = retry_delay if attempt == 1 else retry_delay * attempt
+            log(f"🔁 chờ {wait}s rồi thử lại (server có thể rate-limit)...")
+            time.sleep(wait)
+            return forward_balance(dest_user, dest_pass, dest_id, dest2_id, log,
+                                    attempt + 1, max_attempts, retry_delay)
+        log(f"⛔ Hết lượt retry, BỎ QUA chuyển tiếp")
         return out
+
+    # ----- Bước 2: Đọc balance -----
     balance = ld["balance"]
     out["balance"] = balance
     log(f"💰 Số dư {dest_user}: {balance:,} x")
@@ -373,14 +392,24 @@ def forward_balance(dest_user, dest_pass, dest_id, dest2_id, log, attempt=1):
         out["note"] = f"balance={balance} <= {MIN_TRANSFER}"
         log(f"⏭️  Số dư {balance} <= {MIN_TRANSFER}, không cần chuyển tiếp")
         return out
+
+    # ----- Bước 3: WS login + TRANSFER -----
     ws = ws_login(ld["cookie"], ld["nick"], ld["token"], log)
     if not ws:
         out["note"] = "ws_login thất bại"
-        log(f"❌ WS login {dest_user} thất bại")
+        log(f"❌ WS login {dest_user} thất bại (lần {attempt}/{max_attempts})")
+        if attempt < max_attempts:
+            wait = retry_delay
+            log(f"🔁 chờ {wait}s rồi thử lại session mới...")
+            time.sleep(wait)
+            return forward_balance(dest_user, dest_pass, dest_id, dest2_id, log,
+                                    attempt + 1, max_attempts, retry_delay)
         return out
+
     ok, st, txt = ws_transfer(ws, log, dest2_id, balance)
     try: ws.close()
     except: pass
+
     if ok:
         out["ok"] = True
         out["transferred"] = balance
@@ -389,11 +418,13 @@ def forward_balance(dest_user, dest_pass, dest_id, dest2_id, log, attempt=1):
     else:
         out["note"] = f"st={st}: {txt}"
         log(f"❌ Chuyển tiếp thất bại (st={st}): {txt}")
-        # thử lại 1 lần trong session mới (giống phase_transfer)
-        if attempt < FORWARD_RETRY:
-            log(f"🔁 chờ {RETRY_DELAY}s rồi thử lại forward lần {attempt+1}...")
-            time.sleep(RETRY_DELAY)
-            return forward_balance(dest_user, dest_pass, dest_id, dest2_id, log, attempt + 1)
+        # thử lại trong session mới (giống phase_transfer)
+        if attempt < max_attempts:
+            wait = retry_delay if attempt == 1 else retry_delay * 2
+            log(f"🔁 chờ {wait}s rồi thử lại forward lần {attempt+1}...")
+            time.sleep(wait)
+            return forward_balance(dest_user, dest_pass, dest_id, dest2_id, log,
+                                    attempt + 1, max_attempts, retry_delay)
     return out
 
 
@@ -507,8 +538,16 @@ def main():
                     help="id nhận cấp 2 (chuyển tiếp từ dest). Mặc định = DEST2_ID trong code. "
                          "Gõ 0 để TẮT chuyển tiếp cấp 2.")
     ap.add_argument("--no-final-forward", action="store_true",
-                    help="không chạy forward_balance lần cuối sau khi xong tất cả lô "
-                         "(mặc định vẫn chạy sau mỗi lô và sau cùng)")
+                    help="không chạy forward_balance LẦN CUỐI sau khi xong tất cả lô "
+                         "(mặc định vẫn chạy)")
+    ap.add_argument("--per-batch-forward", action="store_true",
+                    help="cũng forward_balance sau MỖI lô (mặc định TẮT để tránh "
+                         "server block do login liên tục). Khuyến nghị: chỉ để forward "
+                         "lần cuối, không cần per-batch.")
+    ap.add_argument("--forward-retry", type=int, default=FORWARD_RETRY,
+                    help=f"số lần retry forward_balance (default {FORWARD_RETRY})")
+    ap.add_argument("--forward-retry-delay", type=int, default=FORWARD_RETRY_DELAY,
+                    help=f"giây chờ giữa các retry forward (default {FORWARD_RETRY_DELAY})")
     ap.add_argument("--max", type=int, default=0, help="giới hạn số acc (0 = hết)")
     ap.add_argument("--workers", type=int, default=30)
     ap.add_argument("--batch-size", type=int, default=500,
@@ -654,10 +693,14 @@ def main():
                     all_trans.extend(results)
                     okb = [r for r in results if r["status"] == "OK"]
                 log(f"✅ lô {bi+1}: chuyển xong ({len(okb)} OK)")
-                # Chuyển tiếp x từ cấp 1 -> cấp 2 sau mỗi lô
-                if args.dest2:
+                # Chuyển tiếp x từ cấp 1 -> cấp 2 sau mỗi lô (chỉ nếu bật --per-batch-forward)
+                if args.dest2 and args.per_batch_forward:
                     time.sleep(3)
-                    forward_balance(args.dest_user, args.dest_pass, args.dest, args.dest2, log)
+                    forward_balance(args.dest_user, args.dest_pass, args.dest, args.dest2, log,
+                                    max_attempts=args.forward_retry,
+                                    retry_delay=args.forward_retry_delay)
+                elif args.dest2 and not args.per_batch_forward:
+                    log(f"  ⏭️  Bỏ qua forward sau lô (dùng --per-batch-forward để bật) — sẽ forward lần cuối")
                 next_transfer[0] += 1
 
         # Chạy 2 thread song song
@@ -691,10 +734,14 @@ def main():
                     all_trans += run_phase(phase_transfer, chunk)
                     okb = [r for r in all_trans if r["user"] in [c for c in chunk] and r["status"] == "OK"]
                     log(f"✅ lô {bi}: chuyển xong ({len(okb)} OK)")
-                    # Chuyển tiếp x từ cấp 1 -> cấp 2 sau mỗi lô
-                    if args.dest2:
+                    # Chuyển tiếp x từ cấp 1 -> cấp 2 sau mỗi lô (chỉ nếu bật --per-batch-forward)
+                    if args.dest2 and args.per_batch_forward:
                         time.sleep(3)
-                        forward_balance(args.dest_user, args.dest_pass, args.dest, args.dest2, log)
+                        forward_balance(args.dest_user, args.dest_pass, args.dest, args.dest2, log,
+                                        max_attempts=args.forward_retry,
+                                        retry_delay=args.forward_retry_delay)
+                    elif args.dest2 and not args.per_batch_forward and bi == len(batches):
+                        log(f"  ⏭️  Bỏ qua forward sau lô (dùng --per-batch-forward để bật) — sẽ forward lần cuối")
                 else:
                     for u in chunk:
                         ld = http_login(u, args.password)
@@ -715,15 +762,17 @@ def main():
                          args.append)
 
     # ===== CHUYỂN TIẾP CẤP 2 LẦN CUỐI (sau khi tất cả lô đã chuyển xong) =====
-    # Đảm bảo mọi x dồn về tk cấp 1 đều được chuyển tiếp sang cấp 2,
-    # kể cả khi có lô cuối chưa forward (vd: pipeline tắt, dest2 bật giữa chừng).
+    # Đảm bảo mọi x dồn về tk cấp 1 đều được chuyển tiếp sang cấp 2.
+    # CHỈ login 1 lần cuối, tránh server rate-limit do login liên tục sau mỗi lô.
     final_forward = None
     if execute and args.dest2 and not args.no_final_forward and args.dest_user:
         log(f"\n{'='*70}\n🔁 CHUYỂN TIẾP CẤP 2 LẦN CUỐI — {args.dest_user} (id={args.dest}) "
-            f"-> id={args.dest2}\n{'='*70}")
-        time.sleep(5)  # chờ server settle các transfer vừa xong
+            f"-> id={args.dest2} (retry {args.forward_retry}x, gap {args.forward_retry_delay}s)\n{'='*70}")
+        time.sleep(10)  # chờ server settle các transfer vừa xong (10s)
         final_forward = forward_balance(args.dest_user, args.dest_pass,
-                                         args.dest, args.dest2, log)
+                                         args.dest, args.dest2, log,
+                                         max_attempts=args.forward_retry,
+                                         retry_delay=args.forward_retry_delay)
     elif execute and args.dest2 and not args.dest_user:
         log("⚠️  Bỏ qua forward cuối: --dest-user rỗng và không có DEST_NAME mặc định")
 
