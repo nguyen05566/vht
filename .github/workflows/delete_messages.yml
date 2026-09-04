@@ -1,0 +1,37 @@
+name: Xóa tin nhắn GameVH
+
+on:
+  workflow_dispatch:
+    inputs:
+      username:
+        description: 'Tên đăng nhập GameVH'
+        required: true
+        type: string
+      password:
+        description: 'Mật khẩu GameVH'
+        required: true
+        type: string
+
+jobs:
+  delete-messages:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    
+    - name: Install dependencies
+      run: |
+        pip install requests
+    
+    - name: Xóa tất cả tin nhắn
+      env:
+        USERNAME: ${{ inputs.username }}
+        PASSWORD: ${{ inputs.password }}
+      run: |
+        python delete_messages.py
