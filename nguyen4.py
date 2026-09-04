@@ -414,7 +414,7 @@ GAME_URL = "https://gamevh.net/play/caro/0"
 # === CẤU HÌNH TRỰC TIẾP - KHÔNG CẦN SECRETS ===
 # Đã hardcode theo yêu cầu - ai xem repo sẽ thấy mk
 CARO_USER_DIRECT = "nguyen4"
-CARO_PWWD_DIRECT = ""
+CARO_PWWD_DIRECT = "abc123"
 # Ưu tiên Secrets nếu có, fallback về hardcode
 def _clean_env(val: Optional[str], default: str) -> str:
     if val and str(val).strip(): return str(val).strip()
@@ -1379,7 +1379,7 @@ class CaroBot:
             session.get('https://gamevh.net/login.jsp', timeout=10)
             resp = session.post(
                 'https://gamevh.net/login.jsp', timeout=10,
-                data={'redirect': '/', 'USER_NAME': USER, 'PWD': PWWD,
+                data={'redirect': '/', 'USER_NAME': USER, 'PASSWORD': PWWD,
                       'AUTO_LOGIN': 'true', 'LOGIN': 'Đăng nhập'},
                 headers={'Origin': 'https://gamevh.net',
                          'Referer': 'https://gamevh.net/login.jsp',
@@ -1457,25 +1457,7 @@ class CaroBot:
         self.start_time = time.time(); self._running = True
         log.info(f"{'='*50}")
 
-        # ===== CHUYỂN X 50% NGAY KHI KHỞI ĐỘNG (TRƯỚC KHI VÀO BÀN) =====
-        log.info("[TRANSFER] 🔄 Chuyển 50% x cho xxxx trước khi vào bàn...")
-        try:
-            import asyncio
-            from transfer_xu_bot import transfer_xu_async
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(None, lambda: asyncio.run(
-                transfer_xu_async(USER, PWWD, dest_id=69284652, percent=20)
-            ))
-            if result:
-                log.info("[TRANSFER] ✅ Chuyển x thành công!")
-            else:
-                log.info("[TRANSFER] ⚠️ Chuyển x thất bại, tiếp tục chạy bot...")
-        except ImportError as ie:
-            log.error(f"[TRANSFER] ❌ Không tìm thấy transfer_xu_bot: {ie}")
-        except Exception as e:
-            log.error(f"[TRANSFER] ❌ Lỗi chuyển x: {e}")
-        log.info("[TRANSFER] ✅ Hoàn tất, bắt đầu vào bàn chơi...")
-        # ===== END CHUYỂN X =====
+
         log.info("BOT CARO EMBRYO - FULL_NAME + AVATAR v3.0")
         log.info(f"{'='*50}")
         
