@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-QUAY VÒNG QUAY MAY MẮN ĐỒNG LOẠT + CHUYỂN TOÀN BỘ X VỀ xxxx (2 PHA)
+QUAY VÒNG QUAY MAY MẮN ĐỒNG LOẠT + CHUYỂN X VỀ xxxx (2 PHA)
 ======================================================================
 PHA 1 - QUAY : mỗi acc login HTTP+WS -> GET_REMAIN_SPIN -> quay nếu còn lượt.
-PHA 2 - CHUYỂN: mỗi acc login HTTP+WS MỚI -> đọc số dư -> TRANSFER 100% về xxxx.
+PHA 2 - CHUYỂN: mỗi acc login HTTP+WS MỚI -> đọc số dư -> TRANSFER về xxxx,
+                 CHỪA LẠI --keep x mỗi acc (mặc định 500) để acc không về 0
+                 (rút sạch dễ bị nghi là acc bot/rửa x).
 
 Vì sao 2 pha (đã kiểm chứng thực tế 2026-08-31):
   - Chuyển x NGAY trong cùng session vừa quay thưởng -> server TỪ CHỐI (100/100 trường hợp).
@@ -15,6 +17,7 @@ Ghi chú thêm:
   - xxxx chỉ nhận 90% số chuyển (phí chuyển 10%: 1300 -> +1170, 1000 -> +900).
   - Vòng quay: nhiều ô thưởng (10, 100, 150, 500, 1000 x...), quà cộng thẳng vào dư.
   - Tối thiểu chuyển: > 200 x (server quy định).
+  - Số chuyển mỗi acc = số dư - --keep (mặc định chừa 500 x).
 
 Cách chạy:
   python3 spin_and_transfer.py --execute --phase spin --workers 5     # pha 1: quay
@@ -29,6 +32,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import partial
 
 import requests
 import websocket
@@ -49,6 +53,7 @@ CMD_ALERT = 303
 CMD_BALANCE_CHANGED = 431
 
 MIN_TRANSFER = 200      # server: chuyển tối thiểu > 200 x
+DEFAULT_KEEP = 500      # mặc định chừa lại mỗi acc (không rút sạch về 0, đỡ bị nghi)
 DEST_ID = 69284652      # nhận x cấp 1
 DEST_NAME = "2"   # username tk nhận cấp 1
 DEST_PASS = "n123456"  # mật khẩu riêng của tk '2' (KHÁC MK chung nhat123456)
@@ -293,20 +298,23 @@ def phase_spin(user, passwd, dest_id, log):
 
 
 # ==================== PHA 2: CHUYỂN ====================
-def phase_transfer(user, passwd, dest_id, log, attempt=1):
+def phase_transfer(user, passwd, dest_id, log, keep=0, attempt=1):
+    """Chuyển (số dư - keep) về đích, chừa lại `keep` x để acc không về 0."""
     t0 = time.time()
     res = {"user": user, "status": "?", "balance": 0, "transferred": 0,
            "ms": 0, "note": ""}
+    keep = max(0, int(keep or 0))
     ld = http_login(user, passwd)
     if not ld:
         res["status"] = "LOGIN_FAIL"; res["ms"] = int((time.time()-t0)*1000)
         return res, None
     balance = ld["balance"]
     res["balance"] = balance
-    if balance <= MIN_TRANSFER:
+    amount = balance - keep
+    if amount <= MIN_TRANSFER:
         res["status"] = "BALANCE_TOO_LOW"
-        res["note"] = f"balance={balance}"
-        log(f"    ⏭️  số dư {balance} <= {MIN_TRANSFER}, bỏ qua")
+        res["note"] = f"balance={balance} keep={keep}"
+        log(f"    ⏭️  chuyển được {amount} (dư {balance} - chừa {keep}) <= {MIN_TRANSFER}, bỏ qua")
         res["ms"] = int((time.time()-t0)*1000)
         return res, None
     ws = None
@@ -315,11 +323,11 @@ def phase_transfer(user, passwd, dest_id, log, attempt=1):
         if not ws:
             res["status"] = "WS_LOGIN_FAIL"; res["ms"] = int((time.time()-t0)*1000)
             return res, None
-        ok, st, txt = ws_transfer(ws, log, dest_id, balance)
+        ok, st, txt = ws_transfer(ws, log, dest_id, amount)
         if ok:
-            res["transferred"] = balance
+            res["transferred"] = amount
             res["status"] = "OK"
-            log(f"    ✅ TRANSFER {balance:,} x -> {DEST_NAME}({dest_id}) | {txt}")
+            log(f"    ✅ TRANSFER {amount:,} x (dư {balance:,} - chừa {keep:,}) -> {DEST_NAME}({dest_id}) | {txt}")
         else:
             res["status"] = "REJECTED"
             res["note"] = f"st={st}: {txt[:100]}"
@@ -328,7 +336,7 @@ def phase_transfer(user, passwd, dest_id, log, attempt=1):
             if attempt == 1:
                 log(f"    🔁 chờ {RETRY_DELAY}s rồi thử lại lần 2 (session mới)...")
                 time.sleep(RETRY_DELAY)
-                res2, _ = phase_transfer(user, passwd, dest_id, log, attempt=2)
+                res2, _ = phase_transfer(user, passwd, dest_id, log, keep, attempt=2)
                 res["status"] = res2["status"]
                 res["transferred"] = res2["transferred"]
                 res["note"] += f" | retry: {res2['status']} {res2['note']}"
@@ -349,8 +357,8 @@ def phase_transfer(user, passwd, dest_id, log, attempt=1):
 # ==================== CHUYỂN TIẾP (CẤP 2) ====================
 ForwardResult = {"ok": bool, "balance": int, "transferred": int, "note": str}
 
-def forward_balance(dest_user, dest_pass, dest_id, dest2_id, log, attempt=1, max_attempts=None, retry_delay=None):
-    """Login tk nhận cấp 1, chuyển TOÀN BỘ x sang id cấp 2.
+def forward_balance(dest_user, dest_pass, dest_id, dest2_id, log, keep=0, attempt=1, max_attempts=None, retry_delay=None):
+    """Login tk nhận cấp 1, chuyển (số dư - keep) sang id cấp 2 (chừa lại `keep` x).
 
     Trả dict {ok, balance, transferred, note}.
     Retry khi login fail HOẶC transfer fail (server rate-limit / session kill).
@@ -361,6 +369,7 @@ def forward_balance(dest_user, dest_pass, dest_id, dest2_id, log, attempt=1, max
     if retry_delay is None:
         retry_delay = FORWARD_RETRY_DELAY
     out = {"ok": False, "balance": 0, "transferred": 0, "note": ""}
+    keep = max(0, int(keep or 0))
     if not dest2_id:
         out["note"] = "dest2_id=0, bỏ qua"
         return out
@@ -381,17 +390,18 @@ def forward_balance(dest_user, dest_pass, dest_id, dest2_id, log, attempt=1, max
             log(f"🔁 chờ {wait}s rồi thử lại (server có thể rate-limit)...")
             time.sleep(wait)
             return forward_balance(dest_user, dest_pass, dest_id, dest2_id, log,
-                                    attempt + 1, max_attempts, retry_delay)
+                                    keep, attempt + 1, max_attempts, retry_delay)
         log(f"⛔ Hết lượt retry, BỎ QUA chuyển tiếp")
         return out
 
     # ----- Bước 2: Đọc balance -----
     balance = ld["balance"]
     out["balance"] = balance
-    log(f"💰 Số dư {dest_user}: {balance:,} x")
-    if balance <= MIN_TRANSFER:
-        out["note"] = f"balance={balance} <= {MIN_TRANSFER}"
-        log(f"⏭️  Số dư {balance} <= {MIN_TRANSFER}, không cần chuyển tiếp")
+    amount = balance - keep
+    log(f"💰 Số dư {dest_user}: {balance:,} x (chừa {keep:,}, chuyển được {amount:,})")
+    if amount <= MIN_TRANSFER:
+        out["note"] = f"balance={balance} keep={keep} <= {MIN_TRANSFER}"
+        log(f"⏭️  Chuyển được {amount} <= {MIN_TRANSFER}, không cần chuyển tiếp")
         return out
 
     # ----- Bước 3: WS login + TRANSFER -----
@@ -404,18 +414,18 @@ def forward_balance(dest_user, dest_pass, dest_id, dest2_id, log, attempt=1, max
             log(f"🔁 chờ {wait}s rồi thử lại session mới...")
             time.sleep(wait)
             return forward_balance(dest_user, dest_pass, dest_id, dest2_id, log,
-                                    attempt + 1, max_attempts, retry_delay)
+                                    keep, attempt + 1, max_attempts, retry_delay)
         return out
 
-    ok, st, txt = ws_transfer(ws, log, dest2_id, balance)
+    ok, st, txt = ws_transfer(ws, log, dest2_id, amount)
     try: ws.close()
     except: pass
 
     if ok:
         out["ok"] = True
-        out["transferred"] = balance
+        out["transferred"] = amount
         out["note"] = f"OK: {txt}"
-        log(f"✅ Chuyển tiếp {balance:,} x -> id={dest2_id} THÀNH CÔNG")
+        log(f"✅ Chuyển tiếp {amount:,} x (dư {balance:,} - chừa {keep:,}) -> id={dest2_id} THÀNH CÔNG")
     else:
         out["note"] = f"st={st}: {txt}"
         log(f"❌ Chuyển tiếp thất bại (st={st}): {txt}")
@@ -425,7 +435,7 @@ def forward_balance(dest_user, dest_pass, dest_id, dest2_id, log, attempt=1, max
             log(f"🔁 chờ {wait}s rồi thử lại forward lần {attempt+1}...")
             time.sleep(wait)
             return forward_balance(dest_user, dest_pass, dest_id, dest2_id, log,
-                                    attempt + 1, max_attempts, retry_delay)
+                                    keep, attempt + 1, max_attempts, retry_delay)
     return out
 
 
@@ -522,7 +532,7 @@ def write_csv_append(path, header, rows, append=False):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Quay vòng quay + chuyển toàn bộ x về xxxx (hỗ trợ vài ngàn acc)")
+    ap = argparse.ArgumentParser(description="Quay vòng quay + chuyển x về đích, chừa lại --keep mỗi acc (hỗ trợ vài ngàn acc)")
     ap.add_argument("--list", default=None, help="file danh sách acc")
     ap.add_argument("--range", default=None,
                     help='tự sinh dải tên+số, vd: --range "test 1 3000" hoặc "test:1:3000"')
@@ -539,6 +549,9 @@ def main():
     ap.add_argument("--dest2", type=int, default=DEST2_ID,
                     help="id nhận cấp 2 (chuyển tiếp từ dest). Mặc định = DEST2_ID trong code. "
                          "Gõ 0 để TẮT chuyển tiếp cấp 2.")
+    ap.add_argument("--keep", type=int, default=DEFAULT_KEEP,
+                    help=f"số xu CHỪA LẠI mỗi acc, không chuyển hết (đỡ bị nghi acc bot). "
+                         f"Mặc định {DEFAULT_KEEP}. Gõ 0 = chuyển sạch như cũ.")
     ap.add_argument("--no-final-forward", action="store_true",
                     help="không chạy forward_balance LẦN CUỐI sau khi xong tất cả lô "
                          "(mặc định vẫn chạy)")
@@ -632,7 +645,8 @@ def main():
     bal0 = get_public_balance(sess0, args.dest)
     print(f"🎯  Đích cấp 1: id={args.dest}" + (f" -> cấp 2: id={args.dest2}" if args.dest2 else "") + (f" | balance trước: {bal0:,} x" if bal0 else ""))
     print(f"👥  {len(users)} acc | {args.workers} luồng | lô {args.batch_size} acc"
-          f" + nghỉ {args.batch_pause}s\n")
+          f" + nghỉ {args.batch_pause}s")
+    print(f"💰 Chừa lại mỗi acc: {args.keep:,} x (số chuyển = số dư - {args.keep:,})\n")
 
     t_start = time.time()
 
@@ -699,7 +713,7 @@ def main():
                 log(f"⏳ Lô {bi+1}: nghỉ {args.phase_gap}s trước khi chuyển...")
                 time.sleep(args.phase_gap)
                 log(f"\n{'='*70}\n💎 LÔ {bi+1}/{len(batches)} — CHUYỂN {len(chunk)} acc\n{'='*70}")
-                results = run_phase(phase_transfer, chunk)
+                results = run_phase(partial(phase_transfer, keep=args.keep), chunk)
                 with trans_lock:
                     trans_results[bi] = results
                     all_trans.extend(results)
@@ -709,6 +723,7 @@ def main():
                 if args.dest2 and args.per_batch_forward:
                     time.sleep(3)
                     forward_balance(args.dest_user, args.dest_pass, args.dest, args.dest2, log,
+                                    keep=args.keep,
                                     max_attempts=args.forward_retry,
                                     retry_delay=args.forward_retry_delay)
                 elif args.dest2 and not args.per_batch_forward:
@@ -743,13 +758,14 @@ def main():
                     time.sleep(args.phase_gap)
                 if execute:
                     log("PHA 2 — CHUYỂN...")
-                    all_trans += run_phase(phase_transfer, chunk)
+                    all_trans += run_phase(partial(phase_transfer, keep=args.keep), chunk)
                     okb = [r for r in all_trans if r["user"] in [c for c in chunk] and r["status"] == "OK"]
                     log(f"✅ lô {bi}: chuyển xong ({len(okb)} OK)")
                     # Chuyển tiếp x từ cấp 1 -> cấp 2 sau mỗi lô (chỉ nếu bật --per-batch-forward)
                     if args.dest2 and args.per_batch_forward:
                         time.sleep(3)
                         forward_balance(args.dest_user, args.dest_pass, args.dest, args.dest2, log,
+                                        keep=args.keep,
                                         max_attempts=args.forward_retry,
                                         retry_delay=args.forward_retry_delay)
                     elif args.dest2 and not args.per_batch_forward and bi == len(batches):
@@ -783,6 +799,7 @@ def main():
         time.sleep(10)  # chờ server settle các transfer vừa xong (10s)
         final_forward = forward_balance(args.dest_user, args.dest_pass,
                                          args.dest, args.dest2, log,
+                                         keep=args.keep,
                                          max_attempts=args.forward_retry,
                                          retry_delay=args.forward_retry_delay)
     elif execute and args.dest2 and not args.dest_user:

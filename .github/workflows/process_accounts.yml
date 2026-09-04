@@ -1,4 +1,4 @@
-name: Quay & Chuyển thẳng x & Xóa tin nhắn
+name: Quay & Chuyển xu (chừa lại một ít)
 
 on:
   workflow_dispatch:
@@ -27,14 +27,10 @@ on:
         description: 'PlayerId nhận x (chuyển thẳng)'
         required: true
         default: ''
-      pm_user:
-        description: 'Tk cần xóa tin nhắn. Gõ n/a để BỎ QUA'
+      keep_xu:
+        description: 'Số xu CHỪA LẠI mỗi acc (không rút sạch về 0, đỡ bị nghi). Gõ 0 = chuyển hết như cũ'
         required: false
-        default: ''
-      pm_pass:
-        description: 'Mk tk xóa tin. RỖNG = dùng pwd chung'
-        required: false
-        default: ''
+        default: '500'
       workers:
         description: 'Số luồng (5-50, default 30)'
         required: false
@@ -56,8 +52,7 @@ env:
   END: ${{ github.event.inputs.end || '' }}
   PW: ${{ github.event.inputs.pwd }}
   DEST2_ID: ${{ github.event.inputs.dest2_id }}
-  PM_USER: ${{ github.event.inputs.pm_user || '' }}
-  PM_PW: ${{ github.event.inputs.pm_pass || '' }}
+  KEEP_XU: ${{ github.event.inputs.keep_xu || '500' }}
   WORKERS: ${{ github.event.inputs.workers || '30' }}
   BATCH: ${{ github.event.inputs.batch_size || '500' }}
   PIPELINE: ${{ github.event.inputs.pipeline || 'true' }}
@@ -91,7 +86,7 @@ jobs:
             echo "❌ Thiếu dest2_id (PlayerId nhận x)"
             exit 1
           fi
-          echo "🎯 Chuyển THẲNG vào: id=$DEST2_ID"
+          echo "🎯 Chuyển THẲNG vào: id=$DEST2_ID | chừa lại mỗi acc: $KEEP_XU x"
 
           PIPELINE_FLAG=""
           if [ "$PIPELINE" = "true" ]; then
@@ -106,6 +101,7 @@ jobs:
             fi
             python spin_and_transfer.py --range "$PREFIX $START $END" \
               --password "$PW" --dest "$DEST2_ID" \
+              --keep "$KEEP_XU" \
               --execute --phase all --prune \
               --batch-size "$BATCH" --workers "$WORKERS" $PIPELINE_FLAG \
               --append --skip-done
@@ -129,6 +125,7 @@ jobs:
               echo "📄 $ONE_FILE: $ACC_COUNT dòng"
               python spin_and_transfer.py --list "$ONE_FILE" \
                 --password "$PW" --dest "$DEST2_ID" \
+                --keep "$KEEP_XU" \
                 --execute --phase all --prune \
                 --batch-size "$BATCH" --workers "$WORKERS" $PIPELINE_FLAG \
                 --append --skip-done
@@ -140,32 +137,11 @@ jobs:
             echo "▶ Tự tìm acc*.txt trong repo (pipeline: $PIPELINE)"
             python spin_and_transfer.py \
               --password "$PW" --dest "$DEST2_ID" \
+              --keep "$KEEP_XU" \
               --execute --phase all --prune \
               --batch-size "$BATCH" --workers "$WORKERS" $PIPELINE_FLAG \
               --append --skip-done
           fi
-
-      - name: Xóa tin nhắn nhận x (wipe PM inbox)
-        if: env.PM_USER != '' && env.PM_USER != 'n/a'
-        run: |
-          PM_USER_ACTUAL="$PM_USER"
-          PM_PASS_ACTUAL="$PM_PW"
-          if [ -z "$PM_USER_ACTUAL" ]; then
-            echo "❌ pm_user rỗng mà không gõ n/a -> không biết tk nào cần xóa tin"
-            exit 1
-          fi
-          if [ -z "$PM_PASS_ACTUAL" ]; then
-            PM_PASS_ACTUAL="$PW"
-            echo "📌 pm_pass rỗng -> dùng MK chung (pwd)"
-          fi
-          echo "🗑️  Wipe PM inbox: $PM_USER_ACTUAL"
-          # Wipe 3 lần (mỗi lần cách 5s) để đảm bảo sạch + bắt tin mới dồn về
-          python pm_clean_all.py --user "$PM_USER_ACTUAL" --password "$PM_PASS_ACTUAL" || echo "⚠️ Lần 1 thất bại"
-          sleep 5
-          python pm_clean_all.py --user "$PM_USER_ACTUAL" --password "$PM_PASS_ACTUAL" || echo "⚠️ Lần 2 thất bại"
-          sleep 5
-          python pm_clean_all.py --user "$PM_USER_ACTUAL" --password "$PM_PASS_ACTUAL" || echo "⚠️ Lần 3 thất bại"
-          echo "✅ Wipe xong (3 lần)"
 
       - name: Commit kết quả
         if: always()
