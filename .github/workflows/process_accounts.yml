@@ -26,7 +26,7 @@ on:
       dest_id:
         description: 'PlayerId nhận x (cấp 1)'
         required: true
-        default: '69284652'
+        default: ''
       dest_user:
         description: 'Username tk nhận cấp 1 (để chuyển tiếp cấp 2). Rỗng = dùng default trong code (2)'
         required: false
@@ -38,7 +38,7 @@ on:
       dest2_id:
         description: 'PlayerId nhận x cấp 2 (chuyển tiếp từ cấp 1). Rỗng hoặc 0 = TẮT chuyển tiếp'
         required: false
-        default: '69284652'
+        default: ''
       pm_user:
         description: 'Tk cần xóa tin nhắn. Mặc định = dest_user (2). Gõ n/a để BỎ QUA'
         required: false
