@@ -24,11 +24,11 @@ on:
         required: true
         default: ''
       dest2_id:
-        description: 'PlayerId nhận x CẤP 2 (chuyển thẳng, bỏ qua cấp 1)'
+        description: 'PlayerId nhận x (chuyển thẳng)'
         required: true
         default: ''
       pm_user:
-        description: 'Tk cần xóa tin nhắn. Mặc định = dest2 nhận. Gõ n/a để BỎ QUA'
+        description: 'Tk cần xóa tin nhắn. Gõ n/a để BỎ QUA'
         required: false
         default: ''
       pm_pass:
@@ -48,14 +48,6 @@ on:
         required: false
         type: boolean
         default: true
-      forward_retry:
-        description: 'Số lần retry forward (login/transfer fail) — default 3'
-        required: false
-        default: '3'
-      forward_retry_delay:
-        description: 'Giây chờ giữa các retry forward — default 30'
-        required: false
-        default: '30'
 
 env:
   LIST_FILE: ${{ github.event.inputs.list_file || '' }}
@@ -69,8 +61,6 @@ env:
   WORKERS: ${{ github.event.inputs.workers || '30' }}
   BATCH: ${{ github.event.inputs.batch_size || '500' }}
   PIPELINE: ${{ github.event.inputs.pipeline || 'true' }}
-  FORWARD_RETRY: ${{ github.event.inputs.forward_retry || '3' }}
-  FORWARD_RETRY_DELAY: ${{ github.event.inputs.forward_retry_delay || '30' }}
 
 permissions:
   contents: write
@@ -95,20 +85,18 @@ jobs:
         run: |
           pip install -r requirements.txt
 
-      - name: Quay vòng quay + Chuyển THẲNG vào cấp 2
+      - name: Quay vòng quay + Chuyển THẲNG
         run: |
           if [ -z "$DEST2_ID" ]; then
-            echo "❌ Thiếu dest2_id (PlayerId nhận x cấp 2)"
+            echo "❌ Thiếu dest2_id (PlayerId nhận x)"
             exit 1
           fi
-          echo "🎯 Chuyển THẲNG vào cấp 2: id=$DEST2_ID (không qua cấp 1)"
+          echo "🎯 Chuyển THẲNG vào: id=$DEST2_ID"
 
           PIPELINE_FLAG=""
           if [ "$PIPELINE" = "true" ]; then
             PIPELINE_FLAG="--pipeline"
           fi
-
-          FORWARD_FLAGS="--forward-retry $FORWARD_RETRY --forward-retry-delay $FORWARD_RETRY_DELAY"
 
           if [ -n "$PREFIX" ]; then
             echo "▶ Dải tên: $PREFIX $START..$END (pipeline: $PIPELINE)"
@@ -117,7 +105,7 @@ jobs:
               exit 1
             fi
             python spin_and_transfer.py --range "$PREFIX $START $END" \
-              --password "$PW" --dest "$DEST2_ID" $FORWARD_FLAGS \
+              --password "$PW" --dest "$DEST2_ID" \
               --execute --phase all --prune \
               --batch-size "$BATCH" --workers "$WORKERS" $PIPELINE_FLAG \
               --append --skip-done
@@ -140,7 +128,7 @@ jobs:
               ACC_COUNT=$(grep -c '.' "$ONE_FILE" 2>/dev/null || echo 0)
               echo "📄 $ONE_FILE: $ACC_COUNT dòng"
               python spin_and_transfer.py --list "$ONE_FILE" \
-                --password "$PW" --dest "$DEST2_ID" $FORWARD_FLAGS \
+                --password "$PW" --dest "$DEST2_ID" \
                 --execute --phase all --prune \
                 --batch-size "$BATCH" --workers "$WORKERS" $PIPELINE_FLAG \
                 --append --skip-done
@@ -151,7 +139,7 @@ jobs:
           else
             echo "▶ Tự tìm acc*.txt trong repo (pipeline: $PIPELINE)"
             python spin_and_transfer.py \
-              --password "$PW" --dest "$DEST2_ID" $FORWARD_FLAGS \
+              --password "$PW" --dest "$DEST2_ID" \
               --execute --phase all --prune \
               --batch-size "$BATCH" --workers "$WORKERS" $PIPELINE_FLAG \
               --append --skip-done
