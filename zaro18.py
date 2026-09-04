@@ -965,7 +965,7 @@ class PikafishBot:
         # Tìm bet_amt_id cho mức 1000xu
         bet_amt_id = 0  # mặc định
         for ba in self.bet_amts:
-            if ba["value"] == 500000:
+            if ba["value"] == 5000:
                 bet_amt_id = ba["id"]
                 break
         args = [
