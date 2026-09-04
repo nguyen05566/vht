@@ -75,7 +75,7 @@ BOT_MATCH_DURATION = '10'
 BOT_TURN_DURATION = '60'
 BOT_ACC_DURATION = '0'
 BOT_BLOCK_SOFTWARE = '0'
-BOT_TABLE_PASSWORD = '1'  # Mật khẩu bàn (để trống = không đặt mật khẩu)
+BOT_TABLE_PASSWORD = ''  # Mật khẩu bàn (để trống = không đặt mật khẩu)
 WS_SNIFF_MODE = True  # Bắt tất cả gói WebSocket để phân tích protocol
 
 VN_TEN_DAU = [
