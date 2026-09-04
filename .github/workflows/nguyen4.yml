@@ -6,13 +6,14 @@ on:
       runtime_hours:
         description: 'Runtime (hours)'
         required: false
-        default: '5.99722'
+        default: '5.7'
         type: string
-  schedule:  # BẬT - tự động mở phiên nối tiếp mỗi 6h, gần như không nghỉ
+  schedule:  # Luoi an toan / watchdog: tu phuc hoi neu chuoi ban giao bi dut
     - cron: '15 */6 * * *'
 
 permissions:
   contents: read
+  actions: write  # can de tu kich phien ke tiep qua API
 
 concurrency:
   group: ${{ github.workflow }}-gamevh-account
@@ -21,7 +22,7 @@ concurrency:
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 359.8333
+    timeout-minutes: 355
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -41,17 +42,49 @@ jobs:
           path: embryo-engine
           key: embryo-caro6-linux-1.2.0-c6
 
-      - name: Run Caro Bot nguyen4 (Linux native engine, no wine)
+      - name: Run Caro Bot nguyen4 (tu ban giao truoc khi het gio)
         env:
           CARO_RUNTIME_HOURS: ${{ inputs.runtime_hours || '5.7' }}
-          # Ưu tiên Secrets nếu có, không có thì nguyen4.py fallback về hardcode nguyen4
+          # Uu tien Secrets neu co, khong co thi nguyen4.py fallback ve hardcode nguyen4
           CARO_USER: ${{ secrets.CARO_USER }}
           CARO_PWWD: ${{ secrets.CARO_PWWD }}
+          HANDOFF_MINUTES: '348'
         run: |
-          echo "Starting nguyen4.py; it will auto-restart until job timeout (6h)"
+          START=$(date +%s)
+          LIMIT=$((HANDOFF_MINUTES * 60))
+          echo "Bot chay toi da ${HANDOFF_MINUTES} phut roi tu ban giao sang phien moi (job timeout 355p)"
           while true; do
-            echo "=== $(date -u +'%Y-%m-%dT%H:%M:%SZ') Starting nguyen4.py ==="
-            python3 -u nguyen4.py || echo "nguyen4.py exited with code $?"
+            NOW=$(date +%s)
+            ELAPSED=$((NOW - START))
+            REMAINING=$((LIMIT - ELAPSED))
+            if [ "$REMAINING" -le 60 ]; then
+              echo "Con ${REMAINING}s < 60s: den gio ban giao, dung bot de kich phien moi"
+              break
+            fi
+            echo "=== $(date -u +'%Y-%m-%dT%H:%M:%SZ') Starting nguyen4.py (phut $((ELAPSED / 60))/${HANDOFF_MINUTES}) ==="
+            # Gioi han moi luot bot khong vuot qua gio ban giao (bot tu thoat som hon neu crash/het RUNTIME)
+            timeout "${REMAINING}s" python3 -u nguyen4.py || echo "nguyen4.py exited with code $?"
             echo "Restarting nguyen4.py in 10 seconds"
             sleep 10
           done
+
+      - name: Kich phien ke tiep (ban giao lien tuc)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for i in 1 2 3; do
+            CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              https://api.github.com/repos/${{ github.repository }}/actions/workflows/nguyen4.yml/dispatches \
+              -d '{"ref":"main"}')
+            echo "Lan $i: dispatch HTTP $CODE"
+            if [ "$CODE" = "204" ]; then
+              echo "Da kich phien moi thanh cong"
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "Khong kich duoc phien moi sau 3 lan thu (cron 6h se tu phuc hoi)"
+          exit 1
