@@ -6,7 +6,7 @@ on:
       runtime_hours:
         description: 'Runtime (hours)'
         required: false
-        default: '5.7'
+        default: '5.99722'
         type: string
   schedule:  # BẬT - tự động mở phiên nối tiếp mỗi 6h, gần như không nghỉ
     - cron: '15 */6 * * *'
@@ -21,7 +21,7 @@ concurrency:
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 355
+    timeout-minutes: 359.8333
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
