@@ -21,7 +21,7 @@ concurrency:
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 355
+    timeout-minutes: 359
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -45,7 +45,7 @@ jobs:
 
       - name: Download Pikafish engine + NNUE
         if: steps.cache-pikafish.outputs.cache-hit != 'true'
-        timeout-minutes: 10
+        timeout-minutes: 1
         env:
           PK_URL: https://github.com/official-pikafish/Pikafish/releases/download/Pikafish-2026-01-02/Pikafish.2026-01-02.7z
         run: |
@@ -96,12 +96,12 @@ jobs:
         env:
           ZARO18_USER: ${{ secrets.ZARO18_USER }}
           ZARO18_PASSWD: ${{ secrets.ZARO18_PASSWD }}
-          CARO_RUNTIME_HOURS: ${{ inputs.runtime_hours || '5.7' }}
+          CARO_RUNTIME_HOURS: ${{ inputs.runtime_hours || '5.9' }}
         run: |
           echo "Starting zaro18.py; it will auto-restart until job timeout (~6h)"
           while true; do
             echo "=== $(date -u +'%Y-%m-%dT%H:%M:%SZ') Starting zaro18.py ==="
             python3 -u zaro18.py || echo "zaro18.py exited with code $?"
-            echo "Restarting zaro18.py in 10 seconds"
-            sleep 10
+            echo "Restarting zaro18.py in 1 seconds"
+            sleep 1
           done
