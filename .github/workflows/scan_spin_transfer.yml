@@ -76,8 +76,8 @@ jobs:
          if [ "${{ github.event.inputs.skip_scan }}" = "true" ]; then
            ARGS="$ARGS --skip-scan"
          fi
-         echo "Running: python scan_and_transfer.py $ARGS --skip-done"
-         python scan_and_transfer.py $ARGS --skip-done
+         echo "Running: python scan_and_transfer.py $ARGS"
+         python scan_and_transfer.py $ARGS
 
      - name: Commit ket qua
        if: always()

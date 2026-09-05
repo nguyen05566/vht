@@ -104,7 +104,7 @@ jobs:
               --keep "$KEEP_XU" \
               --execute --phase all --prune \
               --batch-size "$BATCH" --workers "$WORKERS" $PIPELINE_FLAG \
-              --append --skip-done
+              --append
           elif [ -n "$LIST_FILE" ]; then
             # Chạy TỪNG FILE lần lượt, không gộp
             FILE_IDX=0
@@ -128,7 +128,7 @@ jobs:
                 --keep "$KEEP_XU" \
                 --execute --phase all --prune \
                 --batch-size "$BATCH" --workers "$WORKERS" $PIPELINE_FLAG \
-                --append --skip-done
+                --append
               echo "✅ Xong file $ONE_FILE"
             done
             echo ""
@@ -140,7 +140,7 @@ jobs:
               --keep "$KEEP_XU" \
               --execute --phase all --prune \
               --batch-size "$BATCH" --workers "$WORKERS" $PIPELINE_FLAG \
-              --append --skip-done
+              --append
           fi
 
       - name: Commit kết quả
