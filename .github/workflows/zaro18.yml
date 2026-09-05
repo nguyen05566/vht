@@ -6,7 +6,7 @@ on:
       runtime_hours:
         description: 'Runtime (hours)'
         required: false
-        default: '5.7'
+        default: '5.99'
         type: string
   schedule:
     - cron: '45 */6 * * *'
