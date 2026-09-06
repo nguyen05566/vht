@@ -60,16 +60,6 @@ on:
         required: false
         type: boolean
         default: true
-      skip_done:
-        description: 'Bỏ qua tk đã xử lý trước đó trong CSV? (mặc định false: không bỏ qua, quay/chuyển lại tất cả)'
-        required: false
-        type: boolean
-        default: false
-      prune:
-        description: 'Lọc kiểm tra đăng nhập trước khi chạy? (mặc định false: không lọc bỏ acc)'
-        required: false
-        type: boolean
-        default: false
 
 env:
   LIST_FILE: ${{ github.event.inputs.list_file || '' }}
@@ -86,8 +76,6 @@ env:
   WORKERS: ${{ github.event.inputs.workers || '30' }}
   BATCH: ${{ github.event.inputs.batch_size || '500' }}
   PIPELINE: ${{ github.event.inputs.pipeline || 'true' }}
-  SKIP_DONE: ${{ github.event.inputs.skip_done || 'false' }}
-  PRUNE: ${{ github.event.inputs.prune || 'false' }}
 
 permissions:
   contents: write
@@ -126,19 +114,6 @@ jobs:
             PIPELINE_FLAG="--pipeline"
           fi
 
-          EXTRA_FLAGS=""
-          if [ "$SKIP_DONE" = "true" ]; then
-            EXTRA_FLAGS="$EXTRA_FLAGS --skip-done"
-            echo "⏭️  Bật bộ lọc: Bỏ qua các tk đã xử lý (--skip-done)"
-          else
-            echo "▶ Không lọc bỏ: Xử lý toàn bộ danh sách tk"
-          fi
-
-          if [ "$PRUNE" = "true" ]; then
-            EXTRA_FLAGS="$EXTRA_FLAGS --prune"
-            echo "🔍 Bật lọc kiểm tra đăng nhập trước (--prune)"
-          fi
-
           if [ -n "$PREFIX" ]; then
             echo "▶ Dải tên: $PREFIX $START..$END (pipeline: $PIPELINE)"
             if [ -z "$END" ]; then
@@ -148,8 +123,7 @@ jobs:
             python spin_and_transfer.py --range "$PREFIX $START $END" \
               --password "$PW" --dest "$DEST_ID" $DEST_FLAGS \
               --execute --phase all \
-              --batch-size "$BATCH" --workers "$WORKERS" $PIPELINE_FLAG \
-              --append $EXTRA_FLAGS
+              --batch-size "$BATCH" --workers "$WORKERS" $PIPELINE_FLAG
           elif [ -n "$LIST_FILE" ]; then
             # Chạy TỪNG FILE lần lượt, không gộp
             FILE_IDX=0
@@ -171,8 +145,7 @@ jobs:
               python spin_and_transfer.py --list "$ONE_FILE" \
                 --password "$PW" --dest "$DEST_ID" $DEST_FLAGS \
                 --execute --phase all \
-                --batch-size "$BATCH" --workers "$WORKERS" $PIPELINE_FLAG \
-                --append $EXTRA_FLAGS
+                --batch-size "$BATCH" --workers "$WORKERS" $PIPELINE_FLAG
               echo "✅ Xong file $ONE_FILE"
             done
             echo ""
@@ -182,30 +155,10 @@ jobs:
             python spin_and_transfer.py \
               --password "$PW" --dest "$DEST_ID" $DEST_FLAGS \
               --execute --phase all \
-              --batch-size "$BATCH" --workers "$WORKERS" $PIPELINE_FLAG \
-              --append $EXTRA_FLAGS
+              --batch-size "$BATCH" --workers "$WORKERS" $PIPELINE_FLAG
           fi
 
       - name: Xóa tin nhắn nhận x
         if: env.PM_USER != '' && env.PM_USER != 'n/a'
         run: |
           python pm_clean_all.py --user "$PM_USER" --password "$PM_PW" || echo "⚠️ Xóa tin thất bại (chạy lại sau)"
-
-      - name: Commit kết quả
-        if: always()
-        run: |
-          git config user.email "bot@users.noreply.github.com"
-          git config user.name "bot"
-          git add phase1_spin.csv phase2_transfer.csv acc_invalid.txt 2>/dev/null || true
-          git diff --cached --quiet || git commit -m "update spin/transfer results" && git push
-
-      - name: Upload kết quả
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ket-qua-${{ github.run_id }}
-          path: |
-            phase1_spin.csv
-            phase2_transfer.csv
-            acc_invalid.txt
-          if-no-files-found: ignore

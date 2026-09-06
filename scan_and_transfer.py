@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-DÒ TÀI KHOẢN TỪ acc*.txt + CHIA LÔ + QUAY + CHUYỂN XU
-============================================================
-1) Gom tất cả acc*.txt trong repo, deduplicate
-2) Dò nhanh (HTTP-only) xem tk nào còn hợp lệ → acc_scanned_valid.txt
-3) Chia lô → chạy spin_and_transfer.py cho từng lô
-
-Dùng riêng, không đăng ký mới.
+CHIA LÔ + QUAY + CHUYỂN XU TỪ FILE acc*.txt (TRỰC TIẾP, KHÔNG ĐỐI CHIẾU, KHÔNG LƯU CSV)
+======================================================================================
+1) Đọc tài khoản từ pattern file (acc*.txt)
+2) Chia lô trực tiếp (không pre-scan, không đối chiếu file cũ)
+3) Chạy quay & chuyển xu từng lô (acc lỗi sẽ tự động bỏ qua)
 """
 import argparse
 import glob
@@ -18,7 +16,7 @@ import time
 
 
 def load_all_accounts(pattern="acc*.txt"):
-    """Gom tất cả username từ các file acc*.txt, deduplicate, giữ thứ tự."""
+    """Gom tất cả username từ các file acc*.txt."""
     seen = set()
     users = []
     files = sorted(glob.glob(pattern))
@@ -33,7 +31,6 @@ def load_all_accounts(pattern="acc*.txt"):
                     line = line.strip()
                     if not line or line.startswith("#"):
                         continue
-                    # acc*.txt có thể là tab-separated: username\tdate\trun_id
                     name = line.split("\t")[0].strip()
                     if name and name.lower() not in seen:
                         seen.add(name.lower())
@@ -41,7 +38,7 @@ def load_all_accounts(pattern="acc*.txt"):
                         count += 1
         except Exception as e:
             print(f"  Lỗi đọc {fp}: {e}")
-        print(f"  {fp}: {count} tk mới")
+        print(f"  {fp}: {count} tk")
     return users, files
 
 
@@ -50,7 +47,7 @@ def write_batch(users, prefix="batch_scanned", size=750):
     files = []
     for i, start in enumerate(range(0, len(users), size)):
         chunk = users[start:start + size]
-        path = f"{prefix}_{i:02d}"
+        path = f"{prefix}_{i:02d}.txt"
         with open(path, "w", encoding="utf-8") as f:
             for u in chunk:
                 f.write(f"{u}\n")
@@ -61,7 +58,7 @@ def write_batch(users, prefix="batch_scanned", size=750):
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Dò tk từ acc*.txt + chia lô + quay + chuyển xu")
+        description="Chia lô + quay + chuyển xu từ acc*.txt (trực tiếp)")
     ap.add_argument("--pattern", default="acc*.txt",
                     help="Pattern file chứa tk (default: acc*.txt)")
     ap.add_argument("--password", "--pwd", required=True,
@@ -70,25 +67,19 @@ def main():
                     help="PlayerId nhận xu")
     ap.add_argument("--batch-size", type=int, default=750,
                     help="Tk mỗi lô (default: 750)")
-    ap.add_argument("--workers", type=int, default=12,
-                    help="Số luồng quay/chuyển (default: 12)")
-    ap.add_argument("--scan-workers", type=int, default=80,
-                    help="Số luồng dò tk (default: 80)")
-    ap.add_argument("--batch-pause", type=int, default=20,
+    ap.add_argument("--workers", type=int, default=30,
+                    help="Số luồng quay/chuyển (default: 30)")
+    ap.add_argument("--batch-pause", type=int, default=10,
                     help="Nghỉ giữa các lô (giây)")
-    ap.add_argument("--phase-gap", type=int, default=60,
+    ap.add_argument("--phase-gap", type=int, default=15,
                     help="Nghỉ giữa quay và chuyển (giây)")
-    ap.add_argument("--skip-scan", action="store_true",
-                    help="Bỏ qua bước dò, dùng thẳng acc*.txt")
-    ap.add_argument("--skip-done", action="store_true",
-                    help="Bỏ qua tk đã xử lý trong phase2_transfer.csv")
     args = ap.parse_args()
 
     t_start = time.time()
 
     # ===== BƯỚC 1: GOM TÀI KHOẢN =====
     print("=" * 70)
-    print("BƯỚC 1: Gom tài khoản từ acc*.txt")
+    print("BƯỚC 1: Đọc tài khoản từ", args.pattern)
     print("=" * 70)
     users, files = load_all_accounts(args.pattern)
     print(f"\nTổng: {len(users)} tk duy nhất từ {len(files)} file")
@@ -96,86 +87,16 @@ def main():
         print("Không có tk nào để xử lý.")
         return
 
-    # ===== BƯỚC 2: DÒ HỢP LỆ =====
-    valid_file = "acc_scanned_valid.txt"
-    if not args.skip_scan:
-        print(f"\n{'=' * 70}")
-        print(f"BƯỚC 2: Dò {len(users)} tk ({args.scan_workers} luồng HTTP)")
-        print("=" * 70)
-        print("Đang dò nhanh (HTTP login check)...")
-
-        import requests as _req
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        LOGIN_URL = "https://gamevh.net/login.jsp"
-        UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                  "(KHTML, like Gecko) Chrome/139.0 Safari/537.36")
-
-        def http_check(user):
-            try:
-                s = _req.Session()
-                s.headers.update({"User-Agent": UA})
-                s.get(LOGIN_URL, timeout=10)
-                r = s.post(LOGIN_URL, timeout=10,
-                           data={"redirect": "/", "USER_NAME": user,
-                                 "PASSWORD": args.password,
-                                 "AUTO_LOGIN": "true", "LOGIN": "Đăng nhập"},
-                           headers={"Origin": "https://gamevh.net",
-                                    "Referer": LOGIN_URL},
-                           allow_redirects=True)
-                return user, "login.jsp" not in r.url
-            except Exception:
-                return user, False
-
-        valid = []
-        invalid = 0
-        with ThreadPoolExecutor(max_workers=args.scan_workers) as ex:
-            futs = {ex.submit(http_check, u): u for u in users}
-            for i, f in enumerate(as_completed(futs), 1):
-                user, ok = f.result()
-                if ok:
-                    valid.append(user)
-                else:
-                    invalid += 1
-                if i % 200 == 0 or i == len(users):
-                    print(f"  [{i}/{len(users)}] hợp lệ: {len(valid)}, loại: {invalid}")
-
-        with open(valid_file, "w", encoding="utf-8") as f:
-            for u in sorted(valid):
-                f.write(f"{u}\n")
-        print(f"\nDò xong: {len(valid)} hợp lệ / {invalid} loại / {len(users)} tổng")
-        print(f"Ghi {valid_file}")
-        users = valid
-
-    if not users:
-        print("Không có tk hợp lệ nào.")
-        return
-
-    # Loại trừ đã xử lý
-    if args.skip_done:
-        done = set()
-        try:
-            import csv as _csv
-            with open("phase2_transfer.csv", encoding="utf-8") as f:
-                for row in _csv.DictReader(f):
-                    if row.get("status") in ("OK", "BALANCE_TOO_LOW"):
-                        done.add(row["acc"])
-        except FileNotFoundError:
-            pass
-        if done:
-            before = len(users)
-            users = [u for u in users if u not in done]
-            print(f"Bỏ qua {before - len(users)} tk đã xử lý, còn {len(users)}")
-
-    # ===== BƯỚC 3: CHIA LÔ =====
+    # ===== BƯỚC 2: CHIA LÔ =====
     print(f"\n{'=' * 70}")
-    print(f"BƯỚC 3: Chia {len(users)} tk thành lô ({args.batch_size} tk/lô)")
+    print(f"BƯỚC 2: Chia {len(users)} tk thành các lô ({args.batch_size} tk/lô)")
     print("=" * 70)
-    batch_files = write_batch(users, prefix="batch_scanned", size=args.batch_size)
+    batch_files = write_batch(users, prefix="batch_run", size=args.batch_size)
     print(f"\nTổng {len(batch_files)} lô")
 
-    # ===== BƯỚC 4: QUAY + CHUYỂN XU TỪNG LÔ =====
+    # ===== BƯỚC 3: QUAY + CHUYỂN XU TỪNG LÔ =====
     print(f"\n{'=' * 70}")
-    print(f"BƯỚC 4: Quay + Chuyển xu ({len(batch_files)} lô, {args.workers} luồng)")
+    print(f"BƯỚC 3: Quay + Chuyển xu ({len(batch_files)} lô, {args.workers} luồng)")
     print("=" * 70)
 
     for i, bf in enumerate(batch_files, 1):
@@ -189,22 +110,26 @@ def main():
             "--password", args.password,
             "--dest", str(args.dest),
             "--execute", "--phase", "all",
+            "--pipeline",
             "--batch-size", str(args.batch_size),
             "--batch-pause", str(args.batch_pause),
             "--phase-gap", str(args.phase_gap),
-            "--workers", str(args.workers),
-            "--append"
+            "--workers", str(args.workers)
         ]
-        if args.skip_done:
-            cmd.append("--skip-done")
 
         result = subprocess.run(cmd, timeout=1800)
         if result.returncode != 0:
-            print(f"  Lô {i} lỗi (code={result.returncode}), tiếp lô tiếp")
+            print(f"  Lô {i} kết thúc (code={result.returncode}), tiếp tục lô tiếp")
 
-        # Nghỉ giữa các lô (trừ lô cuối)
+        # Dọn file lô tạm
+        try:
+            if os.path.exists(bf):
+                os.remove(bf)
+        except Exception:
+            pass
+
         if i < len(batch_files):
-            print(f"Nghỉ {args.batch_pause}s giữa lô...")
+            print(f"Nghỉ {args.batch_pause}s giữa các lô...")
             time.sleep(args.batch_pause)
 
     wall = time.time() - t_start

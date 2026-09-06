@@ -115,9 +115,9 @@ jobs:
         run: |
           echo "▶ Quay + Chuyển x từ acc9.txt về playerId $DEST_ID"
           python spin_and_transfer.py --list acc9.txt \
-            --password "$PW" --dest "$DEST_ID" --execute --phase all --prune \
+            --password "$PW" --dest "$DEST_ID" --execute --phase all \
             --batch-size 750 --batch-pause 20 --phase-gap 60 \
-            --workers "$WORKERS" --append
+            --workers "$WORKERS"
 
       # ==================== PHA 3: XÓA TIN NHẮN ====================
       - name: PHA 3 - Xóa tin nhắn nhận x
@@ -128,14 +128,7 @@ jobs:
         run: |
           python pm_clean_all.py --user "$PM_USER" --password "$PM_PW" || echo "Xóa tin thất bại"
 
-      # ==================== KẾT QUẢ ====================
-      - name: Commit kết quả
-        if: always()
-        run: |
-          git config user.email "bot@users.noreply.github.com"
-          git config user.name "bot"
-          git add phase1_spin.csv phase2_transfer.csv 2>/dev/null || true
-          git diff --cached --quiet || git commit -m "results: spin+transfer acc9" && git push || true
+
 
       - name: Upload kết quả
         if: always()
@@ -144,6 +137,4 @@ jobs:
           name: ket-qua-9-${{ github.run_id }}
           path: |
             acc9.txt
-            phase1_spin.csv
-            phase2_transfer.csv
           if-no-files-found: ignore

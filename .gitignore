@@ -1,2 +1,7 @@
 __pycache__/
 *.pyc
+*.csv
+acc_invalid.txt
+acc_scanned_valid.txt
+batch_*
+
