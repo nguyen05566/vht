@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-QUAY VÒNG QUAY MAY MẮN ĐỒNG LOẠT + CHUYỂN X VỀ xxxx (2 PHA)
+QUAY VÒNG QUAY MAY MẮN ĐỒNG LOẠT + CHUYỂN TOÀN BỘ X VỀ xxxx (2 PHA)
 ======================================================================
 PHA 1 - QUAY : mỗi acc login HTTP+WS -> GET_REMAIN_SPIN -> quay nếu còn lượt.
-PHA 2 - CHUYỂN: mỗi acc login HTTP+WS MỚI -> đọc số dư -> TRANSFER về đích,
-                 CHỪA LẠI --keep x mỗi acc (mặc định 10) để acc không về 0
-                 (rút sạch dễ bị nghi là acc bot/rửa x).
-KHÔNG còn chuyển tiếp cấp 2 — chỉ chuyển THẲNG tới 1 id duy nhất nhập qua --dest.
+PHA 2 - CHUYỂN: mỗi acc login HTTP+WS MỚI -> đọc số dư -> TRANSFER 100% về xxxx.
 
 Vì sao 2 pha (đã kiểm chứng thực tế 2026-08-31):
   - Chuyển x NGAY trong cùng session vừa quay thưởng -> server TỪ CHỐI (100/100 trường hợp).
@@ -18,14 +15,6 @@ Ghi chú thêm:
   - xxxx chỉ nhận 90% số chuyển (phí chuyển 10%: 1300 -> +1170, 1000 -> +900).
   - Vòng quay: nhiều ô thưởng (10, 100, 150, 500, 1000 x...), quà cộng thẳng vào dư.
   - Tối thiểu chuyển: > 200 x (server quy định).
-  - Số chuyển mỗi acc = số dư - --keep (mặc định chừa 10 x).
-
-Chống quét (anti-detect):
-  - Shuffle thứ tự acc, stagger login (0-3s), jitter các khoảng nghỉ.
-  - Sau chuyển thành công: nán lại ngẫu nhiên 20-60s (vẫn trả ping),
-    phá pattern 'login - chuyển - logout ngay'.
-  - Chỉ chuyển khi acc KHÔNG ngồi trong bàn (client chính chủ cấm chuyển
-    cho người đang ngồi bàn — script làm được nhưng dễ bị audit).
 
 Cách chạy:
   python3 spin_and_transfer.py --execute --phase spin --workers 5     # pha 1: quay
@@ -33,7 +22,6 @@ Cách chạy:
   python3 spin_and_transfer.py --execute --all                         # chạy cả 2 pha tự động
 """
 import argparse
-import random
 import re
 import struct
 import csv
@@ -41,7 +29,6 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from functools import partial
 
 import requests
 import websocket
@@ -62,9 +49,8 @@ CMD_ALERT = 303
 CMD_BALANCE_CHANGED = 431
 
 MIN_TRANSFER = 200      # server: chuyển tối thiểu > 200 x
-DEFAULT_KEEP = 10       # mặc định chừa lại mỗi acc (không rút sạch về 0, đỡ bị nghi)
-# LƯU Ý: không hardcode id nhận trong code nữa — id đích BẮT BUỘC nhập qua --dest
-# để tránh chuyển nhầm tài khoản.
+DEST_ID = 69282667      # nhận x cấp 1
+DEST_NAME = "nhancap1"
 RETRY_DELAY = 60        # nếu transfer bị từ chối -> chờ rồi thử lại session mới
 
 UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -254,51 +240,9 @@ def ws_transfer(ws, log, dest_id, amount, timeout=12):
     return False, -1, "timeout"
 
 
-def ws_linger(ws, log, min_s=20, max_s=60):
-    """Nán lại ngẫu nhiên sau giao dịch thành công: vẫn trả PING, không đóng
-    session ngay -> trông như user thật đang xem màn hình, phá pattern
-    'login - chuyển - logout ngay' của bot."""
-    if max_s is None or max_s <= 0:
-        return
-    wait = random.uniform(max(0, min_s or 0), max_s)
-    if wait <= 0:
-        return
-    log(f"    ⏳ nán lại {wait:.0f}s sau chuyển (giữ session tự nhiên)...")
-    try:
-        ws.settimeout(5)
-    except Exception:
-        pass
-    deadline = time.time() + wait
-    try:
-        while time.time() < deadline:
-            try:
-                raw = ws.recv()
-            except Exception:
-                # recv timeout -> chưa hết giờ thì nghe tiếp; rớt mạng thì thôi
-                if not getattr(ws, "connected", True):
-                    break
-                continue
-            if not raw:
-                continue
-            name, rd = parse_frame(raw)
-            if name == CMD_PING or name == "PING":
-                try:
-                    ws.send_binary(pack_num(CMD_PONG))
-                except Exception:
-                    break
-            # BALANCE_CHANGED / BROADCAST...: bỏ qua, chỉ cần còn online
-    finally:
-        try:
-            ws.settimeout(12)
-        except Exception:
-            pass
-
-
 # ==================== PHA 1: QUAY ====================
-def phase_spin(user, passwd, dest_id, log, stagger_max=0):
+def phase_spin(user, passwd, dest_id, log):
     t0 = time.time()
-    if stagger_max and stagger_max > 0:
-        time.sleep(random.uniform(0, stagger_max))  # rải login, tránh ồ ạt cùng lúc
     res = {"user": user, "status": "?", "remain": None, "reward": 0, "prize": "",
            "balance_after": 0, "ms": 0, "note": ""}
     ld = http_login(user, passwd)
@@ -343,26 +287,20 @@ def phase_spin(user, passwd, dest_id, log, stagger_max=0):
 
 
 # ==================== PHA 2: CHUYỂN ====================
-def phase_transfer(user, passwd, dest_id, log, keep=0, stagger_max=0,
-                   linger_min=20, linger_max=60, attempt=1):
-    """Chuyển (số dư - keep) về đích, chừa lại `keep` x để acc không về 0."""
+def phase_transfer(user, passwd, dest_id, log, attempt=1):
     t0 = time.time()
-    if stagger_max and stagger_max > 0:
-        time.sleep(random.uniform(0, stagger_max))  # rải login, tránh ồ ạt cùng lúc
     res = {"user": user, "status": "?", "balance": 0, "transferred": 0,
            "ms": 0, "note": ""}
-    keep = max(0, int(keep or 0))
     ld = http_login(user, passwd)
     if not ld:
         res["status"] = "LOGIN_FAIL"; res["ms"] = int((time.time()-t0)*1000)
         return res, None
     balance = ld["balance"]
     res["balance"] = balance
-    amount = balance - keep
-    if amount <= MIN_TRANSFER:
+    if balance <= MIN_TRANSFER:
         res["status"] = "BALANCE_TOO_LOW"
-        res["note"] = f"balance={balance} keep={keep}"
-        log(f"    ⏭️  chuyển được {amount} (dư {balance} - chừa {keep}) <= {MIN_TRANSFER}, bỏ qua")
+        res["note"] = f"balance={balance}"
+        log(f"    ⏭️  số dư {balance} <= {MIN_TRANSFER}, bỏ qua")
         res["ms"] = int((time.time()-t0)*1000)
         return res, None
     ws = None
@@ -371,15 +309,11 @@ def phase_transfer(user, passwd, dest_id, log, keep=0, stagger_max=0,
         if not ws:
             res["status"] = "WS_LOGIN_FAIL"; res["ms"] = int((time.time()-t0)*1000)
             return res, None
-        ok, st, txt = ws_transfer(ws, log, dest_id, amount)
+        ok, st, txt = ws_transfer(ws, log, dest_id, balance)
         if ok:
-            res["transferred"] = amount
+            res["transferred"] = balance
             res["status"] = "OK"
-            log(f"    ✅ TRANSFER {amount:,} x (dư {balance:,} - chừa {keep:,}) -> id={dest_id} | {txt}")
-            try:
-                ws_linger(ws, log, linger_min, linger_max)
-            except Exception as e:
-                log(f"    (linger bỏ qua: {type(e).__name__})")
+            log(f"    ✅ TRANSFER {balance:,} x -> {DEST_NAME}({dest_id}) | {txt}")
         else:
             res["status"] = "REJECTED"
             res["note"] = f"st={st}: {txt[:100]}"
@@ -388,8 +322,7 @@ def phase_transfer(user, passwd, dest_id, log, keep=0, stagger_max=0,
             if attempt == 1:
                 log(f"    🔁 chờ {RETRY_DELAY}s rồi thử lại lần 2 (session mới)...")
                 time.sleep(RETRY_DELAY)
-                res2, _ = phase_transfer(user, passwd, dest_id, log, keep,
-                                         stagger_max, linger_min, linger_max, attempt=2)
+                res2, _ = phase_transfer(user, passwd, dest_id, log, attempt=2)
                 res["status"] = res2["status"]
                 res["transferred"] = res2["transferred"]
                 res["note"] += f" | retry: {res2['status']} {res2['note']}"
@@ -405,6 +338,34 @@ def phase_transfer(user, passwd, dest_id, log, keep=0, stagger_max=0,
     log(f"  -> PHA2 {res['status']} | bal={balance:,} chuyển={res['transferred']:,} "
         f"| {res['ms']}ms {res['note'][:80]}")
     return res, None
+
+
+# ==================== CHUYỂN TIẾP (CẤP 2) ====================
+def forward_balance(dest_user, dest_pass, dest_id, dest2_id, log):
+    """Login tk nhận cấp 1, chuyển TOÀN BỘ x sang id cấp 2."""
+    if not dest_user or not dest2_id:
+        return
+    log(f"\n🔄 CHUYỂN TIẾP: {dest_user} (id={dest_id}) -> id={dest2_id}")
+    ld = http_login(dest_user, dest_pass)
+    if not ld:
+        log(f"❌ Login tk {dest_user} thất bại, BỎ QUA chuyển tiếp")
+        return
+    balance = ld["balance"]
+    log(f"💰 Số dư {dest_user}: {balance:,} x")
+    if balance <= MIN_TRANSFER:
+        log(f"⏭️  Số dư {balance} <= {MIN_TRANSFER}, không cần chuyển tiếp")
+        return
+    ws = ws_login(ld["cookie"], ld["nick"], ld["token"], log)
+    if not ws:
+        log(f"❌ WS login {dest_user} thất bại")
+        return
+    ok, st, txt = ws_transfer(ws, log, dest2_id, balance)
+    try: ws.close()
+    except: pass
+    if ok:
+        log(f"✅ Chuyển tiếp {balance:,} x -> id={dest2_id} THÀNH CÔNG")
+    else:
+        log(f"❌ Chuyển tiếp thất bại (st={st}): {txt}")
 
 
 # ==================== MAIN ====================
@@ -500,33 +461,20 @@ def write_csv_append(path, header, rows, append=False):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Quay vòng quay + chuyển x về đích, chừa lại --keep mỗi acc (hỗ trợ vài ngàn acc)")
+    ap = argparse.ArgumentParser(description="Quay vòng quay + chuyển toàn bộ x về xxxx (hỗ trợ vài ngàn acc)")
     ap.add_argument("--list", default=None, help="file danh sách acc")
     ap.add_argument("--range", default=None,
                     help='tự sinh dải tên+số, vd: --range "test 1 3000" hoặc "test:1:3000"')
     ap.add_argument("--exclude", default="", help="số cần loại khỏi --range, vd: 1,25")
     ap.add_argument("--user", default=None)
     ap.add_argument("--password", "--pwd", default="")
-    ap.add_argument("--dest", type=int, required=True,
-                    help="BẮT BUỘC: PlayerId acc NHẬN xu (chuyển thẳng). "
-                         "Không có giá trị mặc định — thiếu là báo lỗi ngay để tránh chuyển nhầm.")
-    ap.add_argument("--keep", type=int, default=DEFAULT_KEEP,
-                    help=f"số xu CHỪA LẠI mỗi acc, không chuyển hết (đỡ bị nghi acc bot). "
-                         f"Mặc định {DEFAULT_KEEP}. Gõ 0 = chuyển sạch như cũ.")
-    ap.add_argument("--no-shuffle", action="store_true",
-                    help="KHÔNG xáo trộn thứ tự acc (mặc định CÓ shuffle để phá pattern).")
-    ap.add_argument("--stagger-max", type=float, default=3,
-                    help="mỗi acc chờ ngẫu nhiên 0..X giây trước khi login (rải request, "
-                         "tránh ồ ạt cùng lúc). Mặc định 3.")
-    ap.add_argument("--jitter", type=float, default=5,
-                    help="cộng thêm ngẫu nhiên 0..X giây vào các khoảng nghỉ giữa lô/pha. "
-                         "Mặc định 5.")
-    ap.add_argument("--no-linger", action="store_true",
-                    help="TẮT nán lại sau chuyển (mặc định CÓ nán 20-60s giữ session).")
-    ap.add_argument("--linger-min", type=int, default=20,
-                    help="nán tối thiểu sau chuyển thành công (giây). Mặc định 20.")
-    ap.add_argument("--linger-max", type=int, default=60,
-                    help="nán tối đa sau chuyển thành công (giây). Mặc định 60.")
+    ap.add_argument("--dest", type=int, default=DEST_ID)
+    ap.add_argument("--dest-user", default="",
+                    help="username tk nhận cấp 1 (để chuyển tiếp sang cấp 2)")
+    ap.add_argument("--dest-pass", default="",
+                    help="mật khẩu tk nhận cấp 1")
+    ap.add_argument("--dest2", type=int, default=0,
+                    help="id nhận cấp 2 (chuyển tiếp từ dest). 0 = không chuyển tiếp)")
     ap.add_argument("--max", type=int, default=0, help="giới hạn số acc (0 = hết)")
     ap.add_argument("--workers", type=int, default=30)
     ap.add_argument("--batch-size", type=int, default=500,
@@ -586,14 +534,9 @@ def main():
     except Exception:
         pass
     bal0 = get_public_balance(sess0, args.dest)
-    print(f"🎯  Đích nhận: id={args.dest}" + (f" | balance trước: {bal0:,} x" if bal0 else ""))
+    print(f"🎯  Đích cấp 1: id={args.dest}" + (f" -> cấp 2: id={args.dest2}" if args.dest2 else "") + (f" | balance trước: {bal0:,} x" if bal0 else ""))
     print(f"👥  {len(users)} acc | {args.workers} luồng | lô {args.batch_size} acc"
-          f" + nghỉ {args.batch_pause}s")
-    print(f"💰 Chừa lại mỗi acc: {args.keep:,} x (số chuyển = số dư - {args.keep:,})")
-    linger_min, linger_max = (0, 0) if args.no_linger else (args.linger_min, args.linger_max)
-    print(f"🛡️  Shuffle: {'TẮT' if args.no_shuffle else 'BẬT'} | "
-          f"stagger 0-{args.stagger_max:g}s | jitter +0-{args.jitter:g}s | "
-          f"linger {'TẮT' if args.no_linger else f'{linger_min}-{linger_max}s sau chuyển'}\n")
+          f" + nghỉ {args.batch_pause}s\n")
 
     t_start = time.time()
 
@@ -605,11 +548,6 @@ def main():
                 r = f.result()
                 results.append(r[0] if isinstance(r, tuple) else r)
         return results
-
-    # ===== XÁO TRỘN thứ tự acc (phá pattern file/IP/giờ cố định) =====
-    if not args.no_shuffle and len(users) > 1:
-        random.shuffle(users)
-        log(f"🔀 Đã xáo trộn thứ tự {len(users)} acc")
 
     # ===== CHIA LÔ =====
     batches = [users[i:i + args.batch_size] for i in range(0, len(users), args.batch_size)]
@@ -642,7 +580,7 @@ def main():
                 except Exception:
                     break
                 log(f"\n{'='*70}\n🔶 LÔ {bi+1}/{len(batches)} — QUAY {len(chunk)} acc\n{'='*70}")
-                results = run_phase(partial(phase_spin, stagger_max=args.stagger_max), chunk)
+                results = run_phase(phase_spin, chunk)
                 with spin_lock:
                     spin_results[bi] = results
                     s = [r for r in results if r["status"] == "SPUN"]
@@ -662,18 +600,19 @@ def main():
                     time.sleep(1)
                 chunk = batches[bi]
                 # Nghỉ gap giữa quay và chuyển
-                log(f"⏳ Lô {bi+1}: nghỉ {args.phase_gap}s (+jitter) trước khi chuyển...")
-                time.sleep(args.phase_gap + random.uniform(0, args.jitter))
+                log(f"⏳ Lô {bi+1}: nghỉ {args.phase_gap}s trước khi chuyển...")
+                time.sleep(args.phase_gap)
                 log(f"\n{'='*70}\n💎 LÔ {bi+1}/{len(batches)} — CHUYỂN {len(chunk)} acc\n{'='*70}")
-                results = run_phase(partial(phase_transfer, keep=args.keep,
-                                            stagger_max=args.stagger_max,
-                                            linger_min=linger_min,
-                                            linger_max=linger_max), chunk)
+                results = run_phase(phase_transfer, chunk)
                 with trans_lock:
                     trans_results[bi] = results
                     all_trans.extend(results)
                     okb = [r for r in results if r["status"] == "OK"]
                 log(f"✅ lô {bi+1}: chuyển xong ({len(okb)} OK)")
+                # Chuyển tiếp x từ cấp 1 -> cấp 2 sau mỗi lô
+                if args.dest2:
+                    time.sleep(3)
+                    forward_balance(args.dest_user, args.dest_pass, args.dest, args.dest2, log)
                 next_transfer[0] += 1
 
         # Chạy 2 thread song song
@@ -695,29 +634,29 @@ def main():
             log(f"\n{'='*70}\n🔶 LÔ {bi}/{len(batches)} — {len(chunk)} acc\n{'='*70}")
             if args.phase in ("spin", "all") and execute:
                 log("PHA 1 — QUAY...")
-                all_spin += run_phase(partial(phase_spin, stagger_max=args.stagger_max), chunk)
+                all_spin += run_phase(phase_spin, chunk)
                 s = [r for r in all_spin if r["user"] in [c for c in chunk] and r["status"] == "SPUN"]
                 log(f"✅ lô {bi}: quay xong ({len(s)} quay được)")
             if args.phase in ("transfer", "all"):
                 if args.phase == "all" and execute and len(chunk) > 1:
-                    log(f"⏳ Nghỉ {args.phase_gap}s (+jitter) giữa quay và chuyển...")
-                    time.sleep(args.phase_gap + random.uniform(0, args.jitter))
+                    log(f"⏳ Nghỉ {args.phase_gap}s giữa quay và chuyển...")
+                    time.sleep(args.phase_gap)
                 if execute:
                     log("PHA 2 — CHUYỂN...")
-                    all_trans += run_phase(partial(phase_transfer, keep=args.keep,
-                                                   stagger_max=args.stagger_max,
-                                                   linger_min=linger_min,
-                                                   linger_max=linger_max), chunk)
+                    all_trans += run_phase(phase_transfer, chunk)
                     okb = [r for r in all_trans if r["user"] in [c for c in chunk] and r["status"] == "OK"]
                     log(f"✅ lô {bi}: chuyển xong ({len(okb)} OK)")
-
+                    # Chuyển tiếp x từ cấp 1 -> cấp 2 sau mỗi lô
+                    if args.dest2:
+                        time.sleep(3)
+                        forward_balance(args.dest_user, args.dest_pass, args.dest, args.dest2, log)
                 else:
                     for u in chunk:
                         ld = http_login(u, args.password)
                         log(f"  DRY {u}: balance={ld['balance'] if ld else 0:,}")
             if bi < len(batches):
-                log(f"😴 Nghỉ {args.batch_pause}s (+jitter) giữa lô {bi} và {bi+1}...")
-                time.sleep(args.batch_pause + random.uniform(0, args.jitter))
+                log(f"😴 Nghỉ {args.batch_pause}s giữa lô {bi} và {bi+1}...")
+                time.sleep(args.batch_pause)
 
     # ===== LƯU + BÁO CÁO =====
     if execute:
@@ -739,10 +678,10 @@ def main():
     if execute:
         print(f"  Quay được     : {len(spun)}/{len(all_spin)} (thưởng {sum(r['reward'] for r in spun):,} x)")
         print(f"  Chuyển thành công: {len(ok)}/{len(all_trans)}")
-        print(f"  Tổng x gửi   : {sum(r['transferred'] for r in ok):,} (đích nhận ~90%)")
+        print(f"  Tổng x gửi   : {sum(r['transferred'] for r in ok):,} (xxxx nhận ~90%)")
     bal1 = get_public_balance(sess0, args.dest)
     if execute and bal0 is not None and bal1 is not None:
-        print(f"  Balance đích (id={args.dest}): {bal0:,} -> {bal1:,} (+{bal1 - bal0:,} x)")
+        print(f"  Balance xxxx  : {bal0:,} -> {bal1:,} (+{bal1 - bal0:,} x)")
     print(f"  ⏱️  TỔNG THỜI GIAN: {int(wall)}s = {wall/60:.1f} phút "
           f"({len(users)} acc, {len(batches)} lô)")
     print("💾  Chi tiết: phase1_spin.csv / phase2_transfer.csv")
