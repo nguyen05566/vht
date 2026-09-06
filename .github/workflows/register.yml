@@ -117,7 +117,7 @@ jobs:
           python spin_and_transfer.py --list acc.txt \
             --password "$PW" --dest "$DEST_ID" --execute --phase all --prune \
             --batch-size 500 --workers "$WORKERS" --pipeline \
-            --append --skip-done
+            --append
 
       # ==================== PHA 3: XÓA TIN NHẮN ====================
       - name: PHA 3 - Xóa tin nhắn nhận x

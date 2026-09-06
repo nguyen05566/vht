@@ -183,19 +183,22 @@ def main():
         print(f"LÔ {i}/{len(batch_files)} — {bf}")
         print(f"{'🔶' * 20}")
 
-        result = subprocess.run(
-            [sys.executable, "spin_and_transfer.py",
-             "--list", bf,
-             "--password", args.password,
-             "--dest", str(args.dest),
-             "--execute", "--phase", "all",
-             "--batch-size", str(args.batch_size),
-             "--batch-pause", str(args.batch_pause),
-             "--phase-gap", str(args.phase_gap),
-             "--workers", str(args.workers),
-             "--append", "--skip-done"],
-            timeout=1800  # 30 phút max mỗi lô
-        )
+        cmd = [
+            sys.executable, "spin_and_transfer.py",
+            "--list", bf,
+            "--password", args.password,
+            "--dest", str(args.dest),
+            "--execute", "--phase", "all",
+            "--batch-size", str(args.batch_size),
+            "--batch-pause", str(args.batch_pause),
+            "--phase-gap", str(args.phase_gap),
+            "--workers", str(args.workers),
+            "--append"
+        ]
+        if args.skip_done:
+            cmd.append("--skip-done")
+
+        result = subprocess.run(cmd, timeout=1800)
         if result.returncode != 0:
             print(f"  Lô {i} lỗi (code={result.returncode}), tiếp lô tiếp")
 

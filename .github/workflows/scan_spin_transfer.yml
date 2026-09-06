@@ -35,6 +35,11 @@ on:
         required: false
         type: boolean
         default: false
+      skip_done:
+        description: 'Bo qua tk da xu ly trong phase2_transfer.csv? (default: false)'
+        required: false
+        type: boolean
+        default: false
 
 env:
   PW: ${{ github.event.inputs.password }}
@@ -76,8 +81,11 @@ jobs:
          if [ "${{ github.event.inputs.skip_scan }}" = "true" ]; then
            ARGS="$ARGS --skip-scan"
          fi
-         echo "Running: python scan_and_transfer.py $ARGS --skip-done"
-         python scan_and_transfer.py $ARGS --skip-done
+         if [ "${{ github.event.inputs.skip_done }}" = "true" ]; then
+           ARGS="$ARGS --skip-done"
+         fi
+         echo "Running: python scan_and_transfer.py $ARGS"
+         python scan_and_transfer.py $ARGS
 
      - name: Commit ket qua
        if: always()

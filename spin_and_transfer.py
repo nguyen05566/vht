@@ -100,9 +100,13 @@ class Reader:
 
 def parse_frame(raw):
     if not raw: return None, None
+    if isinstance(raw, str):
+        raw = raw.encode("utf-8", "ignore")
+    if len(raw) < 2: return None, None
     first = struct.unpack_from(">b", raw, 0)[0]
     if first < 0:
         n = -first
+        if len(raw) < 1 + n: return None, None
         return raw[1:1 + n].decode("ascii", "replace"), Reader(raw[1 + n:])
     return (first << 8) | raw[1], Reader(raw[2:])
 
@@ -157,40 +161,56 @@ def get_public_balance(sess, pid):
 # ==================== WS SESSION ====================
 def ws_login(cookie, nick, token, log):
     """Kết nối WS + login. Trả ws hoặc None."""
-    ws = websocket.create_connection(
-        WS_URL, timeout=12,
-        header=[f"Cookie: {cookie}", "Origin: https://gamevh.net", f"User-Agent: {UA}"],
-        cookie=cookie)
-    ws.send_binary(pack_num(CMD_LOGIN, asc(nick) + i32(token)
-                            + asc(VERSION) + asc("") + asc(GAME_ID) + i8(1)))
-    deadline = time.time() + 8
-    while time.time() < deadline:
-        raw = ws.recv()
-        if not raw: continue
-        name, rd = parse_frame(raw)
-        if name == CMD_PING or name == "PING":
-            ws.send_binary(pack_num(CMD_PONG)); continue
-        if name == CMD_LOGIN or name == "LOGIN":
-            st = rd.i8()
-            if st == 0:
-                return ws
-            path = rd.utf16() if rd.rem() > 0 else ""
-            log(f"    login st={st} path={path!r}")
-            break
-    try: ws.close()
-    except Exception: pass
+    try:
+        ws = websocket.create_connection(
+            WS_URL, timeout=12,
+            header=[f"Cookie: {cookie}", "Origin: https://gamevh.net", f"User-Agent: {UA}"],
+            cookie=cookie)
+        ws.send_binary(pack_num(CMD_LOGIN, asc(nick) + i32(token)
+                                + asc(VERSION) + asc("") + asc(GAME_ID) + i8(1)))
+        deadline = time.time() + 8
+        while time.time() < deadline:
+            try:
+                raw = ws.recv()
+            except Exception:
+                break
+            if not raw: continue
+            name, rd = parse_frame(raw)
+            if name == CMD_PING or name == "PING":
+                try: ws.send_binary(pack_num(CMD_PONG))
+                except Exception: pass
+                continue
+            if name == CMD_LOGIN or name == "LOGIN":
+                st = rd.i8()
+                if st == 0:
+                    return ws
+                path = rd.utf16() if rd.rem() > 0 else ""
+                log(f"    login st={st} path={path!r}")
+                break
+        try: ws.close()
+        except Exception: pass
+    except Exception:
+        pass
     return None
 
 def ws_query_remain(ws, log, timeout=8):
     """Gửi GET_REMAIN_SPIN -> trả remain (int) hoặc None."""
-    ws.send_binary(pack_str("GET_REMAIN_SPIN"))
+    try:
+        ws.send_binary(pack_str("GET_REMAIN_SPIN"))
+    except Exception:
+        return None
     deadline = time.time() + timeout
     while time.time() < deadline:
-        raw = ws.recv()
+        try:
+            raw = ws.recv()
+        except Exception:
+            break
         if not raw: continue
         name, rd = parse_frame(raw)
         if name == CMD_PING or name == "PING":
-            ws.send_binary(pack_num(CMD_PONG)); continue
+            try: ws.send_binary(pack_num(CMD_PONG))
+            except Exception: pass
+            continue
         if name == "GET_REMAIN_SPIN":
             rd.i8()             # status
             return rd.i32()
@@ -200,14 +220,22 @@ def ws_query_remain(ws, log, timeout=8):
 
 def ws_spin(ws, log, timeout=10):
     """Quay 1 lượt. Trả (result, slot, prize, reward) hoặc None."""
-    ws.send_binary(pack_str("SPIN_LUCKY_WHEEL"))
+    try:
+        ws.send_binary(pack_str("SPIN_LUCKY_WHEEL"))
+    except Exception:
+        return None
     deadline = time.time() + timeout
     while time.time() < deadline:
-        raw = ws.recv()
+        try:
+            raw = ws.recv()
+        except Exception:
+            break
         if not raw: continue
         name, rd = parse_frame(raw)
         if name == CMD_PING or name == "PING":
-            ws.send_binary(pack_num(CMD_PONG)); continue
+            try: ws.send_binary(pack_num(CMD_PONG))
+            except Exception: pass
+            continue
         if name == "SPIN_LUCKY_WHEEL":
             result = rd.i8()
             slot = rd.u8()
@@ -220,14 +248,22 @@ def ws_spin(ws, log, timeout=10):
 
 def ws_transfer(ws, log, dest_id, amount, timeout=12):
     """Gửi TRANSFER. Trả (ok, status, text) — ok=True nếu server chấp nhận."""
-    ws.send_binary(pack_num(CMD_TRANSFER, i64(dest_id) + i64(amount)))
+    try:
+        ws.send_binary(pack_num(CMD_TRANSFER, i64(dest_id) + i64(amount)))
+    except Exception:
+        return False, -1, "send_error"
     deadline = time.time() + timeout
     while time.time() < deadline:
-        raw = ws.recv()
+        try:
+            raw = ws.recv()
+        except Exception:
+            break
         if not raw: continue
         name, rd = parse_frame(raw)
         if name == CMD_PING or name == "PING":
-            ws.send_binary(pack_num(CMD_PONG)); continue
+            try: ws.send_binary(pack_num(CMD_PONG))
+            except Exception: pass
+            continue
         if name == CMD_BALANCE_CHANGED or name == "BALANCE_CHANGED":
             return True, 0, "BALANCE_CHANGED"
         if name == CMD_TRANSFER or name == "TRANSFER":
@@ -257,23 +293,37 @@ def phase_spin(user, passwd, dest_id, log):
             return res
         remain = ws_query_remain(ws, log)
         res["remain"] = remain
-        if remain and remain > 0:
-            time.sleep(0.4)
-            spin = ws_spin(ws, log)
-            if spin:
-                rc, slot, prize, reward = spin
-                res["reward"] = reward
-                res["prize"] = prize
-                log(f"    🎰 quay: result={rc} slot={slot} | {prize} ({reward} x)")
-                if rc != 0:
-                    res["note"] = f"spin_rejected({rc})"
-                res["status"] = "SPUN"
-            else:
-                res["status"] = "SPIN_NO_RESP"
-        else:
+        if remain is not None and remain > 0:
+            total_reward = 0
+            prizes = []
+            cur_remain = remain
+            turn = 0
+            while cur_remain > 0:
+                time.sleep(0.4)
+                spin = ws_spin(ws, log)
+                if spin:
+                    rc, slot, prize, reward = spin
+                    total_reward += reward
+                    prizes.append(prize if prize else f"{reward} x")
+                    turn += 1
+                    cur_remain -= 1
+                    log(f"    🎰 quay ({turn}/{remain}): result={rc} slot={slot} | {prize} (+{reward} x)")
+                    if rc != 0:
+                        res["note"] = (res["note"] + f" spin_rejected({rc})").strip()
+                else:
+                    log(f"    ⚠️ quay ({turn+1}/{remain}): không có phản hồi")
+                    break
+            res["reward"] = total_reward
+            res["prize"] = "; ".join(prizes) if prizes else ""
+            res["status"] = "SPUN" if turn > 0 else "SPIN_NO_RESP"
+        elif remain == 0:
             res["status"] = "NO_SPIN"
             res["note"] = "het_luot_bo_qua"
-            log(f"    ⏭️  hết lượt quay, bỏ qua")
+            log(f"    ⏭️  hết lượt quay (remain=0), bỏ qua")
+        else:
+            res["status"] = "QUERY_SPIN_TIMEOUT"
+            res["note"] = "khong_lay_duoc_luot_quay"
+            log(f"    ⚠️  Không lấy được số lượt quay (timeout/lỗi kết nối)")
     except Exception as e:
         res["status"] = "ERR:" + type(e).__name__; res["note"] = str(e)[:120]
     finally:
