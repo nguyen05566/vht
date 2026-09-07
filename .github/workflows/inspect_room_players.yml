@@ -3,6 +3,11 @@ name: Quét Thông Tin Người Chơi & Lưu Báo Cáo
 on:
   workflow_dispatch:
     inputs:
+      total_minutes:
+        description: 'Tổng thời gian chạy vòng lặp dò tìm (phút) - vd: 10, 20, 30...'
+        required: false
+        default: '10'
+        type: string
       user:
         description: 'Tên tài khoản bot dùng để đăng nhập quét'
         required: true
@@ -24,9 +29,9 @@ on:
         default: '0,1,2,3,4,5'
         type: string
       listen_time:
-        description: 'Thời gian nghe mỗi phòng (giây)'
+        description: 'Thời gian nghe mỗi lượt ở mỗi phòng (giây)'
         required: false
-        default: '6'
+        default: '5'
         type: string
       workers:
         description: 'Số luồng quét song song (khuyến nghị 15-30 luồng)'
@@ -58,8 +63,9 @@ jobs:
           pip install --upgrade pip
           pip install requests websocket-client beautifulsoup4
 
-      - name: Thực hiện quét danh sách người chơi & xuất báo cáo
+      - name: Thực hiện vòng lặp dò tìm người chơi & xuất báo cáo
         env:
+          TOTAL_MINUTES: ${{ inputs.total_minutes }}
           USER_NAME: ${{ inputs.user }}
           USER_PASS: ${{ inputs.password }}
           GAME: ${{ inputs.game }}
@@ -68,6 +74,7 @@ jobs:
           WORKERS: ${{ inputs.workers }}
         run: |
           python inspect_room_players.py \
+            --total-minutes "${TOTAL_MINUTES:-10}" \
             --user "$USER_NAME" \
             --password "$USER_PASS" \
             --game "$GAME" \
