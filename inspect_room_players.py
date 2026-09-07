@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-inspect_room_players.py - Quét TOÀN BỘ danh sách người đang trực tuyến trên GameVH
-Thu thập:
-- Người chơi đang ở các sảnh phòng (CMD 406 PLAYER_ENTERED)
-- Người chơi đang tạo bàn / đang thi đấu (CMD 312 TABLE_BROADCAST)
-- Top đại gia xu & Top người chơi trên trang chủ GameVH
-- Thông tin chi tiết: Player ID, Nickname, Xu, Điểm số, Cấp độ / Rank, W/D/L, Tiến độ EXP
-- Tự động xuất Markdown, CSV, JSON lưu vào repository
+inspect_room_players.py - QUÉT ĐA LUỒNG TOÀN BỘ NGƯỜI CHƠI ĐANG TRỰC TUYẾN & TRONG BÀN TRÊN GAMEVH
+===================================================================================================
+Thu thập tối đa ID người chơi từ 5 nguồn đồng thời:
+1. Gói 406 (PLAYER_ENTERED): Người chơi đang ở sảnh chờ các phòng.
+2. Gói 415 (TABLE_INFO): Người chơi đang ngồi làm chủ/ngồi trong các bàn chơi (P1, P2, P3...).
+3. Gói 312 (TABLE_BROADCAST): Người chơi đang mở bàn cược thi đấu trên toàn server.
+4. Gói 408 (QUICK_PLAY): Dò quét bàn có đối thủ thực tế đang ngồi chơi.
+5. Top người chơi & Đại gia xu từ trang chủ.
+
+Tự động tra cứu Profile chi tiết: Level, Rank, Điểm số, Xu, W/D/L và lưu ra Markdown/CSV/JSON.
 """
 
 import argparse
@@ -18,7 +21,7 @@ import re
 import struct
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 import requests
 import websocket
@@ -27,6 +30,7 @@ from bs4 import BeautifulSoup
 WS_URL = "wss://gamevh.net/ws/gameServer"
 LOGIN_URL = "https://gamevh.net/login.jsp"
 PROFILE_URL = "https://gamevh.net/com/ftl/game/profile/player_profile.jsp"
+SEARCH_URL = "https://gamevh.net/com/ftl/game/profile/search_profile.jsp"
 HOME_URL = "https://gamevh.net/"
 
 UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -55,6 +59,7 @@ GAME_NAMES = {
 }
 
 
+# ==================== PACK & PARSE ====================
 def pack_num(cmd, payload=b""):
     return struct.pack(">H", cmd) + payload
 
@@ -67,6 +72,7 @@ def p_str(s):
     return struct.pack(">h", len(e)//2) + e
 
 
+# ==================== HTTP PROFILE TRA CỨU ====================
 def get_player_full_profile(player_id, session=None):
     """Lấy chi tiết cấp độ, điểm, tỷ lệ thắng/hòa/thua từ player_profile.jsp"""
     if session is None:
@@ -111,13 +117,29 @@ def get_player_full_profile(player_id, session=None):
         return {"player_id": player_id, "error": str(e), "games": {}}
 
 
+def search_player_by_name(name, session=None):
+    """Tìm Player ID theo tên hiển thị nếu bắt được tên từ bàn chơi (CMD 415)"""
+    if not name or len(name) < 2: return None
+    if session is None:
+        session = requests.Session()
+        session.headers.update({"User-Agent": UA})
+    try:
+        r = session.get(f"{PROFILE_URL}?playerName={requests.utils.quote(name)}", timeout=4)
+        m = re.search(r"playerId=(\d+)", r.text)
+        if m:
+            return int(m.group(1))
+    except Exception:
+        pass
+    return None
+
+
 def scan_homepage_top_players(session):
     """Thu thập danh sách top đại gia và người chơi nổi bật từ trang chủ"""
     players = {}
     try:
         r = session.get(HOME_URL, timeout=8)
         pids = set(re.findall(r"showProfile\((\d+)\)", r.text) + re.findall(r"showGameProfile\((\d+)", r.text))
-        print(f"[*] 🌐 Quét trang chủ: tìm thấy {len(pids)} người chơi nổi bật / đại gia.")
+        print(f"[*] 🌐 Trang chủ: Tìm thấy {len(pids)} người chơi nổi bật / đại gia.")
         for pid_str in pids:
             pid = int(pid_str)
             players[pid] = {
@@ -134,11 +156,14 @@ def scan_homepage_top_players(session):
     return players
 
 
-def scan_room_ws(cookie, user_nick, token, game_id, room_id, duration, my_pid):
-    """Quét 1 phòng qua WebSocket bắt gói 406 (Sảnh) và 312 (Tạo bàn/Đang đấu)"""
+# ==================== WEBSOCKET SCANNER ====================
+def scan_room_worker(cookie, user_nick, token, game_id, room_id, duration, my_pid):
+    """Quét chuyên sâu 1 phòng: Bắt Sảnh (406), Bàn chơi (415), Lệnh tạo bàn (312), Dò bàn (408)"""
     place_path = f"Lobby.{game_id}.{room_id}"
     ws = None
-    players = {}
+    found = {}
+    named_hosts = [] # Tên các host ngồi trong bàn (CMD 415) để reverse lookup ID
+
     try:
         ws = websocket.create_connection(
             WS_URL, timeout=6,
@@ -158,10 +183,16 @@ def scan_room_ws(cookie, user_nick, token, game_id, room_id, duration, my_pid):
                 break
         if not ws_ok:
             if ws: ws.close()
-            return players
+            return found, named_hosts
 
-        # Vào phòng
+        # 1. Vào phòng sảnh (Lobby)
         ws.send_binary(pack_num(401, asc(place_path) + p_str("") + struct.pack(">b", 1)))
+
+        # 2. Gửi dò bàn nhanh (QUICK_PLAY 408) để tìm bàn có đối thủ đang ngồi
+        try:
+            ws.send_binary(pack_num(408, asc(str(room_id)) + struct.pack(">b", -1)))
+        except Exception:
+            pass
 
         scan_deadline = time.time() + duration
         while time.time() < scan_deadline:
@@ -171,11 +202,12 @@ def scan_room_ws(cookie, user_nick, token, game_id, room_id, duration, my_pid):
                 break
             if not raw or len(raw) < 2: continue
             cmd = struct.unpack_from(">H", raw, 0)[0]
-            if cmd == 301:
+            
+            if cmd == 301: # PING
                 ws.send_binary(pack_num(300))
                 continue
-            
-            # Gói 406: Người chơi vào sảnh/phòng
+
+            # 👤 Gói 406: Người chơi ở sảnh
             if cmd == 406:
                 try:
                     offset = 2
@@ -189,43 +221,56 @@ def scan_room_ws(cookie, user_nick, token, game_id, room_id, duration, my_pid):
                         bal = struct.unpack_from(">q", raw, offset)[0]; offset += 8
                         score = struct.unpack_from(">q", raw, offset)[0]; offset += 8
 
-                    if pid > 0 and pid != my_pid and pid not in players:
-                        players[pid] = {
+                    if pid > 0 and pid != my_pid and pid not in found:
+                        found[pid] = {
                             "player_id": pid,
                             "nick": pname,
                             "balance": bal,
                             "score": score,
                             "game": GAME_NAMES.get(game_id, game_id),
                             "room": f"Phòng {room_id}",
-                            "source": "room_lobby"
+                            "source": "sảnh"
                         }
-                        print(f"   👤 [Sảnh {GAME_NAMES.get(game_id, game_id)}] ID={pid} | Nick={pname} | Xu={bal:,} | Score={score:,}")
+                        print(f"   👤 [Sảnh {GAME_NAMES.get(game_id, game_id)} P.{room_id}] ID={pid} | Nick={pname} | Xu={bal:,} | Score={score:,}")
                 except Exception:
                     pass
 
-            # Gói 312: Người chơi đang tạo bàn thi đấu trên server
+            # 🪑 Gói 415: Danh sách bàn đang hoạt động trong phòng & Tên chủ bàn
+            elif cmd == 415:
+                try:
+                    offset = 2
+                    table_code = raw[offset:offset+2].decode("ascii", errors="replace"); offset += 2
+                    h_len = struct.unpack_from(">h", raw, offset)[0]; offset += 2
+                    h_name = raw[offset:offset + h_len*2].decode("utf-16-be", errors="replace")
+                    if h_name and h_name not in [x[0] for x in named_hosts]:
+                        named_hosts.append((h_name, game_id, room_id, table_code))
+                        print(f"   🪑 [Bàn chơi {table_code} - {GAME_NAMES.get(game_id, game_id)}] Host: '{h_name}'")
+                except Exception:
+                    pass
+
+            # 📢 Gói 312: Broadcast mở bàn cược trên toàn server
             elif cmd == 312:
                 try:
                     offset = 2
-                    name_len = struct.unpack_from(">h", raw, offset)[0]; offset += 2
-                    hname = raw[offset:offset + name_len*2].decode("utf-16-be", errors="replace"); offset += name_len*2
-                    offset += 7 # skip table_id + unknown
+                    n_len = struct.unpack_from(">h", raw, offset)[0]; offset += 2
+                    hname = raw[offset:offset + n_len*2].decode("utf-16-be", errors="replace"); offset += n_len*2
+                    offset += 7
                     g_len = struct.unpack_from(">b", raw, offset)[0]; offset += 1
                     g_code = raw[offset:offset + g_len].decode("ascii", errors="replace"); offset += g_len
                     bet_val = struct.unpack_from(">i", raw, offset)[0]; offset += 4
                     hpid = struct.unpack_from(">q", raw, offset)[0]; offset += 8
                     
-                    if hpid > 0 and hpid != my_pid and hpid not in players:
-                        players[hpid] = {
+                    if hpid > 0 and hpid != my_pid and hpid not in found:
+                        found[hpid] = {
                             "player_id": hpid,
                             "nick": hname,
                             "balance": 0,
                             "score": 0,
-                            "game": f"{GAME_NAMES.get(g_code, g_code)} (Bàn cược {bet_val:,} xu)",
+                            "game": f"{GAME_NAMES.get(g_code, g_code)} (Cược {bet_val:,} xu)",
                             "room": "Đang trong bàn",
-                            "source": "table_broadcast"
+                            "source": "mời đấu"
                         }
-                        print(f"   🎯 [Bàn chơi {GAME_NAMES.get(g_code, g_code)}] ID={hpid} | Host={hname} | Cược={bet_val:,} xu")
+                        print(f"   🎯 [Bàn thi đấu {GAME_NAMES.get(g_code, g_code)}] ID={hpid} | Host={hname} | Cược={bet_val:,} xu")
                 except Exception:
                     pass
 
@@ -234,9 +279,11 @@ def scan_room_ws(cookie, user_nick, token, game_id, room_id, duration, my_pid):
         if ws:
             try: ws.close()
             except Exception: pass
-    return players
+
+    return found, named_hosts
 
 
+# ==================== XUẤT BÁO CÁO ====================
 def export_reports(all_players, output_dir="reports"):
     base_dir = os.path.dirname(os.path.abspath(__file__))
     target_dir = os.path.join(base_dir, output_dir) if not os.path.isabs(output_dir) else output_dir
@@ -276,7 +323,7 @@ def export_reports(all_players, output_dir="reports"):
     # 3. Markdown
     md_path = os.path.join(target_dir, "players_latest.md")
     with open(md_path, "w", encoding="utf-8") as f:
-        f.write(f"# 📊 Báo Cáo Người Chơi Trực Tuyến GameVH\n\n")
+        f.write(f"# 📊 Báo Cáo Người Chơi Trực Tuyến & Trong Bàn GameVH\n\n")
         f.write(f"- **Thời gian cập nhật:** `{now_str}`\n")
         f.write(f"- **Tổng số người chơi ghi nhận:** `{len(all_players)}` người\n\n")
         f.write(f"| Player ID | Nickname | Số xu (Chip) | Điểm (Score) | Trò chơi / Vị trí | Cấp độ (Rank) | Thắng (W) | Hòa (D) | Thua (L) | EXP |\n")
@@ -298,13 +345,15 @@ def export_reports(all_players, output_dir="reports"):
     print(f"\n[+] Đã xuất đầy đủ báo cáo vào thư mục '{target_dir}/'!")
 
 
+# ==================== MAIN ENTRYPOINT ====================
 def main():
-    parser = argparse.ArgumentParser(description="Quét TOÀN BỘ danh sách người đang trực tuyến trên GameVH")
+    parser = argparse.ArgumentParser(description="Quét TOÀN BỘ danh sách người đang trực tuyến & trong bàn trên GameVH")
     parser.add_argument("--user", default="arena20", help="Tên tài khoản bot")
     parser.add_argument("--password", default="nhat123456", help="Mật khẩu bot")
     parser.add_argument("--game", default="all", help="Trò chơi cần quét (hoặc 'all')")
-    parser.add_argument("--rooms", default="0,1,2", help="Danh sách ID phòng (vd: 0,1,2)")
+    parser.add_argument("--rooms", default="0,1,2,3,4,5", help="Danh sách ID phòng (vd: 0,1,2,3,4,5)")
     parser.add_argument("--time", type=int, default=6, help="Thời gian nghe mỗi phòng (giây)")
+    parser.add_argument("--workers", type=int, default=20, help="Số luồng quét đồng thời (khuyến nghị 15-30)")
     parser.add_argument("--output-dir", default="reports", help="Thư mục xuất báo cáo")
     parser.add_argument("--include-top", action="store_true", default=True, help="Bao gồm Top đại gia từ trang chủ")
 
@@ -312,9 +361,10 @@ def main():
     user = args.user.strip().replace('"', '').replace("'", "")
     password = args.password.strip().replace('"', '').replace("'", "")
 
-    print("="*75)
-    print("🚀 BẮT ĐẦU QUÉT TOÀN BỘ NGƯỜI CHƠI TRỰC TUYẾN TRÊN GAMEVH")
-    print("="*75)
+    print("="*80)
+    print("🚀 BẮT ĐẦU QUÉT ĐA LUỒNG TOÀN BỘ NGƯỜI CHƠI TRỰC TUYẾN & TRONG BÀN")
+    print(f"⚡ Số luồng đồng thời: {args.workers} | Thời gian mỗi phòng: {args.time}s")
+    print("="*80)
 
     sess = requests.Session()
     sess.headers.update({"User-Agent": UA})
@@ -326,7 +376,7 @@ def main():
         print("❌ [LỖI] Đăng nhập thất bại!")
         sys.exit(1)
 
-    # 1. Lấy thông tin user của bot
+    # Lấy thông tin bot
     g_init = sess.get("https://gamevh.net/play/xiangqi/0", timeout=10)
     pid_m = re.search(r"var\s+currentPlayerId\s*=\s*(\d+)", g_init.text)
     my_pid = int(pid_m.group(1)) if pid_m else 0
@@ -338,12 +388,12 @@ def main():
 
     all_players = {}
 
-    # 2. Quét Top đại gia trang chủ nếu bật
+    # 1. Quét Top đại gia trang chủ
     if args.include_top:
         top_p = scan_homepage_top_players(sess)
         all_players.update(top_p)
 
-    # 3. Xác định danh sách game & phòng cần quét
+    # 2. Xác định danh sách game & phòng
     if args.game.lower() == "all":
         games_to_scan = ALL_GAMES
     else:
@@ -351,45 +401,72 @@ def main():
 
     room_ids = [int(r.strip()) for r in str(args.rooms).split(",") if r.strip().isdigit()]
 
-    # 4. Lấy tokens cho các game song song
-    print(f"[*] Đang lấy phiên kết nối cho {len(games_to_scan)} trò chơi...")
+    # 3. Lấy tokens cho các game song song
+    print(f"[*] Đang khởi tạo phiên kết nối cho {len(games_to_scan)} trò chơi...")
     tokens = {}
-    for gid in games_to_scan:
+    def get_token(gid):
         try:
             res = sess.get(f"https://gamevh.net/play/{gid}/0", timeout=5)
             tm = re.search(r"var\s+token\s*=\s*(-?\d+)", res.text)
-            if tm:
-                tokens[gid] = int(tm.group(1))
-        except Exception:
-            pass
+            if tm: return gid, int(tm.group(1))
+        except Exception: pass
+        return gid, None
 
-    print(f"[+] Sẵn sàng quét {len(tokens)} game qua WebSocket.")
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        for gid, tok in pool.map(get_token, games_to_scan):
+            if tok: tokens[gid] = tok
 
-    # 5. Quét WebSocket song song đa luồng
+    print(f"[+] Lấy thành công token cho {len(tokens)} game.")
+
+    # 4. Quét WebSocket đồng thời đa luồng
     tasks = []
     for gid, tok in tokens.items():
         for rid in room_ids:
             tasks.append((gid, rid, tok))
 
-    print(f"[*] ⚡ Khởi chạy quét đồng thời {len(tasks)} sảnh/phòng...")
-
+    print(f"[*] ⚡ Khởi chạy quét {len(tasks)} sảnh/phòng với {args.workers} luồng song song...")
+    
+    all_named_hosts = []
     def run_task(item):
         gid, rid, tok = item
-        return scan_room_ws(cookie, my_nick, tok, gid, rid, args.time, my_pid)
+        return scan_room_worker(cookie, my_nick, tok, gid, rid, args.time, my_pid)
 
-    with ThreadPoolExecutor(max_workers=12) as pool:
+    with ThreadPoolExecutor(max_workers=args.workers) as pool:
         results = pool.map(run_task, tasks)
-        for res_dict in results:
+        for res_dict, hosts in results:
             all_players.update(res_dict)
+            all_named_hosts.extend(hosts)
+
+    # 5. Tra cứu Player ID cho những người ngồi trong bàn (CMD 415)
+    if all_named_hosts:
+        print(f"[*] 🔍 Đang tra cứu Player ID cho {len(all_named_hosts)} chủ bàn phát hiện từ bàn chơi...")
+        def resolve_host(item):
+            hname, gid, rid, tcode = item
+            pid = search_player_by_name(hname, session=sess)
+            return pid, hname, gid, rid, tcode
+
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            for pid, hname, gid, rid, tcode in pool.map(resolve_host, all_named_hosts):
+                if pid and pid != my_pid and pid not in all_players:
+                    all_players[pid] = {
+                        "player_id": pid,
+                        "nick": hname,
+                        "balance": 0,
+                        "score": 0,
+                        "game": f"{GAME_NAMES.get(gid, gid)} (Bàn {tcode})",
+                        "room": f"Phòng {rid}",
+                        "source": "bàn_chơi"
+                    }
+                    print(f"   🎯 [Tìm thấy ID từ Bàn {tcode}] Nick: '{hname}' -> Player ID: {pid}")
 
     print(f"\n[+] Tổng số người chơi tìm thấy: {len(all_players)} người.")
 
-    # 6. Truy vấn Profile chi tiết
-    print("[*] Đang tải chi tiết Level, W/D/L và Điểm số từ Profile...")
+    # 6. Truy vấn Profile chi tiết (Level, W/D/L, EXP, Xu thực tế)
+    print("[*] 📊 Đang tải chi tiết Level, W/D/L và Điểm số từ Profile...")
     def fetch_prof(pid):
         return pid, get_player_full_profile(pid, session=sess)
 
-    with ThreadPoolExecutor(max_workers=10) as pool:
+    with ThreadPoolExecutor(max_workers=15) as pool:
         prof_results = pool.map(fetch_prof, all_players.keys())
         for pid, prof in prof_results:
             all_players[pid]["full_profile"] = prof

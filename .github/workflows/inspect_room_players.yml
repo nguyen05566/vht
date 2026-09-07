@@ -14,19 +14,24 @@ on:
         default: 'nhat123456'
         type: string
       game:
-        description: 'Trò chơi cần quét (caro, xiangqi, co_up, chess hoặc all)'
+        description: 'Trò chơi cần quét (caro, xiangqi, mystery_xiangqi, 0, 1, chan, maubinh, sam, chess hoặc all)'
         required: false
         default: 'all'
         type: string
       rooms:
-        description: 'Danh sách ID phòng cần quét (cách nhau bởi dấu phẩy)'
+        description: 'Danh sách ID phòng cần quét (vd: 0,1,2,3,4,5)'
         required: false
-        default: '0,1,2,3'
+        default: '0,1,2,3,4,5'
         type: string
       listen_time:
         description: 'Thời gian nghe mỗi phòng (giây)'
         required: false
         default: '6'
+        type: string
+      workers:
+        description: 'Số luồng quét song song (khuyến nghị 15-30 luồng)'
+        required: false
+        default: '20'
         type: string
 
 permissions:
@@ -60,6 +65,7 @@ jobs:
           GAME: ${{ inputs.game }}
           ROOMS: ${{ inputs.rooms }}
           LISTEN_TIME: ${{ inputs.listen_time }}
+          WORKERS: ${{ inputs.workers }}
         run: |
           python inspect_room_players.py \
             --user "$USER_NAME" \
@@ -67,6 +73,7 @@ jobs:
             --game "$GAME" \
             --rooms "$ROOMS" \
             --time "$LISTEN_TIME" \
+            --workers "${WORKERS:-20}" \
             --output-dir "reports"
 
       - name: Lưu kết quả báo cáo lên Repository
