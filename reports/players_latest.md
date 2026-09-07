@@ -1,7 +1,7 @@
 # 📊 Báo Cáo Người Chơi Trực Tuyến GameVH
 
-- **Thời gian cập nhật:** `2026-09-07 09:23:48 UTC`
-- **Tổng số người chơi ghi nhận:** `19` người
+- **Thời gian cập nhật:** `2026-09-07 09:27:33 UTC`
+- **Tổng số người chơi ghi nhận:** `15` người
 
 | Player ID | Nickname | Số xu (Chip) | Điểm (Score) | Trò chơi / Vị trí | Cấp độ (Rank) | Thắng (W) | Hòa (D) | Thua (L) | EXP |
 |:---|:---|:---:|:---:|:---|:---|:---:|:---:|:---:|:---:|
@@ -20,7 +20,3 @@
 | `68225644` | **Tâm** | `81,471,072` | `0` | Trang chủ / Top (Lobby) | Master 2 | 6,364 | 1 | 166 | 59/100 |
 | `69651850` | **Vi** | `50,172,208` | `0` | Trang chủ / Top (Lobby) | Tân thủ cấp 3 | 90 | 0 | 141 | 18/120 |
 | `68226297` | **xiangqi** | `48,350,366` | `0` | Trang chủ / Top (Lobby) | Nhất đẳng kỳ thánh | 267 | 7 | 5 | 80/100 |
-| `56589294` | **Minh** | `4,841,871` | `1,495` | Cờ caro (Phòng 0) | Expert 1 | 3,985 | 49 | 1,513 | 45/100 |
-| `54603608` | **Cớm ! Đây** | `155,561` | `1,440` | Cờ caro (Phòng 0) | Adept 3 | 9,761 | 106 | 6,094 | 90/100 |
-| `68524342` | **Thanh Xuân** | `11,240` | `1,111` | Cờ caro (Phòng 0) | Apprentice 3 | 104 | 0 | 86 | 61/100 |
-| `56106439` | **Chii** | `500` | `1,248` | Cờ caro (Phòng 0) | Adept 1 | 1,187 | 7 | 1,114 | 98/100 |
