@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-09-07 09:15:51 UTC",
+  "updated_at": "2026-09-07 09:18:56 UTC",
   "total_players": 15,
   "players": {
     "66944282": {
@@ -26,8 +26,8 @@
         }
       }
     },
-    "51238406": {
-      "player_id": 51238406,
+    "608743": {
+      "player_id": 608743,
       "nick": "",
       "balance": 0,
       "score": 0,
@@ -35,17 +35,41 @@
       "room": "Lobby",
       "source": "homepage",
       "full_profile": {
-        "player_id": 51238406,
-        "nick": "Hoanvu",
-        "balance": 485294098,
+        "player_id": 608743,
+        "nick": "PINK",
+        "balance": 500084205,
         "games": {
-          "Xì tố": {
-            "win": "1,598",
+          "Mậu Binh": {
+            "win": "35,609",
+            "draw": "4,380",
+            "lost": "39,793",
+            "score": "290,103",
+            "level": "Độc cô cầu bại",
+            "progress": "73663/138240"
+          }
+        }
+      }
+    },
+    "68644791": {
+      "player_id": 68644791,
+      "nick": "",
+      "balance": 0,
+      "score": 0,
+      "game": "Trang chủ / Top",
+      "room": "Lobby",
+      "source": "homepage",
+      "full_profile": {
+        "player_id": 68644791,
+        "nick": "Trần Tuấn Kjệt",
+        "balance": 86076521,
+        "games": {
+          "Sâm lốc": {
+            "win": "830",
             "draw": "0",
-            "lost": "3,196",
-            "score": "3,096",
-            "level": "Cao thủ cấp 5",
-            "progress": "96/800"
+            "lost": "838",
+            "score": "830",
+            "level": "Cao thủ cấp 3",
+            "progress": "10/320"
           }
         }
       }
@@ -74,8 +98,8 @@
         }
       }
     },
-    "68225644": {
-      "player_id": 68225644,
+    "156485": {
+      "player_id": 156485,
       "nick": "",
       "balance": 0,
       "score": 0,
@@ -83,17 +107,17 @@
       "room": "Lobby",
       "source": "homepage",
       "full_profile": {
-        "player_id": 68225644,
-        "nick": "Tâm",
-        "balance": 81471072,
+        "player_id": 156485,
+        "nick": "Kevin",
+        "balance": 2025396947,
         "games": {
-          "Cờ caro": {
-            "win": "6,364",
-            "draw": "1",
-            "lost": "166",
-            "score": "1,909",
-            "level": "Master 2",
-            "progress": "59/100"
+          "Mậu Binh": {
+            "win": "43,868",
+            "draw": "4,152",
+            "lost": "50,693",
+            "score": "462,668",
+            "level": "Giang hồ ngoại cấp",
+            "progress": "107988/9148480"
           }
         }
       }
@@ -122,78 +146,6 @@
         }
       }
     },
-    "2633204": {
-      "player_id": 2633204,
-      "nick": "",
-      "balance": 0,
-      "score": 0,
-      "game": "Trang chủ / Top",
-      "room": "Lobby",
-      "source": "homepage",
-      "full_profile": {
-        "player_id": 2633204,
-        "nick": "PiPi Girl",
-        "balance": 2612638493,
-        "games": {
-          "Xì tố": {
-            "win": "154,649",
-            "draw": "2",
-            "lost": "87,520",
-            "score": "412,793",
-            "level": "Giang hồ ngoại cấp",
-            "progress": "58113/9148480"
-          }
-        }
-      }
-    },
-    "825650": {
-      "player_id": 825650,
-      "nick": "",
-      "balance": 0,
-      "score": 0,
-      "game": "Trang chủ / Top",
-      "room": "Lobby",
-      "source": "homepage",
-      "full_profile": {
-        "player_id": 825650,
-        "nick": "STAR",
-        "balance": 500057828,
-        "games": {
-          "Mậu Binh": {
-            "win": "99,337",
-            "draw": "12,767",
-            "lost": "109,750",
-            "score": "808,797",
-            "level": "Giang hồ ngoại cấp",
-            "progress": "454117/9148480"
-          }
-        }
-      }
-    },
-    "69651850": {
-      "player_id": 69651850,
-      "nick": "",
-      "balance": 0,
-      "score": 0,
-      "game": "Trang chủ / Top",
-      "room": "Lobby",
-      "source": "homepage",
-      "full_profile": {
-        "player_id": 69651850,
-        "nick": "Vi",
-        "balance": 50172208,
-        "games": {
-          "Xì tố": {
-            "win": "90",
-            "draw": "0",
-            "lost": "141",
-            "score": "138",
-            "level": "Tân thủ cấp 3",
-            "progress": "18/120"
-          }
-        }
-      }
-    },
     "60734589": {
       "player_id": 60734589,
       "nick": "",
@@ -218,6 +170,78 @@
         }
       }
     },
+    "51238406": {
+      "player_id": 51238406,
+      "nick": "",
+      "balance": 0,
+      "score": 0,
+      "game": "Trang chủ / Top",
+      "room": "Lobby",
+      "source": "homepage",
+      "full_profile": {
+        "player_id": 51238406,
+        "nick": "Hoanvu",
+        "balance": 485294098,
+        "games": {
+          "Xì tố": {
+            "win": "1,598",
+            "draw": "0",
+            "lost": "3,196",
+            "score": "3,096",
+            "level": "Cao thủ cấp 5",
+            "progress": "96/800"
+          }
+        }
+      }
+    },
+    "68225644": {
+      "player_id": 68225644,
+      "nick": "",
+      "balance": 0,
+      "score": 0,
+      "game": "Trang chủ / Top",
+      "room": "Lobby",
+      "source": "homepage",
+      "full_profile": {
+        "player_id": 68225644,
+        "nick": "Tâm",
+        "balance": 81471072,
+        "games": {
+          "Cờ caro": {
+            "win": "6,364",
+            "draw": "1",
+            "lost": "166",
+            "score": "1,909",
+            "level": "Master 2",
+            "progress": "59/100"
+          }
+        }
+      }
+    },
+    "2633204": {
+      "player_id": 2633204,
+      "nick": "",
+      "balance": 0,
+      "score": 0,
+      "game": "Trang chủ / Top",
+      "room": "Lobby",
+      "source": "homepage",
+      "full_profile": {
+        "player_id": 2633204,
+        "nick": "PiPi Girl",
+        "balance": 2612638493,
+        "games": {
+          "Xì tố": {
+            "win": "154,649",
+            "draw": "2",
+            "lost": "87,520",
+            "score": "412,793",
+            "level": "Giang hồ ngoại cấp",
+            "progress": "58113/9148480"
+          }
+        }
+      }
+    },
     "65028111": {
       "player_id": 65028111,
       "nick": "",
@@ -238,54 +262,6 @@
             "score": "1,275",
             "level": "Tam đẳng kỳ thủ",
             "progress": "25/100"
-          }
-        }
-      }
-    },
-    "156485": {
-      "player_id": 156485,
-      "nick": "",
-      "balance": 0,
-      "score": 0,
-      "game": "Trang chủ / Top",
-      "room": "Lobby",
-      "source": "homepage",
-      "full_profile": {
-        "player_id": 156485,
-        "nick": "Kevin",
-        "balance": 2025396947,
-        "games": {
-          "Mậu Binh": {
-            "win": "43,868",
-            "draw": "4,152",
-            "lost": "50,693",
-            "score": "462,668",
-            "level": "Giang hồ ngoại cấp",
-            "progress": "107988/9148480"
-          }
-        }
-      }
-    },
-    "608743": {
-      "player_id": 608743,
-      "nick": "",
-      "balance": 0,
-      "score": 0,
-      "game": "Trang chủ / Top",
-      "room": "Lobby",
-      "source": "homepage",
-      "full_profile": {
-        "player_id": 608743,
-        "nick": "PINK",
-        "balance": 500084205,
-        "games": {
-          "Mậu Binh": {
-            "win": "35,609",
-            "draw": "4,380",
-            "lost": "39,793",
-            "score": "290,103",
-            "level": "Độc cô cầu bại",
-            "progress": "73663/138240"
           }
         }
       }
@@ -338,8 +314,8 @@
         }
       }
     },
-    "68644791": {
-      "player_id": 68644791,
+    "69651850": {
+      "player_id": 69651850,
       "nick": "",
       "balance": 0,
       "score": 0,
@@ -347,17 +323,41 @@
       "room": "Lobby",
       "source": "homepage",
       "full_profile": {
-        "player_id": 68644791,
-        "nick": "Trần Tuấn Kjệt",
-        "balance": 86076521,
+        "player_id": 69651850,
+        "nick": "Vi",
+        "balance": 50172208,
         "games": {
-          "Sâm lốc": {
-            "win": "830",
+          "Xì tố": {
+            "win": "90",
             "draw": "0",
-            "lost": "838",
-            "score": "830",
-            "level": "Cao thủ cấp 3",
-            "progress": "10/320"
+            "lost": "141",
+            "score": "138",
+            "level": "Tân thủ cấp 3",
+            "progress": "18/120"
+          }
+        }
+      }
+    },
+    "825650": {
+      "player_id": 825650,
+      "nick": "",
+      "balance": 0,
+      "score": 0,
+      "game": "Trang chủ / Top",
+      "room": "Lobby",
+      "source": "homepage",
+      "full_profile": {
+        "player_id": 825650,
+        "nick": "STAR",
+        "balance": 500057828,
+        "games": {
+          "Mậu Binh": {
+            "win": "99,337",
+            "draw": "12,767",
+            "lost": "109,750",
+            "score": "808,797",
+            "level": "Giang hồ ngoại cấp",
+            "progress": "454117/9148480"
           }
         }
       }
