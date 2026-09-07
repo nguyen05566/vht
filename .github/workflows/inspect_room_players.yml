@@ -1,0 +1,83 @@
+name: Quét Thông Tin Người Chơi & Lưu Báo Cáo
+
+on:
+  workflow_dispatch:
+    inputs:
+      user:
+        description: 'Tên tài khoản bot dùng để đăng nhập quét'
+        required: true
+        default: 'arena20'
+        type: string
+      password:
+        description: 'Mật khẩu tài khoản bot'
+        required: true
+        default: 'nhat123456'
+        type: string
+      game:
+        description: 'Trò chơi cần quét (caro, xiangqi, co_up, chess hoặc all)'
+        required: false
+        default: 'all'
+        type: string
+      rooms:
+        description: 'Danh sách ID phòng cần quét (cách nhau bởi dấu phẩy)'
+        required: false
+        default: '0,1,2,3'
+        type: string
+      listen_time:
+        description: 'Thời gian nghe mỗi phòng (giây)'
+        required: false
+        default: '6'
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  scan_and_save:
+    name: Quét Người Chơi & Lưu Repo
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout mã nguồn
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 1
+
+      - name: Cài đặt Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cài đặt thư viện phụ thuộc
+        run: |
+          pip install --upgrade pip
+          pip install requests websocket-client beautifulsoup4
+
+      - name: Thực hiện quét danh sách người chơi & xuất báo cáo
+        env:
+          USER_NAME: ${{ inputs.user }}
+          USER_PASS: ${{ inputs.password }}
+          GAME: ${{ inputs.game }}
+          ROOMS: ${{ inputs.rooms }}
+          LISTEN_TIME: ${{ inputs.listen_time }}
+        run: |
+          python inspect_room_players.py \
+            --user "$USER_NAME" \
+            --password "$USER_PASS" \
+            --game "$GAME" \
+            --rooms "$ROOMS" \
+            --time "$LISTEN_TIME" \
+            --output-dir "reports"
+
+      - name: Lưu kết quả báo cáo lên Repository
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add reports/
+          if git diff --staged --quiet; then
+            echo "ℹ️ Không có thay đổi mới trong báo cáo."
+          else
+            git commit -m "📊 Cập nhật báo cáo người chơi GameVH [skip ci]"
+            git push origin main || (git pull --rebase origin main && git push origin main)
+            echo "✅ Đã lưu và đẩy báo cáo thành công lên repository!"
+          fi
