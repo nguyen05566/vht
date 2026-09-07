@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-╔══════════════════════════════════════════════════════════════════╗
-║  BOT CARO EMBRYO - FULL NAME + AVATAR v3.0                     ║
-║  Engine: Embryo Caro6 v1.2.3 (Linux Native)                    ║
-║  FIX: Chỉ Ready khi đối thủ ngồi vào ghế, hủy khi đối thủ rời   ║
-║  FIX: Cập nhật động khi có người vào/ra phòng xem             ║
-║  FIX: Chạy bất đồng bộ http_login tránh nghẽn luồng WebSocket    ║
-║  FIX: Sửa lỗi xung đột bộ đệm tiến trình con của AI            ║
-╚══════════════════════════════════════════════════════════════════╝
+╔══════════════════════════════════════════════════════════════════════╗
+║  BOT CARO - SET_TURN Timer Monitor v4.0                            ║
+║  Engine: Embryo Caro6 v1.2.3 (Linux Native)                        ║
+║  Mục đích:                                                       ║
+║  - Chơi Caro tự động trên gamevh.net                             ║
+║  - Monitor SET_TURN packets, phát hiện timer reset bug           ║
+║  - Ghi nhận chi tiết timer countdown khi gameover, người vào/ra  ║
+║  - SET_READY handling chính xác                                   ║
+╚══════════════════════════════════════════════════════════════════════╝
 """
 import subprocess, sys, os, importlib, urllib.request, json, time, struct
 import re, logging, asyncio, random, threading, shutil, selectors, html as html_lib
@@ -31,11 +32,13 @@ for pkg in REQUIRED:
     except ImportError:
         print(f"[SETUP] Installing {pkg}...")
         try:
-            subprocess.run([sys.executable, "-m", "pip", "install", pkg, "-q", "--break-system-packages"], stderr=subprocess.DEVNULL, check=True)
+            subprocess.run([sys.executable, "-m", "pip", "install", pkg, "-q", "--break-system-packages"],
+                           stderr=subprocess.DEVNULL, check=True)
             importlib.import_module(pkg)
         except Exception:
             try:
-                subprocess.run([sys.executable, "-m", "pip", "install", pkg, "-q"], stderr=subprocess.DEVNULL, check=True)
+                subprocess.run([sys.executable, "-m", "pip", "install", pkg, "-q"],
+                               stderr=subprocess.DEVNULL, check=True)
                 importlib.import_module(pkg)
             except Exception as e:
                 print(f"[SETUP] Failed to install {pkg}: {e}")
@@ -56,7 +59,6 @@ VN_TEN_DAU = [
     "Giang", "Quyên", "Như", "Hà", "Xuân", "Mỹ", "Thu", "Ánh", "Dung", "Hiền",
     "Hoa", "Huệ", "Ly", "Nhung", "Thư", "Thương", "Thùy", "Tiên", "Trinh", "Trúc", "Uyên", "Vân"
 ]
-
 VN_TEN_KHONG_DAU = [
     "Tuan", "Minh", "Duc", "Hoang", "Huy", "Hung", "Dung", "Cuong", "Long", "Nam",
     "Son", "Hai", "Phong", "Thang", "Trung", "Kien", "Quan", "Thanh", "Dat", "Khoa",
@@ -72,7 +74,6 @@ VN_TEN_KHONG_DAU = [
 ]
 
 def generate_random_full_name() -> str:
-    """Tạo tên người Việt Nam tự nhiên (chỉ gồm 1 từ: tên có dấu hoặc không dấu), không họ/đệm, không số."""
     has_accent = random.choice([True, False])
     name_list = VN_TEN_DAU if has_accent else VN_TEN_KHONG_DAU
     return random.choice(name_list)
@@ -91,16 +92,14 @@ EMBRYO_DOWNLOAD_URL = (
     "https://raw.githubusercontent.com/Hexik/Embryo_engine/master/"
     "Caro6/Linux/pbrain-embryo-1.2.0-6f650fab-c6.bz2"
 )
-# EMBRYO_RULE bỏ - Caro6 đã viết riêng cho Caro, không cần INFO rule
-EMBRYO_TIMEOUT = 2000  # 2 giây (trần tối đa 2s/nước)
-EMBRYO_MOVE_TIMEOUT = 15.0  # giây – timeout cứng cho toàn bộ khâu tính nước (chống treo engine)
-EMBRYO_MATCH_TIMEOUT = 1800000  # 1800s = 30 phút - theo BOT_MATCH_DURATION = '1800'
+EMBRYO_TIMEOUT = 2000
+EMBRYO_MOVE_TIMEOUT = 15.0
+EMBRYO_MATCH_TIMEOUT = 1800000
 
 def auto_download_embryo() -> Optional[str]:
     binary_path = ENGINE_DIR / EMBRYO_BINARY
     if binary_path.exists():
-        try:
-            binary_path.chmod(0o755)
+        try: binary_path.chmod(0o755)
         except Exception: pass
         return str(binary_path)
     log.info(f"[Embryo] Downloading Embryo (Linux Caro6) ...")
@@ -116,11 +115,9 @@ def auto_download_embryo() -> Optional[str]:
                 out.write(resp.read())
         with open(bz2_path, "rb") as src_bz2, open(binary_path, "wb") as dst:
             dst.write(bz2.decompress(src_bz2.read()))
-        try:
-            os.remove(bz2_path)
+        try: os.remove(bz2_path)
         except Exception: pass
-        try:
-            binary_path.chmod(0o755)
+        try: binary_path.chmod(0o755)
         except Exception: pass
         return str(binary_path)
     except Exception as e:
@@ -129,7 +126,6 @@ def auto_download_embryo() -> Optional[str]:
 
 def detect_embryo_binary() -> Optional[str]:
     if not ENGINE_DIR.exists(): return None
-    # Embryo Caro6 Linux native
     b = ENGINE_DIR / EMBRYO_BINARY
     if b.exists():
         try: b.chmod(0o755)
@@ -139,12 +135,13 @@ def detect_embryo_binary() -> Optional[str]:
         return str(f)
     return None
 
+
 # ======================== ENGINE WRAPPER ========================
 class EmbryoEngine:
     def __init__(self, timeout_turn=5000, board_width=15, board_height=19, match_timeout_ms=1800000):
         self.binary = detect_embryo_binary()
-        self.timeout_turn = timeout_turn  # Trần thời gian tối đa mỗi nước (10s)
-        self.match_timeout_ms = match_timeout_ms  # Tổng thời gian ván 30 phút (1.800.000ms)
+        self.timeout_turn = timeout_turn
+        self.match_timeout_ms = match_timeout_ms
         self.time_left_ms = self.match_timeout_ms
         self._match_start_mono = None
         self.board_width = board_width; self.board_height = board_height
@@ -154,7 +151,7 @@ class EmbryoEngine:
         self.my_side = 1
         self._initialized = False
         self._selector = None
-        self._rectstart_sent = False  # Chỉ gửi RECTSTART 1 lần cho mỗi process sống
+        self._rectstart_sent = False
 
     def _init_selector(self):
         self._close_selector()
@@ -168,15 +165,12 @@ class EmbryoEngine:
 
     def _close_selector(self):
         if self._selector:
-            try:
-                self._selector.close()
-            except Exception:
-                pass
+            try: self._selector.close()
+            except Exception: pass
             self._selector = None
 
     def _send_time_infos(self):
-        """Gửi trần thời gian tối đa 10s và thời gian còn lại động cho Embryo."""
-        left = self.match_timeout_ms  # ĐỀU SỨC CẢ VÁN: luôn báo time_left lớn -> Embryo nghĩ đúng ~timeout_turn mỗi nước (depth 13-20), không bị yếu khi đồng hồ ván giảm
+        left = self.match_timeout_ms
         self._send(f"INFO timeout_turn {self.timeout_turn}")
         self._send(f"INFO timeout_match {self.match_timeout_ms}")
         self._send(f"INFO time_left {left}")
@@ -186,8 +180,7 @@ class EmbryoEngine:
             try:
                 self.proc.stdin.write((cmd + "\n").encode("utf-8"))
                 self.proc.stdin.flush()
-            except Exception:
-                pass
+            except Exception: pass
 
     def _read_line(self, timeout=10.0) -> str:
         if not self.proc or self.proc.poll() is not None:
@@ -219,37 +212,27 @@ class EmbryoEngine:
                 return ""
 
     def _drain_output(self):
-        """Drain engine output thoroughly — quan trọng để tránh ponder output nhiễm buffer."""
         deadline = time.monotonic() + 0.3
         while time.monotonic() < deadline:
             line = self._read_line(timeout=0.05)
             if not line:
-                # Không còn dòng nào sẵn trong buffer → thoát
                 break
-            # Log ponder/debug output thay vì bỏ im
             if line.startswith(('MESSAGE', 'DEBUG', 'ERROR')):
                 log.debug(f'[Embryo] drain: {line}')
-            else:
-                log.warning(f'[Embryo] drain unexpected: {line}')
 
     def start_game(self, my_symbol=1) -> bool:
         with self.lock:
             self._match_start_mono = time.monotonic()
             self.time_left_ms = self.match_timeout_ms
             if self.proc and self.proc.poll() is None:
-                # RESTART + RECTSTART: kích hoạt opening book cho Caro C5 15x19
                 self._send("RESTART")
                 for _ in range(5):
                     line = self._read_line(timeout=0.5)
-                    log.info(f"[Embryo] RESTART response: '{line}'")
-                    if line.upper() == "OK":
-                        break
+                    if line.upper() == "OK": break
                 self._send("RECTSTART 15,19")
                 for _ in range(5):
                     line = self._read_line(timeout=0.5)
-                    log.info(f"[Embryo] RECTSTART response: '{line}'")
-                    if line.upper() == "OK":
-                        break
+                    if line.upper() == "OK": break
                 self._synced = False
                 self._send_time_infos()
                 self._send("INFO ponder 1")
@@ -258,14 +241,12 @@ class EmbryoEngine:
                 log.info("[Embryo] RESTART + RECTSTART (opening book active)")
                 return True
 
-            # Process chưa có → tạo mới
             self._synced = False
             self._rectstart_sent = False
             self._stop_unlocked()
             if not self.binary:
                 return False
             try:
-                # Embryo Caro6 Linux native binary
                 cmd = [self.binary]
                 self.proc = subprocess.Popen(
                     cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -278,8 +259,7 @@ class EmbryoEngine:
                 self._rectstart_sent = True
                 for _ in range(10):
                     line = self._read_line(timeout=1.0)
-                    if line.upper() == "OK":
-                        break
+                    if line.upper() == "OK": break
                 self._send_time_infos()
                 self._send("INFO ponder 1")
                 time.sleep(0.2)
@@ -300,15 +280,12 @@ class EmbryoEngine:
             self._send("RESTART")
             for _ in range(5):
                 line = self._read_line(timeout=2.0)
-                if line.upper() == "OK":
-                    break
+                if line.upper() == "OK": break
             self._send("RECTSTART 15,19")
             for _ in range(5):
                 line = self._read_line(timeout=2.0)
-                if line.upper() == "OK":
-                    break
-            # KHÔNG gửi lại RECTSTART — engine đã nhớ board size
-            self._synced = False  # Reset cho ván mới, nước đầu dùng BOARD
+                if line.upper() == "OK": break
+            self._synced = False
             self._send_time_infos()
             self._send("INFO ponder 1")
             log.info("[Embryo] RESTART + ponder OK (opening book active)")
@@ -319,28 +296,19 @@ class EmbryoEngine:
             try:
                 if not self._initialized or not self.proc or self.proc.poll() is not None:
                     return None
-                
-                # KHÔNG drain output ở đây — giữ kết quả ponder trong buffer!
-                # Nếu engine đã ponder ra nước đi, nó sẽ nằm sẵn trong buffer
-                # và được đọc ở vòng while bên dưới → think ≈ 0ms
-                
-                # Cập nhật time_left theo đồng hồ ván thực tế
                 if self._match_start_mono is not None:
                     elapsed_ms = int((time.monotonic() - self._match_start_mono) * 1000)
                     self.time_left_ms = max(self.match_timeout_ms - elapsed_ms, self.timeout_turn)
                 else:
                     self._match_start_mono = time.monotonic()
-                
                 self._send_time_infos()
                 t0 = time.monotonic()
-                
                 _sync_state = getattr(self, "_synced", False)
                 _hist_len = len(board_history)
                 _exp_len = getattr(self, "_expected_history_len", -1)
                 can_use_turn = _sync_state and _hist_len == _exp_len + 1
                 if not can_use_turn:
                     log.info(f"[Embryo] sync debug: synced={_sync_state} hist={_hist_len} exp={_exp_len} can_turn={can_use_turn}")
-                
                 if can_use_turn:
                     last_x, last_y, _ = board_history[-1]
                     self._send(f"TURN {last_x},{last_y}")
@@ -350,20 +318,15 @@ class EmbryoEngine:
                         c = 1 if sym == self.my_side else 2
                         self._send(f"{x},{y},{c}")
                     self._send("DONE")
-                
-                # Timeout tối đa (10s trần + 2s bù trừ I/O)
                 deadline = time.monotonic() + (self.timeout_turn / 1000.0) + 2.0
                 move_count = 0
                 while time.monotonic() < deadline:
                     rem_time = deadline - time.monotonic()
-                    # Polling 0.1s để nhận nước đi ngay tức thì khi engine tính xong sớm
                     line = self._read_line(timeout=min(0.1, rem_time))
-                    if not line:
-                        continue
+                    if not line: continue
                     if line.startswith(("MESSAGE", "ERROR", "DEBUG")):
                         log.info(f"[Embryo] engine msg: {line}")
                         continue
-                    # Regex lọc: chỉ chấp nhận dòng chứa duy nhất "X,Y"
                     match = re.match(r"^\s*(\d+)\s*,\s*(\d+)\s*$", line)
                     if match:
                         mx, my = int(match.group(1)), int(match.group(2))
@@ -375,7 +338,7 @@ class EmbryoEngine:
                         if move_count > 1:
                             log.warning(f"[Embryo] Nhận {move_count} nước, dùng nước cuối: {mx},{my}")
                         self._synced = True
-                        self._expected_history_len = len(board_history) + 1  # +1 cho nước engine vừa trả lời
+                        self._expected_history_len = len(board_history) + 1
                         self.time_left_ms = max(self.time_left_ms - think_ms, self.timeout_turn)
                         log.info(f"[Embryo] Move=({mx},{my}) think={think_ms}ms (max 5s) [sync={'T' if can_use_turn else 'F'}]")
                         return mx, my
@@ -388,18 +351,14 @@ class EmbryoEngine:
 
     def _stop_unlocked(self):
         if self.proc:
-            try:
-                self._send("END")
-            except Exception:
-                pass
+            try: self._send("END")
+            except Exception: pass
             try:
                 self.proc.terminate()
                 self.proc.wait(3)
             except Exception:
-                try:
-                    self.proc.kill()
-                except Exception:
-                    pass
+                try: self.proc.kill()
+                except Exception: pass
             self.proc = None
             self._initialized = False
         self._close_selector()
@@ -408,23 +367,20 @@ class EmbryoEngine:
         with self.lock:
             self._stop_unlocked()
 
+
 # ======================== CONSTANTS & CONFIG ========================
 WS_URL = "wss://gamevh.net/ws/gameServer"
 GAME_URL = "https://gamevh.net/play/caro/0"
-# === CẤU HÌNH TRỰC TIẾP - KHÔNG CẦN SECRETS ===
-# Đã hardcode theo yêu cầu - ai xem repo sẽ thấy mk
-CARO_USER_DIRECT = "nguyen15"
-CARO_PWWD_DIRECT = "******"
-# Ưu tiên Secrets nếu có, fallback về hardcode
+
+CARO_USER_DIRECT = "nguyen6"
+CARO_PWWD_DIRECT = "abc123"
+
 def _clean_env(val: Optional[str], default: str) -> str:
     if val and str(val).strip(): return str(val).strip()
     return default
 
 USER = _clean_env(os.environ.get("CARO_USER1") or os.environ.get("CARO_USER"), CARO_USER_DIRECT)
 PWWD = _clean_env(os.environ.get("CARO_PWWD1") or os.environ.get("CARO_PWWD"), CARO_PWWD_DIRECT)
-# Nếu muốn chỉ dùng hardcode:
-# USER = "nguyen3"
-# PWWD = ""
 
 VERSION = "5.0.2"
 GAME_ID = "caro"
@@ -433,8 +389,8 @@ RUNTIME = int(os.environ.get("CARO_RUNTIME_SECONDS") or
 AUTO_IDENTITY = os.environ.get("CARO_AUTO_IDENTITY", "1") == "1"
 IDENTITY_TEST_ONLY = os.environ.get("CARO_IDENTITY_TEST_ONLY", "0") == "1"
 BOT_BET_XU = 1000
-BOT_MATCH_DURATION = '1800'  # 1800s trên server GameVH
-BOT_TURN_DURATION = '60'     # 60s/nước trên server
+BOT_MATCH_DURATION = '1800'
+BOT_TURN_DURATION = '60'
 EMPTY = -1
 CIRCLE = 0
 CROSS = 1
@@ -451,6 +407,7 @@ CMD_MAP = {
     434: "SET_READY", 501: "BET", 502: "PLAY", 505: "CHAT", 518: "HIGHLIGHT",
     529: "MOVE", 533: "ASK_DRAW", 534: "SURRENDER", 535: "RETREAT",
 }
+
 
 # ======================== BINARY PROTOCOL ========================
 class BinaryReader:
@@ -526,6 +483,153 @@ class BinaryWriter:
             b = cmd.encode('ascii'); self.i8(-len(b)); self.parts.append(b)
     def build(self) -> bytes: return b''.join(self.parts)
 
+
+# ======================== SET_TURN TIMER TRACKER ========================
+class SetTurnTracker:
+    """
+    Theo dõi SET_TURN packets, phát hiện timer reset bug.
+    Ghi nhận chi tiết: khi gameover, người vào/ra, timer có reset về 0 không.
+    """
+    def __init__(self):
+        self.timer_start = None
+        self.timer_duration = 0
+        self.current_slot = -99
+        self.entries = []       # Chi tiết trong ván hiện tại
+        self.all_logs = []      # Lưu mọi ván
+        self.bug_events = []    # Bằng chứng bug
+        self.timeline = []      # Timeline tổng hợp
+
+    def on_set_turn(self, slot_id: int, turn_timeout: int, acc_timeout: int,
+                    context: str = "", ts: float = None):
+        ts = ts or time.time()
+        old_start = self.timer_start
+        old_dur = self.timer_duration
+
+        # Mô phỏng client: startTimer() → timerStart = now()
+        self.timer_start = ts
+        self.timer_duration = turn_timeout
+        prev_slot = self.current_slot
+        self.current_slot = slot_id
+
+        # Tính progress TRƯỚC khi reset
+        if old_start is not None and old_dur > 0:
+            old_progress = min((ts - old_start) / old_dur, 1.0)
+            old_remaining = max(0, old_dur - (ts - old_start))
+        else:
+            old_progress = 0
+            old_remaining = 0
+
+        entry = {
+            "idx": len(self.entries) + 1,
+            "time": ts,
+            "ts": time.strftime("%H:%M:%S", time.localtime(ts)),
+            "slot": slot_id,
+            "prev_slot": prev_slot,
+            "timeout": turn_timeout,
+            "acc": acc_timeout,
+            "old_progress": round(old_progress * 100, 1),
+            "old_remaining": round(old_remaining, 1),
+            "context": context,
+        }
+        self.entries.append(entry)
+        self.timeline.append(entry)
+
+        # Kiểm tra lặp cùng slot
+        is_repeat = False
+        if len(self.entries) >= 2:
+            prev = self.entries[-2]
+            if prev["slot"] == slot_id:
+                is_repeat = True
+                gap_ms = (ts - prev["time"]) * 1000
+                bug = {
+                    "game": len(self.all_logs),
+                    "idx": entry["idx"],
+                    "slot": slot_id,
+                    "gap_ms": round(gap_ms, 1),
+                    "old_progress_pct": round(old_progress * 100, 1),
+                    "old_remaining_s": round(old_remaining, 1),
+                    "context": context,
+                    "ts": entry["ts"],
+                }
+                self.bug_events.append(bug)
+
+        return {
+            "is_repeat": is_repeat,
+            "old_progress": old_progress,
+            "old_remaining": old_remaining,
+            "entry": entry,
+        }
+
+    def on_gameover(self):
+        if self.entries:
+            self.all_logs.append(list(self.entries))
+
+    def on_new_game(self):
+        if self.entries:
+            self.all_logs.append(list(self.entries))
+        self.entries.clear()
+        self.timer_start = None
+        self.timer_duration = 0
+        self.current_slot = -99
+
+    def print_game_summary(self, game_num: int):
+        log.info(f"{'─' * 60}")
+        log.info(f"📊 GAME #{game_num} SET_TURN SUMMARY")
+        log.info(f"{'─' * 60}")
+        total = len(self.entries)
+        repeats = sum(1 for i in range(1, total)
+                      if self.entries[i]["slot"] == self.entries[i-1]["slot"])
+        log.info(f"  Total SET_TURN: {total}")
+        log.info(f"  Same-slot repeats: {repeats}")
+
+        if repeats > 0:
+            log.info(f"  ❌ TIMER RESET BUG DETECTED! {repeats} lần lặp cùng slot")
+        else:
+            log.info(f"  ✅ Timer bình thường, không lặp cùng slot")
+
+    def print_final_summary(self):
+        total_turns = sum(len(l) for l in self.all_logs)
+        total_bugs = len(self.bug_events)
+
+        log.info(f"\n{'=' * 60}")
+        log.info(f"📊 FINAL SUMMARY - SET_TURN TIMER ANALYSIS")
+        log.info(f"{'=' * 60}")
+        log.info(f"  Games played: {len(self.all_logs)}")
+        log.info(f"  Total SET_TURN packets: {total_turns}")
+        log.info(f"  Bug events (same-slot repeat): {total_bugs}")
+
+        if self.bug_events:
+            log.info(f"\n  ❌❌ BUG EVIDENCE ({total_bugs} events):")
+            for b in self.bug_events:
+                log.info(f"    Game #{b['game']} | #{b['idx']} | slot={b['slot']} | "
+                         f"gap={b['gap_ms']}ms | {b['old_progress_pct']}%→0% "
+                         f"(lost {b['old_remaining_s']}s) | {b['context']}")
+        else:
+            log.info(f"\n  ✅ No bug detected in this session")
+
+        # Phân loại bug theo context
+        contexts = {}
+        for b in self.bug_events:
+            ctx = b["context"]
+            contexts[ctx] = contexts.get(ctx, 0) + 1
+        if contexts:
+            log.info(f"\n  Bug breakdown by context:")
+            for ctx, count in sorted(contexts.items(), key=lambda x: -x[1]):
+                log.info(f"    {ctx}: {count} lần")
+
+        # Xuất JSON
+        out = {
+            "games": len(self.all_logs),
+            "total_set_turns": total_turns,
+            "total_bugs": total_bugs,
+            "bug_events": self.bug_events,
+            "all_logs": self.all_logs,
+        }
+        with open("set_turn_analysis.json", "w", encoding="utf-8") as f:
+            json.dump(out, f, indent=2, ensure_ascii=False)
+        log.info(f"\n  💾 Full log: set_turn_analysis.json")
+
+
 # ======================== BOARD ========================
 class Board:
     def __init__(self, width: int = 15, height: int = 19):
@@ -592,6 +696,7 @@ class Board:
                             return (x, y)
         return self.get_empty_near_center()
 
+
 # ======================== BOT ========================
 class CaroBot:
     def __init__(self):
@@ -605,14 +710,14 @@ class CaroBot:
         self.pending_move = False
         self.bet_amts = []; self._resolved_bet_id = None
         self._bet_amts_loaded = False; self._joining_table = False
-        
+
         self.engine = None; self.embryo_available = False
         self.embryo_moves = 0; self.embryo_errors = 0; self.embryo_fallback_count = 0
         self._moving = False; self._last_move_xy = None
         self._embryo_reinit_attempts = 0
         self._embryo_reinit_cooldown_until = 0.0
-        self._pending_opponent_moves = []  # Queue nước đối thủ khi bot đang tính
-        
+        self._pending_opponent_moves = []
+
         self.table_id = None
         self.player_slot_by_id = {}
         self._pending_kick_player_id = None
@@ -620,9 +725,11 @@ class CaroBot:
         self._table_lost_at = None
         self._want_rejoin = False; self._rejoining = False; self._rejoin_attempts = 0
 
-        # Chỉ cập nhật FULL_NAME/avatar một lần mỗi lần khởi động tiến trình.
         self._identity_attempted = False
         self.identity_result = {}
+
+        # === SET_TURN TIMER TRACKER ===
+        self.timer_tracker = SetTurnTracker()
 
     def init_engine(self):
         if self.engine is not None: return self.embryo_available
@@ -657,7 +764,6 @@ class CaroBot:
         if self.engine: self.engine.stop(); self.engine = None; self.embryo_available = False
 
     def _hard_reset_engine(self, reason: str = ""):
-        """Kill hẳn process engine + xóa tham chiếu để tạo lại process sạch."""
         try:
             if self.engine is not None:
                 self.engine.stop()
@@ -669,22 +775,21 @@ class CaroBot:
         log.warning(f"[Embryo] HARD-RESET engine (reason={reason}) → lượt sau sẽ init_engine() lại")
 
     def _try_reinit_engine(self) -> bool:
-        """Tái khởi tạo engine NGAY TRONG VÁN khi embryo_available == False."""
         MAX_REINIT = 3
         COOLDOWN = 15.0
         now = time.time()
         if now < self._embryo_reinit_cooldown_until:
             return False
         if self._embryo_reinit_attempts >= MAX_REINIT:
-            log.warning(f"[Embryo] Đã thử reinit {self._embryo_reinit_attempts}x, tạm ngưng. Sẽ thử lại trận sau.")
+            log.warning(f"[Embryo] Đã thử reinit {self._embryo_reinit_attempts}x, tạm ngưng.")
             return False
         self._embryo_reinit_attempts += 1
         self._embryo_reinit_cooldown_until = now + COOLDOWN
-        log.warning(f"[Embryo] Thử tái khởi tạo engine ngay trong ván (lần {self._embryo_reinit_attempts}/{MAX_REINIT})...")
+        log.warning(f"[Embryo] Thử tái khởi tạo engine (lần {self._embryo_reinit_attempts}/{MAX_REINIT})...")
         self._hard_reset_engine("reinit-mid-match")
         ok = self.init_engine()
         if ok:
-            log.info("[Embryo] Engine đã phục hồi ngay trong ván")
+            log.info("[Embryo] Engine đã phục hồi")
             self._embryo_reinit_attempts = 0
         return ok
 
@@ -699,6 +804,7 @@ class CaroBot:
         self.opponent_symbol = CROSS if self.my_symbol == CIRCLE else CIRCLE
         log.info(f"Slot={self.slot} Me={'X' if self.my_symbol == CROSS else 'O'}")
 
+    # ======================== PACKET BUILDERS ========================
     def make_login(self) -> bytes:
         w = BinaryWriter(); w.write_command("LOGIN"); w.write_ascii(self.nickname)
         w.i32(self.token); w.write_ascii(VERSION); w.write_ascii(self.lock_key)
@@ -742,7 +848,6 @@ class CaroBot:
         w = BinaryWriter(); w.write_command("SET_READY"); return w.build()
 
     def make_kick_player(self, player_id: int) -> bytes:
-        # Web client protocol: command 410 followed by signed int64 playerId.
         w = BinaryWriter(); w.write_command("KICK_PLAYER"); w.i64(player_id)
         return w.build()
 
@@ -769,21 +874,18 @@ class CaroBot:
         try:
             start = time.time()
             x, y = -1, -1
-            
-            # Flush nước đối thủ bị queue TRƯỚC khi capture history
+
             if self._pending_opponent_moves:
                 log.info(f"[Embryo] Flushing {len(self._pending_opponent_moves)} queued opponent moves")
                 self._pending_opponent_moves.clear()
-            
+
             history = list(self.board.history)
 
-            # Nếu engine tắt, thử phục hồi ngay trong ván trước khi fallback
             if not self.embryo_available:
                 self._try_reinit_engine()
 
             if self.embryo_available:
                 try:
-                    # HARD TIMEOUT: chống treo engine kéo chết bot
                     move = await asyncio.wait_for(
                         asyncio.get_event_loop().run_in_executor(
                             None,
@@ -797,7 +899,7 @@ class CaroBot:
                         return
 
                     if (move and 0 <= move[0] < self.board.width and 0 <= move[1] < self.board.height
-                        and self.board.get(*move) == EMPTY):
+                            and self.board.get(*move) == EMPTY):
                         x, y = move; self.embryo_moves += 1
                     else:
                         self.embryo_errors += 1
@@ -847,6 +949,7 @@ class CaroBot:
         finally:
             self._moving = False
 
+    # ======================== PACKET HANDLERS ========================
     async def handle(self, raw: bytes):
         r = BinaryReader(raw)
         cmd = r.read_command()
@@ -928,7 +1031,6 @@ class CaroBot:
             self._joining_table = False
 
     async def handle_table(self, r: BinaryReader):
-        # Guard: KHÔNG reload board khi engine đang tính — tránh xung đột history
         if self._moving:
             log.info("[TABLE] Engine đang tính, bỏ qua board reload")
             return
@@ -939,56 +1041,55 @@ class CaroBot:
                     self.in_table = False; self.table_id = None
                     await self.create_new_table()
                 return
-            
+
             seat_count = r.u8()
             for _ in range(seat_count):
                 r.u8(); r.read_ascii(); r.u8(); child_count = r.u8()
                 for _ in range(child_count): r.u8(); r.read_ascii(); r.read_utf(); r.u8(); r.u8()
-            
+
             r.u8(); self.slot = r.i8(); is_playing = r.u8() == 1
             player_count = r.u8(); self.players = {}
             self.player_slot_by_id = {}
-            
+
             for _ in range(player_count):
                 sid = r.i8(); pid = r.i64(); name = r.read_utf()
                 r.u16(); r.read_ascii(); r.i8(); r.i64(); r.i64(); r.i64(); r.u8(); r.u8()
                 self.players[sid] = {'id': pid, 'name': name}
                 self.player_slot_by_id[pid] = sid
-            
+
             current_player = r.i8(); r.i16(); r.i16(); r.u8()
             self.in_table = True
-            
+
             move_count = r.u8()
             for _ in range(move_count): r.i8(); r.i32()
-            
+
             width = r.u8(); height = r.u8(); self.board.resize(width, height)
             r.i16(); self.board.load_rle(r.read_bytes()); self.update_symbols()
-            
+
             r.u8(); r.u8(); n = r.u8()
             for _ in range(n): r.read_ascii(); r.read_utf()
-            
-            # --- KIỂM TRA ĐỐI THỦ THỰC SỰ NGỒI GHẾ ---
+
             has_opponent = any(sid >= 0 and sid != self.slot for sid in self.players.keys())
-            
+
             self.is_playing = is_playing
             log.info(f"[TABLE] Slot={self.slot} Playing={is_playing} Turn=slot{current_player}")
-            
+
             if is_playing and current_player == self.slot:
                 if not self._moving and not self.pending_move:
                     self.pending_move = True; await self.do_move()
             elif not is_playing and self.slot >= 0:
                 if has_opponent:
                     if not self.ready:
-                        log.info("[BOT] Phát hiện đối thủ thực sự đã ngồi vào ghế. Bấm Sẵn sàng!")
+                        log.info("[BOT] Đối thủ đã vào ghế → SET_READY!")
                         self.ready = True; await self.send(self.make_ready())
                 else:
                     if self.ready:
-                        log.info("[BOT] Không có đối thủ ngồi ở ghế đối diện (chỉ có người xem hoặc bàn trống). Hủy Sẵn sàng.")
+                        log.info("[BOT] Không có đối thủ → Hủy Ready.")
                     self.ready = False
             elif not is_playing and self.slot < 0:
                 self.in_table = False; self.table_id = None
                 await asyncio.sleep(1); await self.send(self.make_list_bet_amt())
-            
+
             self._rejoining = False
         except Exception as e: log.error(f"Table error: {e}")
 
@@ -999,28 +1100,42 @@ class CaroBot:
         self.opponent_gone_at = None
         self._embryo_reinit_attempts = 0
         self._embryo_reinit_cooldown_until = 0.0
-        
+
+        # Timer tracker: ván mới
+        self.timer_tracker.on_new_game()
+
         player_count = r.u8()
         for i in range(player_count):
             r.i8(); r.i32()
-        
+
         width = r.u8(); height = r.u8(); self.board.resize(width, height)
         r.i16(); self.board.load_rle(r.read_bytes()); self.update_symbols()
-        
+
         log.info(f"=== GAME {self.total_games} === Me={'X' if self.my_symbol == CROSS else 'O'}")
-        
+
         if self.engine is None:
-            # Lần đầu: tạo process mới + RECTSTART
             self.init_engine()
         else:
-            # Đã có process: chỉ RESTART (giữ opening book + ponder state)
             self.engine.start_game(my_symbol=self.my_symbol)
-        
+
         if self.slot < 0:
             await asyncio.sleep(0.5); await self.send(self.make_get_table())
 
     async def handle_turn(self, r: BinaryReader):
-        sid = r.i8(); r.i16(); r.i16()
+        sid = r.i8(); turn_timeout = r.i16(); acc_timeout = r.i16()
+
+        # === TIMER TRACKING ===
+        context = "game" if self.is_playing else "lobby"
+        result = self.timer_tracker.on_set_turn(
+            sid, turn_timeout, acc_timeout, context=context
+        )
+
+        # Log timer state
+        if result["is_repeat"]:
+            log.info(f"  ❌ SET_TURN LẶP: slot={sid} gap={result['entry']['idx']} "
+                     f"progress {result['old_progress']*100:.1f}%→0% "
+                     f"(mất {result['old_remaining']:.1f}s)")
+
         if self.slot < 0: return
         if sid == self.slot and self.is_playing and self.running:
             if not self.pending_move and not self._moving:
@@ -1029,8 +1144,7 @@ class CaroBot:
     async def handle_move(self, r: BinaryReader):
         pos = r.i16(); symbol = r.i8()
         x, y = self.board.pos_to_xy(pos)
-        
-        # Luôn cập nhật board local
+
         current = self.board.get(x, y)
         if current == symbol:
             if symbol == self.my_symbol and self._last_move_xy is not None:
@@ -1041,8 +1155,7 @@ class CaroBot:
             self.board.undo(x, y); self.board.put(x, y, symbol)
         else:
             self.board.put(x, y, symbol)
-        
-        # Nếu engine đang tính → queue nước đi để sync sau
+
         if self._moving:
             self._pending_opponent_moves.append((x, y, symbol))
             log.info(f"[MOVE] Queued opponent move ({x},{y}) while engine thinking")
@@ -1060,6 +1173,11 @@ class CaroBot:
     async def handle_gameover(self, r: BinaryReader):
         self.is_playing = False; self.pending_move = False
         self.opponent_gone_at = None
+
+        # Timer tracker: gameover
+        self.timer_tracker.on_gameover()
+        self.timer_tracker.print_game_summary(self.total_games)
+
         player_count = r.u8(); my_result = None
         results = {}
         for _ in range(player_count):
@@ -1081,7 +1199,6 @@ class CaroBot:
             return
 
         if bot_lost:
-            # Ưu tiên đúng slot được GAMEOVER đánh dấu thắng; fallback sang đối thủ còn lại.
             winner_sid = next((sid for sid, result in results.items()
                                if sid != self.slot and sid >= 0 and result in (1, 11)), None)
             if winner_sid is None:
@@ -1090,7 +1207,7 @@ class CaroBot:
             winner = self.players.get(winner_sid) if winner_sid is not None else None
             winner_id = winner.get('id') if winner else None
             if winner_id is not None:
-                log.info(f"[BOT] Bot thua; sẽ kick người thắng {winner.get('name', winner_id)} sau 5 giây...")
+                log.info(f"[BOT] Bot thua; kick người thắng {winner.get('name', winner_id)} sau 5 giây...")
                 asyncio.create_task(self._delay_kick(winner_id, 5.0))
                 return
             log.warning("[BOT] Bot thua nhưng không tìm thấy playerId người thắng; chuyển sang sẵn sàng")
@@ -1118,7 +1235,6 @@ class CaroBot:
     async def _delay_kick(self, player_id: int, delay: float):
         await asyncio.sleep(delay)
         if self.is_playing or not self.in_table: return
-        # Chỉ kick nếu đúng playerId vẫn đang ở slot đối phương.
         if not any(sid != self.slot and sid >= 0 and player.get('id') == player_id
                    for sid, player in self.players.items()):
             log.info(f"[BOT] Bỏ kick playerId={player_id}: người chơi không còn ở bàn")
@@ -1127,7 +1243,6 @@ class CaroBot:
         self._pending_kick_player_id = player_id
         log.info(f"[BOT] Gửi KICK_PLAYER playerId={player_id}")
         await self.send(self.make_kick_player(player_id))
-        # Không để response bị treo làm nhầm một thông báo kick về sau.
         await asyncio.sleep(3)
         if self._pending_kick_player_id == player_id:
             self._pending_kick_player_id = None
@@ -1138,7 +1253,6 @@ class CaroBot:
         await asyncio.sleep(delay)
         if not self.is_playing and self.in_table:
             await self.send(self.make_get_table())
-            # Sau khi cập nhật trạng thái bàn, gửi SET_READY để sẵn sàng ván mới
             if not self.is_playing and self.in_table:
                 self.ready = True
                 await self.send(self.make_ready())
@@ -1148,20 +1262,20 @@ class CaroBot:
         pid = r.i64(); name = r.read_utf()
         if r.remaining() >= 36:
             r.i64(); r.i64(); r.read_ascii(); r.i32(); r.i32(); r.i8(); r.i64(); r.i8()
-            
+
         if place_level < 4: return
-        log.info(f"[BOT] Phát hiện {name} vào bàn cờ. Đang cập nhật trạng thái bàn...")
+        log.info(f"[BOT] {name} vào bàn → cập nhật trạng thái...")
         await self.send(self.make_get_table())
 
     async def handle_player_exit(self, r: BinaryReader):
         place_level = r.i8()
         pid = r.i64() if r.remaining() >= 8 else -1
         if place_level < 4: return
-        
+
         slot = self.player_slot_by_id.get(pid) if pid >= 0 else None
         if pid >= 0: self.player_slot_by_id.pop(pid, None)
         if slot is not None: self.players.pop(slot, None)
-        
+
         if slot is not None and slot == self.slot:
             if self.is_playing:
                 self.in_table = False; self._table_lost_at = time.time()
@@ -1170,45 +1284,46 @@ class CaroBot:
         elif self.is_playing:
             if self.opponent_gone_at is None:
                 self.opponent_gone_at = time.time()
-                log.info("[BOT] Đối thủ rời giữa ván -> ở lại bàn, chờ GAMEOVER")
+                log.info("[BOT] Đối thủ rời giữa ván → chờ GAMEOVER")
         elif self.in_table:
-            log.info("[BOT] Phát hiện có người rời bàn. Đang cập nhật lại trạng thái...")
+            log.info("[BOT] Có người rời bàn → cập nhật trạng thái...")
             await self.send(self.make_get_table())
 
+    # ======================== WATCHDOG ========================
     async def watchdog(self):
         while self.running:
             try: await asyncio.sleep(10)
             except asyncio.CancelledError: return
             if not self.running: return
-            
+
             if self.start_time and time.time() - self.start_time > RUNTIME:
                 self.save_stats(); self.stop(); return
-            
+
             if not self.ws or self.ws.close_code is not None: continue
-            
+
             try:
                 if (self.opponent_gone_at is not None and self.is_playing
                     and time.time() - self.opponent_gone_at > 15):
                     self.opponent_gone_at = None
                     await self.send(self.make_get_table())
-                
+
                 if (self._table_lost_at is not None
                     and time.time() - self._table_lost_at > 8):
                     self._table_lost_at = None; self.table_id = None
                     await self.create_new_table()
-                
+
                 if (not self.is_playing and not self.in_table and not self._joining_table
                     and not self._rejoining and self._bet_amts_loaded):
                     await self.send(self.make_create_rule())
             except Exception: pass
 
+    # ======================== HTTP LOGIN & IDENTITY ========================
     @staticmethod
     def _html_attr(tag: str, name: str) -> str:
         m = re.search(rf'\b{name}\s*=\s*(["\'])(.*?)\1', tag, re.I | re.S)
         return html_lib.unescape(m.group(2)) if m else ""
 
     def _read_profile_form(self, page_text: str, page_url: str):
-        """Đọc form hồ sơ và giữ nguyên mọi trường hiện có."""
         form_match = re.search(
             r'(?is)<form\b[^>]*name=["\']InputForm0["\'][^>]*>.*?</form>',
             page_text)
@@ -1230,8 +1345,7 @@ class CaroBot:
 
         for match in re.finditer(r'(?is)<select\b([^>]*)>(.*?)</select>', form):
             name = self._html_attr('<select ' + match.group(1) + '>', 'name')
-            if not name:
-                continue
+            if not name: continue
             selected = re.search(
                 r'(?is)<option\b([^>]*\bselected\b[^>]*)>(.*?)</option>',
                 match.group(2))
@@ -1245,7 +1359,6 @@ class CaroBot:
         return action, data
 
     def update_random_full_name(self, session: requests.Session) -> Dict:
-        """Đổi FULL_NAME mà không chạm tới endpoint đổi tên đăng nhập."""
         edit_url = 'https://gamevh.net/com/ftl/game/profile/update_profile.jsp'
         new_name = generate_random_full_name()
         page = session.get(edit_url, timeout=15, allow_redirects=True)
@@ -1271,23 +1384,8 @@ class CaroBot:
         if ok:
             log.info(f'[Identity] FULL_NAME: {old_name!r} -> {new_name!r}')
         else:
-            log.warning(
-                f'[Identity] FULL_NAME verify failed: expected={new_name!r}, '
-                f'actual={verified_name!r}, HTTP={response.status_code}')
-        return {
-            'ok': ok, 'old_full_name': old_name, 'new_full_name': new_name,
-            'verified_full_name': verified_name, 'http_status': response.status_code
-        }
-
-    @staticmethod
-    def _extract_profile_balance(page_text: str) -> Optional[int]:
-        m = re.search(
-            r'(?is)<div\s+class=["\'][^"\']*\bchipBalance\b[^"\']*["\'][^>]*>(.*?)</div>',
-            page_text)
-        if not m:
-            return None
-        digits = re.sub(r'[^0-9-]', '', html_lib.unescape(re.sub(r'<[^>]+>', '', m.group(1))))
-        return int(digits) if digits and digits != '-' else None
+            log.warning(f'[Identity] FULL_NAME verify failed: expected={new_name!r}, actual={verified_name!r}')
+        return {'ok': ok, 'old_full_name': old_name, 'new_full_name': new_name}
 
     @staticmethod
     def _extract_profile_avatar(page_text: str) -> Optional[int]:
@@ -1306,24 +1404,17 @@ class CaroBot:
             page = session.get(url, timeout=15)
             for match in pattern.finditer(page.text):
                 avatar_id = int(match.group(2))
-                if avatar_id in seen:
-                    continue
+                if avatar_id in seen: continue
                 seen.add(avatar_id)
                 cost = int(re.sub(r'[^0-9]', '', match.group(6)) or '0')
-                catalog.append({
-                    'id': avatar_id,
-                    'name': html_lib.unescape(match.group(4)),
-                    'cost': cost,
-                    'category': category
-                })
+                catalog.append({'id': avatar_id, 'name': html_lib.unescape(match.group(4)),
+                                'cost': cost, 'category': category})
         return catalog
 
     def update_random_avatar(self, session: requests.Session) -> Dict:
-        """Chọn avatar ngẫu nhiên từ catalog sống; có thể phát sinh phí x."""
         profile_url = 'https://gamevh.net/com/ftl/game/profile/player_profile.jsp'
         before_page = session.get(profile_url, timeout=15)
         old_avatar = self._extract_profile_avatar(before_page.text)
-        balance_before = self._extract_profile_balance(before_page.text)
         catalog = self._load_avatar_catalog(session)
         choices = [item for item in catalog if item['id'] != old_avatar]
         if not choices:
@@ -1342,24 +1433,13 @@ class CaroBot:
 
         after_page = session.get(profile_url, timeout=15)
         new_avatar = self._extract_profile_avatar(after_page.text)
-        balance_after = self._extract_profile_balance(after_page.text)
         ok = new_avatar == selected['id']
         if ok:
-            log.info(
-                f"[Identity] Avatar: builtin{old_avatar} -> builtin{new_avatar}; "
-                f"giá niêm yết={selected['cost']} x; số dư={balance_before}->{balance_after}")
-        else:
-            log.warning(
-                f"[Identity] Avatar verify failed: expected=builtin{selected['id']}, "
-                f"actual=builtin{new_avatar}, HTTP={response.status_code}")
-        return {
-            'ok': ok, 'old_avatar': old_avatar, 'new_avatar': new_avatar,
-            'selected_avatar': selected, 'balance_before': balance_before,
-            'balance_after': balance_after, 'http_status': response.status_code
-        }
+            log.info(f"[Identity] Avatar: builtin{old_avatar} -> builtin{new_avatar}")
+        return {'ok': ok, 'old_avatar': old_avatar, 'new_avatar': new_avatar}
 
     def update_profile_identity(self, session: requests.Session) -> Dict:
-        log.info('[Identity] Updating FULL_NAME + avatar (không đổi tên đăng nhập)...')
+        log.info('[Identity] Updating FULL_NAME + avatar...')
         result = {
             'full_name': self.update_random_full_name(session),
             'avatar': self.update_random_avatar(session)
@@ -1396,134 +1476,91 @@ class CaroBot:
             game_resp = session.get(GAME_URL, timeout=10)
             self.cookie = '; '.join(f'{k}={v}' for k, v in session.cookies.items())
             page_html = game_resp.text
-
-            tm = re.search(r'var\s+token\s*=\s*(-?\d+)', page_html)
-            if not tm:
-                log.error('[BOT] Token not found')
-                return False
-            self.token = int(tm.group(1))
-
-            nm = re.search(r"var\s+currentPlayerNickName\s*=\s*'([^']+)'", page_html)
-            if not nm:
-                log.error('[BOT] currentPlayerNickName not found')
-                return False
-            self.nickname = nm.group(1)
-
-            pm = re.search(r'var\s+placePath\s*=\s*\"([^\"]+)\"', page_html)
-            if pm:
-                self.place_path = pm.group(1)
-
-            if self.nickname == USER:
-                log.info(f'[Identity] Tên đăng nhập giữ nguyên: {self.nickname}')
+            m = re.search(r'var\s+token\s*=\s*(-?\d+)', page_html)
+            if not m:
+                m = re.search(r'"token"\s*:\s*(-?\d+)', page_html)
+            if m:
+                self.token = int(m.group(1))
             else:
-                log.warning(
-                    f'[Identity] Server nickname={self.nickname!r} khác CARO_USER={USER!r}')
-            log.info(f'[BOT] Login OK: {self.nickname}')
+                log.warning("[BOT] Token not found in page!")
+                return False
+
+            log.info(f"[BOT] HTTP login OK. token={self.token}")
             return True
         except Exception as e:
-            log.error(f'[BOT] Login error: {e}', exc_info=True)
+            log.error(f"[BOT] HTTP login error: {e}")
             return False
 
-    async def connect_ws(self) -> bool:
-        try:
-            self.ws = await websockets.connect(WS_URL,
-                additional_headers={"Cookie": self.cookie, "Origin": "https://gamevh.net",
-                                    "User-Agent": "Mozilla/5.0"},
-                max_size=2**20, ping_interval=None)
-            return True
-        except Exception as e: log.error(f"[BOT] WS connect error: {e}"); return False
-
-    async def run_ws(self):
-        if not await self.connect_ws(): return
-        await self.send(self.make_login())
-        wd_task = asyncio.create_task(self.watchdog())
-        try:
-            async for raw in self.ws:
-                if not self.running: break
-                if isinstance(raw, bytes): await self.handle(raw)
-        except websockets.exceptions.ConnectionClosed as e:
-            log.warning(f"[BOT] WS closed: {e.code}")
-        except Exception as e: log.error(f"[BOT] WS error: {e}")
-        finally:
-            wd_task.cancel()
-            try: await wd_task
-            except Exception: pass
-            self.save_stats()
-            if self.ws and self.ws.close_code is None:
-                try: await self.ws.close()
-                except Exception: pass
-
+    # ======================== MAIN RUN ========================
     async def run(self):
-        self.start_time = time.time(); self._running = True
-        log.info(f"{'='*50}")
+        self.start_time = time.time()
+        self.nickname = USER
 
+        log.info("=" * 60)
+        log.info(f"BOT CARO v4.0 - SET_TURN Timer Monitor")
+        log.info(f"User: {USER} | Runtime: {RUNTIME}s")
+        log.info(f"Engine: Embryo v{EMBRYO_VERSION}")
+        log.info("=" * 60)
 
-        log.info("BOT CARO EMBRYO - FULL_NAME + AVATAR v3.0")
-        log.info(f"{'='*50}")
-        
-        retry_count = 0
+        # HTTP login
+        login_ok = await asyncio.get_event_loop().run_in_executor(None, self.http_login)
+        if not login_ok:
+            log.error("HTTP login failed, exiting")
+            return
+
+        # WebSocket connection loop
         while self.running:
-            if time.time() - self.start_time > RUNTIME: break
-            
-            was_in_table = self.in_table or self.is_playing
-            self._want_rejoin = (was_in_table and self.table_id is not None and self._rejoin_attempts < 2)
-            
-            self.is_playing = False; self.pending_move = False
-            self.in_table = False; self.ready = False
-            self.board = Board(width=15, height=19); self.players.clear()
-            self.bet_amts = []; self._resolved_bet_id = None
-            self._bet_amts_loaded = False; self._joining_table = False
-            self.opponent_gone_at = None; self._table_lost_at = None
-            
-            if self.engine: self.engine.stop(); self.engine = None; self.embryo_available = False
-            
-            # Một lần đăng nhập mỗi chu kỳ để tránh giới hạn/brute-force.
-            login_ok = await asyncio.get_event_loop().run_in_executor(None, self.http_login)
-            if not login_ok:
-                retry_count += 1
-                retry_delay = min(30 * (2 ** (retry_count - 1)), 300)
-                remaining = RUNTIME - (time.time() - self.start_time)
-                if remaining <= 0:
-                    break
-                retry_delay = min(retry_delay, remaining)
-                log.warning(f'[BOT] Login thất bại; thử lại sau {retry_delay:.0f}s')
-                await asyncio.sleep(retry_delay)
-                continue
+            try:
+                log.info(f"Connecting to {WS_URL}...")
+                extra_headers = {}
+                if self.cookie:
+                    extra_headers['Cookie'] = self.cookie
 
-            retry_count = 0
-            if IDENTITY_TEST_ONLY:
-                # Chế độ kiểm tra: cập nhật + xác minh hồ sơ, không kết nối
-                # WebSocket, không vào phòng, không đặt cược/chơi game.
-                remaining = RUNTIME - (time.time() - self.start_time)
-                log.info(
-                    f'[TEST] Identity test only; không chạy game. '
-                    f'Chờ hết {max(0, remaining):.1f}s...')
-                if remaining > 0:
-                    await asyncio.sleep(remaining)
-                self.stop()
-                break
+                async with websockets.connect(
+                    WS_URL,
+                    additional_headers=extra_headers,
+                    ping_interval=None,
+                    max_size=2**20,
+                ) as ws:
+                    self.ws = ws
+                    log.info("WebSocket connected!")
+                    await self.send(self.make_login())
 
-            await self.run_ws()
-            
-            if not (self.in_table or self.is_playing):
-                self.table_id = None
-            
-            self.save_stats()
-            if self.engine: self.engine.stop(); self.engine = None
+                    watchdog_task = asyncio.create_task(self.watchdog())
 
-def main():
-    bin_path = auto_download_embryo()
-    if bin_path: print(f"[SETUP] Embryo ready: {os.path.basename(bin_path)}")
-    else: print("[SETUP] No Embryo - bot plays center only")
-    
-    try: asyncio.get_running_loop(); loop = asyncio.get_running_loop(); loop.create_task(_run_bot())
-    except RuntimeError: asyncio.run(_run_bot())
+                    try:
+                        async for msg in ws:
+                            if not self.running: break
+                            if isinstance(msg, bytes):
+                                await self.handle(msg)
+                            elif isinstance(msg, str):
+                                log.info(f"TEXT: {msg[:200]}")
+                    except websockets.exceptions.ConnectionClosed as e:
+                        log.warning(f"Connection closed: {e}")
+                    finally:
+                        watchdog_task.cancel()
+                        try: await watchdog_task
+                        except asyncio.CancelledError: pass
 
-async def _run_bot():
-    try: bot = CaroBot(); await bot.run()
-    except KeyboardInterrupt: log.info("[BOT] Stopped by user")
-    except Exception as e: log.error(f"[BOT] Error: {e}", exc_info=True)
+            except Exception as e:
+                log.error(f"WebSocket error: {e}")
 
-if __name__ == "__main__": main()
-elif 'ipykernel' in sys.modules or 'google.colab' in sys.modules: main()
+            if self.running:
+                log.info("Reconnecting in 5s...")
+                await asyncio.sleep(5)
 
+        # Final summary
+        self.timer_tracker.print_final_summary()
+        self.save_stats()
+        log.info(f"Stats: W={self.wins} L={self.losses} D={self.draws} G={self.total_games}")
+
+
+# ======================== MAIN ========================
+if __name__ == "__main__":
+    bot = CaroBot()
+    try:
+        asyncio.run(bot.run())
+    except KeyboardInterrupt:
+        log.info("Bot stopped by user")
+        bot.timer_tracker.print_final_summary()
+        bot.save_stats()
