@@ -92,7 +92,7 @@ EMBRYO_DOWNLOAD_URL = (
     "https://raw.githubusercontent.com/Hexik/Embryo_engine/master/"
     "Caro6/Linux/pbrain-embryo-1.2.0-6f650fab-c6.bz2"
 )
-EMBRYO_TIMEOUT = 2000
+EMBRYO_TIMEOUT = 1000
 EMBRYO_MOVE_TIMEOUT = 15.0
 EMBRYO_MATCH_TIMEOUT = 1800000
 
