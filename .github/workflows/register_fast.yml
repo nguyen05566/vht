@@ -4,51 +4,37 @@ on:
   workflow_dispatch:
     inputs:
       base_name:
-        description: 'Tên cơ sở (vd: test / nguyen / vip...)'
-        required: true
-        default: 'test'
+        description: 'Tiền tố chữ cái (vd: vh, nt, vip, abc...)'
+        required: false
+        default: 'vh'
+        type: string
       count:
-        description: 'Số lượng tk (max 50000)'
+        description: 'Số lượng tk cần tạo (max 50000)'
         required: true
         default: '50000'
+        type: string
       pwd:
-        description: 'MK chung cho mọi tk mới'
-        required: true
+        description: 'Mật khẩu chung cho mọi tk mới'
+        required: false
+        default: '123'
+        type: string
       concurrency:
         description: 'Số luồng song song (5-80, default 40)'
         required: false
         default: '40'
+        type: string
       chunk_size:
-        description: 'Tk mỗi file (default 5000)'
+        description: 'Số lượng tk mỗi file (default 5000)'
         required: false
         default: '5000'
-      skip_spin:
-        description: 'Bỏ qua quay số?'
-        required: false
-        type: boolean
-        default: true
-      skip_transfer:
-        description: 'Bỏ qua chuyển x?'
-        required: false
-        type: boolean
-        default: true
-      pm_user:
-        description: 'TK cần xóa tin (để trống = bỏ qua)'
-        required: false
-        default: ''
-      pm_pass:
-        description: 'MK TK xóa tin'
-        required: false
-        default: ''
+        type: string
 
 env:
-  REGISTER_USER: ${{ github.event.inputs.base_name || 'test' }}
+  REGISTER_USER: ${{ github.event.inputs.base_name || 'vh' }}
   REGISTER_COUNT: ${{ github.event.inputs.count || '50000' }}
-  REGISTER_PW: ${{ github.event.inputs.pwd }}
+  REGISTER_PW: ${{ github.event.inputs.pwd || '123' }}
   REGISTER_CONCURRENCY: ${{ github.event.inputs.concurrency || '40' }}
   CHUNK_SIZE: ${{ github.event.inputs.chunk_size || '5000' }}
-  PM_USER: ${{ github.event.inputs.pm_user || '' }}
-  PM_PW: ${{ github.event.inputs.pm_pass || '' }}
 
 permissions:
   contents: write
@@ -59,74 +45,74 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Checkout
+      - name: Checkout mã nguồn
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GH_PAT }}
+          token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+          fetch-depth: 1
 
-      - name: Setup Python
+      - name: Cài đặt Python 3.12
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
-      - name: Install dependencies
+      - name: Cài đặt thư viện phụ thuộc
         run: |
           pip install websockets ddddocr websocket-client requests
 
       # ==================== ĐĂNG KÝ + COMMIT SONG SONG ====================
-      - name: Đăng ký nhanh + tự commit
+      - name: Đăng ký nhanh hoán vị chữ cái + Tự commit file mới
         env:
-          GIT_AUTHOR_NAME: bot
-          GIT_AUTHOR_EMAIL: bot@users.noreply.github.com
-          GIT_COMMITTER_NAME: bot
-          GIT_COMMITTER_EMAIL: bot@users.noreply.github.com
+          GIT_AUTHOR_NAME: github-actions[bot]
+          GIT_AUTHOR_EMAIL: github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: github-actions[bot]@users.noreply.github.com
         run: |
-          # Cài git config
-          git config user.email "bot@users.noreply.github.com"
-          git config user.name "bot"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
 
           # Chạy register_fast.py ở background
           python register_fast.py &
           PID=$!
           echo "Register PID: $PID"
 
-          # Background committer: mỗi 30s kiểm tra file mới -> commit + push
+          # Background committer: mỗi 25s kiểm tra file mới -> commit + push
           while kill -0 $PID 2>/dev/null; do
-            sleep 30
+            sleep 25
             if [ -f .commit_ready ]; then
               rm -f .commit_ready
-              echo "--- Commit checkpoint ---"
+              echo "--- Commit checkpoint accfast*.txt ---"
               git add accfast*.txt
               if ! git diff --cached --quiet; then
                 files=$(git diff --cached --name-only | tr '\n' ' ')
-                git commit -m "register_fast: $files"
+                git commit -m "register_fast: $files [skip ci]"
                 git push 2>/dev/null || {
-                  echo "push bị chặn, rebase..."
+                  echo "push bị conflict, rebase lại..."
                   git pull --rebase --autostash 2>/dev/null || true
-                  sleep 10
+                  sleep 5
                   git push 2>/dev/null || true
                 }
               fi
             fi
           done
 
-          # Chờ Python xong
+          # Chờ Python kết thúc
           wait $PID
           EXIT_CODE=$?
           echo "Register exit code: $EXIT_CODE"
 
-          # Commit cuối cùng
+          # Commit lần cuối cùng
           echo "--- Final commit ---"
           rm -f .commit_ready .register_done
           git add accfast*.txt
           if ! git diff --cached --quiet; then
             files=$(git diff --cached --name-only | tr '\n' ' ')
-            git commit -m "register_fast DONE: $files"
+            git commit -m "register_fast DONE: $files [skip ci]"
             ok=0
             for i in 1 2 3 4 5; do
               if git push; then ok=1; break; fi
               git pull --rebase --autostash 2>/dev/null || true
-              sleep 15
+              sleep 10
             done
             [ "$ok" = "1" ] || echo "CẢNH BÁO: push cuối thất bại"
           else
@@ -135,17 +121,8 @@ jobs:
 
           exit $EXIT_CODE
 
-      # ==================== XÓA TIN NHẮN (nếu có) ====================
-      - name: Xóa tin nhắn
-        if: >-
-          !cancelled() &&
-          env.PM_USER != '' &&
-          env.PM_USER != 'n/a'
-        run: |
-          python pm_clean_all.py --user "$PM_USER" --password "$PM_PW" || echo "Xóa tin thất bại"
-
-      # ==================== UPLOAD KẾT QUẢ ====================
-      - name: Upload kết quả
+      # ==================== UPLOAD ARTIFACTS ====================
+      - name: Lưu trữ Artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:

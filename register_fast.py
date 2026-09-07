@@ -2,32 +2,29 @@
 """
 REGISTER FAST - Đăng ký tk GameVH concurrent, lưu accfast*.txt
 ===============================================================
+- Sinh username hoán vị / ngẫu nhiên chuỗi chữ cái (không theo số thứ tự)
+- Mật khẩu chung mặc định: 123
 - 40 luồng song song (asyncio.Semaphore)
 - Mỗi 5000 tk -> ghi accfast1.txt, accfast2.txt... + signal commit
-- Max 50,000 tk / lần chạy
 - Tự tìm số accfast tiếp theo (không ghi đè)
-
-File output:
-  accfast1.txt  (tk 1-5000)
-  accfast2.txt  (tk 5001-10000)
-  ...
-  .commit_ready  (signal file cho YAML biết có data mới)
 """
 import asyncio
-import websockets
-import struct
+import glob
 import os
 import random
+import re
+import string
+import struct
 import sys
 import time
-import re
-import glob
+import websockets
 
 WS_URL = "wss://gamevh.net/ws/gameServer"
 MAX_REGISTER_COUNT = 50000
 CHUNK_SIZE = 5000          # mỗi file chứa 5000 tk
 DEFAULT_CONCURRENCY = 40
 CAPTCHA_RETRIES = 3
+DEFAULT_PASSWORD = "123"
 
 # OCR singleton
 _ocr_instance = None
@@ -103,28 +100,47 @@ async def do_register(ws, user, pwd, captcha, clientId):
     return False, "unknown_response"
 
 
-# ===== NAME UTILS =====
-def split_name_number(name):
-    m = re.search(r'^(.*?)(\d+)$', name)
-    if m: return m.group(1), int(m.group(2))
-    return name, None
+# ===== TẠO USERNAME HOÁN VỊ CHỮ CÁI NGẪU NHIÊN =====
+def load_existing_usernames():
+    """Đọc toàn bộ username đã có từ các file acc*.txt để đảm bảo không tạo trùng."""
+    existing = set()
+    for fp in glob.glob("acc*.txt"):
+        try:
+            with open(fp, "r", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    u = line.strip().split("\t")[0].split(" ")[0].strip().lower()
+                    if u and not u.startswith("#"):
+                        existing.add(u)
+        except Exception:
+            continue
+    return existing
 
-def find_latest_number(prefix):
-    """Tìm số lớn nhất của {prefix}{N} trong mọi acc*.txt."""
-    pat = re.compile(r"^" + re.escape(prefix) + r"(\d+)$", re.I)
-    mx = 0
-    try:
-        for fp in sorted(glob.glob("acc*.txt")):
-            try:
-                with open(fp, encoding="utf-8", errors="replace") as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line or line.startswith("#"): continue
-                        m = pat.match(line.split("\t")[0].strip())
-                        if m: mx = max(mx, int(m.group(1)))
-            except OSError: continue
-    except: pass
-    return mx
+
+def generate_letter_usernames(prefix, count, existing_set):
+    """
+    Sinh danh sách username duy nhất tạo từ chuỗi chữ cái hoán vị/ngẫu nhiên.
+    Không dùng số thứ tự.
+    """
+    letters = string.ascii_lowercase
+    clean_prefix = re.sub(r'[^a-zA-Z]', '', prefix).lower()
+    
+    # Tính độ dài ngẫu nhiên: prefix + 5-6 ký tự chữ cái
+    rand_len = 5 if len(clean_prefix) <= 4 else 4
+    if not clean_prefix:
+        rand_len = 7
+
+    generated = set()
+    while len(generated) < count:
+        batch_needed = count - len(generated)
+        for _ in range(batch_needed + 1000):
+            rand_suffix = ''.join(random.choices(letters, k=rand_len))
+            uname = f"{clean_prefix}{rand_suffix}"
+            if uname not in existing_set and uname not in generated:
+                generated.add(uname)
+                if len(generated) >= count:
+                    break
+    return list(generated)
+
 
 def find_next_accfast_number():
     """Tìm số tiếp theo cho accfast{N}.txt (1-based)."""
@@ -139,21 +155,21 @@ def find_next_accfast_number():
 
 def get_config():
     base_name = (sys.argv[1] if len(sys.argv) > 1
-                 else os.environ.get("REGISTER_USER") or "test")
+                 else os.environ.get("REGISTER_USER") or "vh")
     raw_count = (sys.argv[2] if len(sys.argv) > 2
                  else os.environ.get("REGISTER_COUNT", str(MAX_REGISTER_COUNT)))
     try: count = int(raw_count)
     except: count = MAX_REGISTER_COUNT
     count = max(1, min(count, MAX_REGISTER_COUNT))
-    pwd = os.environ.get("REGISTER_PW", "nhat123456")
-    prefix, start_num = split_name_number(base_name)
-    latest = find_latest_number(prefix)
-    if latest >= 1:
-        print(f"[CONTINUE] {prefix}1..{prefix}{latest} đã có -> từ {prefix}{latest+1}")
-        start_num = latest + 1
-    elif start_num is None:
-        start_num = 1
-    return base_name, prefix, start_num, count, pwd
+    
+    # Mật khẩu chung: Mặc định là '123'
+    pwd = os.environ.get("REGISTER_PW")
+    if not pwd or pwd.strip() == "":
+        pwd = DEFAULT_PASSWORD
+    else:
+        pwd = pwd.strip()
+
+    return base_name, count, pwd
 
 
 # ===== FILE WRITER =====
@@ -193,7 +209,6 @@ class AccFastWriter:
         self.files_written.append(fname)
         self.buffer.clear()
         self.file_index += 1
-        # Signal cho YAML background committer
         try:
             open(".commit_ready", "w").close()
         except: pass
@@ -254,7 +269,7 @@ async def worker(queue, pwd, semaphore, stats, writer, target, done_event):
             stats['ok'] += 1
             await writer.add(user)
             if stats['ok'] % 500 == 0:
-                print(f"  📊 [{stats['ok']}/{target}] ...")
+                print(f"  📊 [{stats['ok']}/{target}] Đã đăng ký thành công...")
         elif msg == "already_exist":
             stats['exist'] += 1
         else:
@@ -263,20 +278,29 @@ async def worker(queue, pwd, semaphore, stats, writer, target, done_event):
 
 async def main():
     t0 = time.time()
-    base_name, prefix, start_num, count, pwd = get_config()
+    base_name, count, pwd = get_config()
     concurrency = int(os.environ.get("REGISTER_CONCURRENCY", DEFAULT_CONCURRENCY))
     concurrency = max(5, min(concurrency, 80))
 
-    print("=" * 60)
-    print(f"REGISTER FAST - {count} tk, {concurrency} luồng")
-    print(f"Prefix : {prefix}{start_num} -> {prefix}{start_num + count - 1}")
-    print(f"File   : accfast*.txt (mỗi {CHUNK_SIZE} tk/file)")
-    print(f"Max    : {MAX_REGISTER_COUNT}")
-    print("=" * 60)
+    print("=" * 65)
+    print(f"🚀 REGISTER FAST - TẠO {count:,} TÀI KHOẢN HOÁN VỊ CHỮ CÁI")
+    print(f"🔑 Mật khẩu chung : '{pwd}'")
+    print(f"🔤 Tiền tố cơ sở  : '{base_name}' (Hoán vị chuỗi chữ cái ngẫu nhiên)")
+    print(f"⚡ Số luồng        : {concurrency}")
+    print(f"📁 Lưu file       : accfast*.txt (mỗi {CHUNK_SIZE} tk/file)")
+    print("=" * 65)
+
+    print("[*] Đang đọc danh sách tài khoản hiện có để chống trùng lặp...")
+    existing_set = load_existing_usernames()
+    print(f"[+] Đã tải {len(existing_set):,} tài khoản cũ.")
+
+    print(f"[*] Đang sinh trước {count:,} username chữ cái ngẫu nhiên/hoán vị...")
+    usernames = generate_letter_usernames(base_name, count, existing_set)
+    print(f"[+] Mẫu 5 username đầu tiên: {usernames[:5]}")
 
     queue = asyncio.Queue()
-    for i in range(count):
-        queue.put_nowait(f"{prefix}{start_num + i}")
+    for u in usernames:
+        queue.put_nowait(u)
 
     semaphore = asyncio.Semaphore(concurrency)
     stats = {'ok': 0, 'fail': 0, 'exist': 0, 'captcha_fail': 0,
@@ -292,10 +316,8 @@ async def main():
     done_event.set()
     await writer.flush_remaining()
 
-    # Signal cuối cùng
     try: open(".commit_ready", "w").close()
     except: pass
-    # Tạo .done để YAML biết script đã xong
     try: open(".register_done", "w").close()
     except: pass
 
@@ -303,12 +325,12 @@ async def main():
     rate = stats['ok'] / elapsed * 60 if elapsed > 0 else 0
     files = writer.files_written
 
-    print("\n" + "=" * 60)
-    print(f"HOÀN TẤT: {stats['ok']}/{count} tk ({elapsed:.1f}s = {rate:.0f} tk/phút)")
+    print("\n" + "=" * 65)
+    print(f"🎉 HOÀN TẤT: {stats['ok']}/{count} tk ({elapsed:.1f}s = {rate:.0f} tk/phút)")
     print(f"  Đã tồn tại : {stats['exist']}")
     print(f"  Thất bại   : {stats['fail']}")
-    print(f"  File tạo   : {', '.join(files) if files else '(none)'}")
-    print("=" * 60)
+    print(f"  File đã lưu : {', '.join(files) if files else '(none)'}")
+    print("=" * 65)
 
 
 if __name__ == "__main__":
