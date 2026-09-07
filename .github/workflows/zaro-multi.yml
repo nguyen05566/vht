@@ -1,0 +1,119 @@
+name: zaro-multi
+
+on:
+  workflow_dispatch:
+    inputs:
+      runtime_hours:
+        description: 'Runtime (hours)'
+        required: false
+        default: '5.9'
+        type: string
+  schedule:
+    - cron: '25 */6 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-gamevh-multi
+  cancel-in-progress: true
+
+jobs:
+  run-multi-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 359
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: pip install websocket-client requests --break-system-packages
+
+      - name: Cache Pikafish engine
+        id: cache-pikafish
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/pikafish
+            ~/pikafish.nnue
+          key: pikafish-2026-01-02-linux
+
+      - name: Download Pikafish engine + NNUE
+        if: steps.cache-pikafish.outputs.cache-hit != 'true'
+        timeout-minutes: 10
+        env:
+          PK_URL: https://github.com/official-pikafish/Pikafish/releases/download/Pikafish-2026-01-02/Pikafish.2026-01-02.7z
+        run: |
+          set -e
+          # Dùng py7zr qua pip - nhanh, không đụng tới apt (apt từng treo >7 phút
+          # trên runner mới boot khiến bot không bao giờ chạy).
+          python3 -m pip install --quiet py7zr
+
+          curl -fL --retry 4 --retry-delay 5 --retry-all-errors --max-time 420 \
+               -o /tmp/pikafish.7z "$PK_URL"
+          ls -lh /tmp/pikafish.7z
+
+          if grep -q avx512vnni /proc/cpuinfo; then BIN=pikafish-vnni512
+          elif grep -q avx512f /proc/cpuinfo;  then BIN=pikafish-avx512
+          elif grep -q bmi2 /proc/cpuinfo;     then BIN=pikafish-bmi2
+          elif grep -q avx2 /proc/cpuinfo;     then BIN=pikafish-avx2
+          else BIN=pikafish-sse41-popcnt; fi
+          echo "[ENGINE] CPU hợp với $BIN"
+
+          python3 - "$BIN" <<'PY'
+          import os, shutil, sys, py7zr
+          binname = sys.argv[1]
+          targets = {f"Linux/{binname}", "Linux/pikafish-sse41-popcnt", "pikafish.nnue"}
+          with py7zr.SevenZipFile("/tmp/pikafish.7z") as z:
+              z.extract(path="/tmp/pikafish", targets=sorted(targets))
+          home = os.path.expanduser("~")
+          shutil.copy(f"/tmp/pikafish/Linux/{binname}", f"{home}/pikafish")
+          shutil.copy("/tmp/pikafish/pikafish.nnue", f"{home}/pikafish.nnue")
+          os.chmod(f"{home}/pikafish", 0o755)
+          print(f"[ENGINE] Đã cài {binname} + NNUE vào {home}")
+          PY
+
+          if ! echo -e "uci\nquit" | "$HOME/pikafish" > /dev/null 2>&1; then
+            echo "[ENGINE] $BIN không chạy được -> fallback sse41-popcnt"
+            cp /tmp/pikafish/Linux/pikafish-sse41-popcnt "$HOME/pikafish"
+            chmod +x "$HOME/pikafish"
+          fi
+
+      - name: Verify engine
+        timeout-minutes: 3
+        run: |
+          chmod +x "$HOME/pikafish"
+          ls -lh "$HOME/pikafish" "$HOME/pikafish.nnue"
+          echo -e "uci\nquit" | "$HOME/pikafish" | head -3
+
+      # ==========================================================
+      # 1 JOB DUY NHẤT chạy N tài khoản (mặc định 20) từ acc_valid_2.txt
+      # - Mỗi tài khoản 1 luồng WebSocket riêng, dùng chung EnginePool
+      # - Đổi lô acc: chỉnh ACCOUNT_OFFSET (bỏ qua N dòng đầu của file)
+      # ==========================================================
+      - name: Run Xiangqi Bot zaro-multi (nhieu tai khoan / 1 pool engine)
+        env:
+          ACCOUNTS_FILE: acc_valid_2.txt
+          MAX_ACCOUNTS: '20'
+          ACCOUNT_OFFSET: '0'
+          BOT_PASSWD: ${{ secrets.BOT_PASSWD || 'nhat123456' }}
+          MOVETIME_MS: '150'
+          ENGINE_POOL: '3'
+          ENGINE_THREADS: '1'
+          ENGINE_HASH: '256'
+          LOGIN_STAGGER: '8-20'
+          SNIFF_MODE: '0'
+          CARO_RUNTIME_HOURS: ${{ inputs.runtime_hours || '5.9' }}
+        run: |
+          echo "Starting zaro_multi.py; it will auto-restart until job timeout (~6h)"
+          while true; do
+            echo "=== $(date -u +'%Y-%m-%dT%H:%M:%SZ') Starting zaro_multi.py ==="
+            python3 -u zaro_multi.py || echo "zaro_multi.py exited with code $?"
+            echo "Restarting zaro_multi.py in 15 seconds"
+            sleep 15
+          done
