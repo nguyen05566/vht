@@ -1,6 +1,6 @@
 # 📊 Báo Cáo Người Chơi Trực Tuyến & Trong Bàn GameVH
 
-- **Thời gian cập nhật:** `2026-09-07 09:35:08 UTC`
+- **Thời gian cập nhật:** `2026-09-07 09:52:43 UTC`
 - **Tổng số người chơi ghi nhận:** `15` người
 
 | Player ID | Nickname | Số xu (Chip) | Điểm (Score) | Trò chơi / Vị trí | Cấp độ (Rank) | Thắng (W) | Hòa (D) | Thua (L) | EXP |
@@ -9,7 +9,7 @@
 | `156485` | **Kevin** | `2,025,396,947` | `0` | Trang chủ / Top (Lobby) | Giang hồ ngoại cấp | 43,868 | 4,152 | 50,693 | 107988/9148480 |
 | `608743` | **PINK** | `500,084,205` | `0` | Trang chủ / Top (Lobby) | Độc cô cầu bại | 35,609 | 4,380 | 39,793 | 73663/138240 |
 | `825650` | **STAR** | `500,057,828` | `0` | Trang chủ / Top (Lobby) | Giang hồ ngoại cấp | 99,337 | 12,767 | 109,750 | 454117/9148480 |
-| `10887916` | **Bai** | `490,764,129` | `0` | Trang chủ / Top (Lobby) | Nhất đại tôn sư | 82,774 | 0 | 85,581 | 16078/19440 |
+| `10887916` | **Bai** | `491,887,879` | `0` | Trang chủ / Top (Lobby) | Nhất đại tôn sư | 82,781 | 0 | 85,588 | 16086/19440 |
 | `60734589` | **Nghèo Nghiện Ngáo Ngáp** | `490,644,201` | `0` | Trang chủ / Top (Lobby) | Thần bài cấp 3 | 3,944 | 1 | 11,131 | 1221/2080 |
 | `51238406` | **Hoanvu** | `485,294,098` | `0` | Trang chủ / Top (Lobby) | Cao thủ cấp 5 | 1,598 | 0 | 3,196 | 96/800 |
 | `65028111` | **Tào Tháo** | `400,855,436` | `0` | Trang chủ / Top (Lobby) | Tam đẳng kỳ thủ | 21 | 0 | 21 | 25/100 |
