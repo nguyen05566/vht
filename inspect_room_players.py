@@ -19,7 +19,7 @@ import struct
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timezone
 import requests
 import websocket
 from bs4 import BeautifulSoup
@@ -238,11 +238,13 @@ def scan_room_ws(cookie, user_nick, token, game_id, room_id, duration, my_pid):
 
 
 def export_reports(all_players, output_dir="reports"):
-    os.makedirs(output_dir, exist_ok=True)
-    now_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    target_dir = os.path.join(base_dir, output_dir) if not os.path.isabs(output_dir) else output_dir
+    os.makedirs(target_dir, exist_ok=True)
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
     # 1. JSON
-    json_path = os.path.join(output_dir, "players_latest.json")
+    json_path = os.path.join(target_dir, "players_latest.json")
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump({
             "updated_at": now_str,
@@ -251,11 +253,11 @@ def export_reports(all_players, output_dir="reports"):
         }, f, ensure_ascii=False, indent=2)
 
     # 2. CSV
-    csv_path = os.path.join(output_dir, "players_latest.csv")
+    csv_path = os.path.join(target_dir, "players_latest.csv")
     with open(csv_path, "w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["Player ID", "Nickname", "Số xu (Chip)", "Điểm Score", "Trò chơi / Hoạt động", "Vị trí", "Cấp độ", "Thắng (W)", "Hòa (D)", "Thua (L)", "Tiến độ EXP", "Cập nhật"])
-        for pid, p in sorted(all_players.items(), key=lambda x: x[1].get("balance", 0), reverse=True):
+        for pid, p in sorted(all_players.items(), key=lambda x: max(x[1].get("balance", 0), x[1].get("full_profile", {}).get("balance", 0)), reverse=True):
             full = p.get("full_profile", {})
             games = full.get("games", {})
             gstats = list(games.values())[0] if games else {}
@@ -265,14 +267,14 @@ def export_reports(all_players, output_dir="reports"):
             lost = gstats.get("lost", "0")
             prog = gstats.get("progress", "N/A")
             nick = p.get("nick") or full.get("nick") or "N/A"
-            bal = p.get("balance") or full.get("balance") or 0
+            bal = max(p.get("balance", 0), full.get("balance", 0))
             writer.writerow([
                 pid, nick, bal, p.get("score", 0),
                 p.get("game", ""), p.get("room", ""), level, win, draw, lost, prog, now_str
             ])
 
     # 3. Markdown
-    md_path = os.path.join(output_dir, "players_latest.md")
+    md_path = os.path.join(target_dir, "players_latest.md")
     with open(md_path, "w", encoding="utf-8") as f:
         f.write(f"# 📊 Báo Cáo Người Chơi Trực Tuyến GameVH\n\n")
         f.write(f"- **Thời gian cập nhật:** `{now_str}`\n")
@@ -293,7 +295,7 @@ def export_reports(all_players, output_dir="reports"):
             loc = f"{p.get('game', '')} ({p.get('room', '')})"
             f.write(f"| `{pid}` | **{nick}** | `{bal:,}` | `{p.get('score', 0):,}` | {loc} | {level} | {win} | {draw} | {lost} | {prog} |\n")
 
-    print(f"\n[+] Đã xuất đầy đủ báo cáo vào thư mục '{output_dir}/'!")
+    print(f"\n[+] Đã xuất đầy đủ báo cáo vào thư mục '{target_dir}/'!")
 
 
 def main():
