@@ -413,8 +413,8 @@ WS_URL = "wss://gamevh.net/ws/gameServer"
 GAME_URL = "https://gamevh.net/play/caro/0"
 # === CẤU HÌNH TRỰC TIẾP - KHÔNG CẦN SECRETS ===
 # Đã hardcode theo yêu cầu - ai xem repo sẽ thấy mk
-CARO_USER_DIRECT = "nguyen4"
-CARO_PWWD_DIRECT = "abc123"
+CARO_USER_DIRECT = "zaro20"
+CARO_PWWD_DIRECT = "nhat123456"
 # Ưu tiên Secrets nếu có, fallback về hardcode
 def _clean_env(val: Optional[str], default: str) -> str:
     if val and str(val).strip(): return str(val).strip()
