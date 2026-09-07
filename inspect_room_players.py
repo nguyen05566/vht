@@ -158,8 +158,100 @@ def scan_homepage_top_players(session):
 
 
 # ==================== WEBSOCKET SCANNER ====================
+# Biến đếm toàn cục để in hex dump chỉ 3 lần đầu gặp CMD 415
+_415_dump_count = 0
+
+def _parse_415_all_players(raw, table_code, game_id, room_id):
+    """
+    Parse gói 415 (TABLE_INFO) để trích xuất TẤT CẢ người chơi đang ngồi trong bàn.
+    Cấu trúc gói 415 (sau opcode 2 byte):
+      - table_code: 2 bytes ascii
+      - host_name_len: 2 bytes (short)
+      - host_name: host_name_len*2 bytes (utf-16-be)
+      - Sau đó: danh sách ghế (slots), mỗi ghế chứa:
+          slot_flag (1 byte): 0=trống, khác 0=có người
+          player_id (8 bytes int64): id người ngồi (0 nếu trống)
+          player_name_len (2 bytes short)
+          player_name (name_len*2 bytes utf-16-be)
+          ... thêm trường phụ (balance, level...)
+    """
+    players = []
+    try:
+        offset = 2  # skip opcode
+        # table_code 2 bytes
+        offset += 2
+        # host name
+        if offset + 2 > len(raw): return players
+        h_len = struct.unpack_from(">h", raw, offset)[0]; offset += 2
+        h_name = ""
+        if h_len > 0 and offset + h_len*2 <= len(raw):
+            h_name = raw[offset:offset + h_len*2].decode("utf-16-be", errors="replace")
+            offset += h_len * 2
+        if h_name:
+            players.append((h_name, "host"))
+
+        # Parse các ghế còn lại trong bàn
+        # Thử đọc danh sách slot: mỗi slot có flag + player_id + name
+        while offset + 10 < len(raw):
+            # Đọc slot flag (1 byte)
+            slot_flag = struct.unpack_from(">b", raw, offset)[0]
+            if slot_flag < 0 or slot_flag > 10:
+                break
+            offset += 1
+            if slot_flag == 0:
+                # Ghế trống - skip 8 byte player_id (sẽ là 0)
+                if offset + 8 > len(raw): break
+                pid = struct.unpack_from(">q", raw, offset)[0]; offset += 8
+                # Thử đọc name_len (có thể là 0)
+                if offset + 2 > len(raw): break
+                nl = struct.unpack_from(">h", raw, offset)[0]
+                if nl == 0:
+                    offset += 2
+                    continue
+                elif nl < 0 or nl > 200:
+                    break
+                else:
+                    offset += 2 + nl * 2
+                    continue
+            else:
+                # Ghế có người
+                if offset + 8 > len(raw): break
+                pid = struct.unpack_from(">q", raw, offset)[0]; offset += 8
+                if offset + 2 > len(raw): break
+                nl = struct.unpack_from(">h", raw, offset)[0]; offset += 2
+                pname = ""
+                if nl > 0 and offset + nl*2 <= len(raw):
+                    pname = raw[offset:offset + nl*2].decode("utf-16-be", errors="replace")
+                    offset += nl * 2
+                # Skip thêm các trường phụ (balance, level...) nếu có
+                if offset + 16 <= len(raw):
+                    try:
+                        # balance (8 bytes) + score (8 bytes)
+                        offset += 16
+                    except Exception:
+                        pass
+                if pid > 0:
+                    players.append((pname, pid))
+    except Exception:
+        pass
+    return players
+
+def _hex_dump(data, max_bytes=128):
+    """Trả về chuỗi hex dump dễ đọc"""
+    lines = []
+    show = data[:max_bytes]
+    for i in range(0, len(show), 16):
+        chunk = show[i:i+16]
+        hex_part = ' '.join(f'{b:02x}' for b in chunk)
+        ascii_part = ''.join(chr(b) if 32 <= b < 127 else '.' for b in chunk)
+        lines.append(f'  {i:04x}: {hex_part:<48s} {ascii_part}')
+    if len(data) > max_bytes:
+        lines.append(f'  ... ({len(data) - max_bytes} bytes more)')
+    return '\n'.join(lines)
+
 def scan_room_worker(cookie, user_nick, token, game_id, room_id, duration, my_pid):
-    """Quét 1 phòng: Bắt Sảnh (406), Bàn chơi (415), Mời đấu (312), Dò bàn (408)"""
+    """Quét 1 phòng: Bắt Sảnh (406), Bàn chơi (415), Mời đấu (312), Dò bàn (408), Slot (416)"""
+    global _415_dump_count
     place_path = f"Lobby.{game_id}.{room_id}"
     ws = None
     found = {}
@@ -235,15 +327,97 @@ def scan_room_worker(cookie, user_nick, token, game_id, room_id, duration, my_pi
                 except Exception:
                     pass
 
-            # 🪑 Gói 415: Danh sách bàn đang hoạt động trong phòng & Tên chủ bàn
+            # 🪑 Gói 415: Danh sách bàn đang hoạt động trong phòng - TẤT CẢ người chơi trong bàn
             elif cmd == 415:
                 try:
+                    # Hex dump debug (chỉ in 3 lần đầu)
+                    if _415_dump_count < 3:
+                        _415_dump_count += 1
+                        print(f"   🔍 [DEBUG CMD 415] Raw hex ({len(raw)} bytes):")
+                        print(_hex_dump(raw))
+
                     offset = 2
                     table_code = raw[offset:offset+2].decode("ascii", errors="replace"); offset += 2
                     h_len = struct.unpack_from(">h", raw, offset)[0]; offset += 2
                     h_name = raw[offset:offset + h_len*2].decode("utf-16-be", errors="replace")
                     if h_name and h_name not in [x[0] for x in named_hosts]:
                         named_hosts.append((h_name, game_id, room_id, table_code))
+
+                    # Parse TẤT CẢ người chơi trong bàn từ gói 415
+                    all_table_players = _parse_415_all_players(raw, table_code, game_id, room_id)
+                    for pname, pinfo in all_table_players:
+                        if isinstance(pinfo, int) and pinfo > 0 and pinfo != my_pid and pinfo not in found:
+                            found[pinfo] = {
+                                "player_id": pinfo,
+                                "nick": pname,
+                                "balance": 0,
+                                "score": 0,
+                                "game": GAME_NAMES.get(game_id, game_id),
+                                "room": f"Phòng {room_id} (Bàn {table_code})",
+                                "source": "trong_bàn"
+                            }
+                            print(f"   🪑 [Bàn {table_code}] ID={pinfo} | Nick={pname} | Game={GAME_NAMES.get(game_id, game_id)} P.{room_id}")
+
+                    # Fallback: nếu parse slot không ra, thử quét toàn bộ bytes để tìm player_id khả dĩ
+                    if not all_table_players or (len(all_table_players) <= 1 and h_name):
+                        # Quét thô: tìm tất cả int64 > 10000 trong phần còn lại của gói tin
+                        scan_offset = 2 + 2 + 2 + h_len*2  # sau table_code + host_name
+                        extra_pids = set()
+                        while scan_offset + 8 <= len(raw):
+                            try:
+                                val = struct.unpack_from(">q", raw, scan_offset)[0]
+                                # Player ID thường > 10000 và < 10^12
+                                if 10000 < val < 10**12 and val != my_pid:
+                                    extra_pids.add(val)
+                                scan_offset += 1
+                            except Exception:
+                                break
+                        for epid in extra_pids:
+                            if epid not in found:
+                                found[epid] = {
+                                    "player_id": epid,
+                                    "nick": "",
+                                    "balance": 0,
+                                    "score": 0,
+                                    "game": GAME_NAMES.get(game_id, game_id),
+                                    "room": f"Phòng {room_id} (Bàn {table_code})",
+                                    "source": "trong_bàn_scan"
+                                }
+                                print(f"   🪑 [Bàn {table_code} scan] ID={epid} | Game={GAME_NAMES.get(game_id, game_id)} P.{room_id}")
+                except Exception:
+                    pass
+
+            # 🔄 Gói 416: SLOT_IN_TABLE_CHANGED - Thay đổi ghế ngồi trong bàn
+            elif cmd == 416:
+                try:
+                    offset = 2
+                    # table_code (ascii string)
+                    if offset + 1 > len(raw): continue
+                    tc_len = struct.unpack_from(">b", raw, offset)[0]; offset += 1
+                    if tc_len > 0 and offset + tc_len <= len(raw):
+                        tcode = raw[offset:offset + tc_len].decode("ascii", errors="replace")
+                        offset += tc_len
+                    else:
+                        tcode = "?"
+                    # slot_id (1 byte)
+                    if offset + 1 > len(raw): continue
+                    slot_id = struct.unpack_from(">b", raw, offset)[0]; offset += 1
+                    # Skip unknown bytes (likely slot metadata)
+                    # player_id ở cuối gói
+                    if offset + 8 <= len(raw):
+                        # Thử đọc player_id từ cuối gói
+                        test_pid = struct.unpack_from(">q", raw, len(raw) - 8)[0]
+                        if test_pid > 10000 and test_pid < 10**12 and test_pid != my_pid and test_pid not in found:
+                            found[test_pid] = {
+                                "player_id": test_pid,
+                                "nick": "",
+                                "balance": 0,
+                                "score": 0,
+                                "game": GAME_NAMES.get(game_id, game_id),
+                                "room": f"Phòng {room_id} (Slot {slot_id})",
+                                "source": "slot_change"
+                            }
+                            print(f"   🔄 [Slot {slot_id}] ID={test_pid} | Game={GAME_NAMES.get(game_id, game_id)} P.{room_id}")
                 except Exception:
                     pass
 
@@ -270,6 +444,31 @@ def scan_room_worker(cookie, user_nick, token, game_id, room_id, duration, my_pi
                             "source": "mời đấu"
                         }
                         print(f"   🎯 [Bàn thi đấu {GAME_NAMES.get(g_code, g_code)}] ID={hpid} | Host={hname} | Cược={bet_val:,} xu")
+
+                    # Gói 312 cũng có thể chứa thông tin người chơi khác trong bàn
+                    # Quét phần còn lại của gói để tìm thêm player_id
+                    scan_off = offset
+                    extra_312_pids = set()
+                    while scan_off + 8 <= len(raw):
+                        try:
+                            val = struct.unpack_from(">q", raw, scan_off)[0]
+                            if 10000 < val < 10**12 and val != my_pid and val != hpid:
+                                extra_312_pids.add(val)
+                            scan_off += 1
+                        except Exception:
+                            break
+                    for epid in extra_312_pids:
+                        if epid not in found:
+                            found[epid] = {
+                                "player_id": epid,
+                                "nick": "",
+                                "balance": 0,
+                                "score": 0,
+                                "game": f"{GAME_NAMES.get(g_code, g_code)} (Cược {bet_val:,} xu)",
+                                "room": "Đang trong bàn",
+                                "source": "mời đấu_scan"
+                            }
+                            print(f"   🎯 [Bàn cược scan] ID={epid} | Game={GAME_NAMES.get(g_code, g_code)}")
                 except Exception:
                     pass
 
