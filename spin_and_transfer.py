@@ -411,9 +411,10 @@ def forward_balance(dest_user, dest_pass, dest_id, dest2_id, log):
 # ==================== LOAD USERS ====================
 def load_users(args):
     if args.user:
-        return [args.user.strip()]
+        return [args.user.replace('\\"', '').replace('"', '').replace("'", "").replace('\\', '').strip()]
     if args.range:
-        parts = args.range.replace(",", " ").split()
+        range_str = args.range.replace('\\"', '').replace('"', '').replace("'", "").replace('\\', '').strip()
+        parts = range_str.replace(",", " ").split()
         prefix = parts[0]
         start, end = int(parts[1]), int(parts[2])
         excl = {int(x) for x in args.exclude.split(",") if x.strip().isdigit()}
@@ -422,8 +423,18 @@ def load_users(args):
               f"{' (bỏ ' + str(sorted(excl)) + ')' if excl else ''}")
         return users
 
-    candidates = [f.strip() for f in args.list.split(",")] if args.list else []
-    if candidates and not any(os.path.exists(c) for c in candidates):
+    raw_list = args.list or ""
+    raw_list = raw_list.replace('\\"', '').replace('"', '').replace("'", "").replace('\\', '').strip()
+    raw_candidates = [f.strip() for f in raw_list.split(",")] if raw_list else []
+    candidates = []
+    for c in raw_candidates:
+        expanded = glob.glob(c)
+        if expanded:
+            candidates.extend(expanded)
+        elif os.path.exists(c):
+            candidates.append(c)
+
+    if raw_candidates and not candidates:
         print(f"⚠️ Không file nào trong '{args.list}' tồn tại, thử tìm acc*.txt...")
         candidates = []
     if not candidates:

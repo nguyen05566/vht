@@ -19,7 +19,13 @@ def load_all_accounts(pattern="acc*.txt"):
     """Gom tất cả username từ các file acc*.txt."""
     seen = set()
     users = []
-    files = sorted(glob.glob(pattern))
+    raw_pattern = pattern or "acc*.txt"
+    raw_pattern = raw_pattern.replace('\\"', '').replace('"', '').replace("'", "").replace('\\', '').strip()
+    patterns = [p.strip() for p in raw_pattern.split(",") if p.strip()]
+    files = []
+    for p in patterns:
+        files.extend(glob.glob(p))
+    files = sorted(list(dict.fromkeys(files)))
     if not files:
         print(f"Không tìm thấy file nào khớp '{pattern}'")
         return users, files

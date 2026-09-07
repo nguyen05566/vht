@@ -61,20 +61,22 @@ jobs:
 
       - name: Quét WebSocket & Dọn dẹp file
         run: |
-          ARGS="--password $PW --workers $WORKERS --chunk-size $CHUNK_SIZE"
-          
+          EXTRA_ARGS=()
           if [ -n "$RANGE" ]; then
-            ARGS="$ARGS --range \"$RANGE\""
+            EXTRA_ARGS+=(--range "$RANGE")
           else
-            ARGS="$ARGS --pattern \"$PATTERN\""
+            EXTRA_ARGS+=(--pattern "$PATTERN")
           fi
           
           if [ "$CLEAN_OLD" = "true" ]; then
-            ARGS="$ARGS --clean-old"
+            EXTRA_ARGS+=(--clean-old)
           fi
           
-          echo "Executing: python scan_ws_accounts.py $ARGS"
-          python scan_ws_accounts.py $ARGS
+          python scan_ws_accounts.py \
+            --password "$PW" \
+            --workers "$WORKERS" \
+            --chunk-size "$CHUNK_SIZE" \
+            "${EXTRA_ARGS[@]}"
 
       - name: Commit & Push danh sách acc hợp lệ mới
         if: always()

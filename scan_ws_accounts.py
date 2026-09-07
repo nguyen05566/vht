@@ -160,24 +160,32 @@ def check_ws_account(user, passwd, timeout=10):
 # ==================== ĐỌC TÀI KHOẢN ĐẦU VÀO ====================
 def load_accounts(args):
     if args.user:
-        return [args.user.strip()], []
+        return [args.user.strip('"\' ')], []
     if args.range:
-        parts = args.range.replace(",", " ").split()
+        range_str = args.range.strip('"\' ')
+        parts = range_str.replace(",", " ").split()
         prefix = parts[0]
         start, end = int(parts[1]), int(parts[2])
         users = [f"{prefix}{i}" for i in range(start, end + 1)]
         print(f"🔍 Sinh {len(users)} tài khoản từ dải {prefix}{start}..{prefix}{end}")
         return users, []
 
-    # Quét theo pattern file
-    files = sorted(glob.glob(args.pattern))
+    # Quét theo pattern file (tự động loại bỏ dấu nháy kép/đơn/escape nếu có)
+    raw_pattern = args.pattern or "acc*.txt"
+    # Dọn dẹp triệt để các ký tự nháy, escape do shell truyền vào (\", ", ')
+    raw_pattern = raw_pattern.replace('\\"', '').replace('"', '').replace("'", "").replace('\\', '').strip()
+    patterns = [p.strip() for p in raw_pattern.split(",") if p.strip()]
+    files = []
+    for p in patterns:
+        files.extend(glob.glob(p))
+    files = sorted(list(dict.fromkeys(files)))
     if not files:
         print(f"Không tìm thấy file nào khớp pattern: {args.pattern}")
         return [], []
 
     seen = set()
     users = []
-    print(f"📂 Đang đọc từ {len(files)} file...")
+    print(f"📂 Đang đọc từ {len(files)} file khớp pattern...")
     for fp in files:
         # Bỏ qua chính các file kết quả mới để không bị lặp
         if "acc_valid" in fp:
