@@ -24,6 +24,13 @@ Biến môi trường chính:
   LOGIN_STAGGER      = 8-20              (giãn cách đăng nhập giữa các acc, giây)
   MIN_MOVE_SECONDS   = 0.2               (thời gian tối thiểu hiển thị mỗi nước)
   SNIFF_MODE         = 0                 (1 = in toàn bộ gói WS - log rất lớn!)
+
+Cấp xu (tk chính chuyển xu cho các nick khi login, qua WS cmd TRANSFER=317):
+  FUND_ACCOUNT       = (rỗng)            (tài khoản cấp xu, vd nguyenpy2; rỗng = tắt)
+  FUND_PASSWD        = (rỗng)            (mật khẩu tài khoản cấp xu)
+  FUND_AMOUNT        = 3000              (số xu chuyển mỗi lần cấp)
+  FUND_MIN_BALANCE   = 3000              (chỉ cấp cho nick có số dư < ngưỡng; 0 = luôn cấp)
+  FUND_WAIT_S        = 300               (nick chờ cấp tối đa bao nhiêu giây rồi vào chơi)
 """
 
 import struct
@@ -62,6 +69,13 @@ MAX_ACCOUNTS    = _env_int("MAX_ACCOUNTS", 20)
 ACCOUNT_OFFSET  = _env_int("ACCOUNT_OFFSET", 0)
 BOT_PASSWD      = _env_str("BOT_PASSWD", "nhat123456")
 
+# ---- Cấp xu: tk chính chuyển xu cho các nick (qua WS cmd TRANSFER) ----
+FUND_ACCOUNT      = _env_str("FUND_ACCOUNT", "")
+FUND_PASSWD       = _env_str("FUND_PASSWD", "")
+FUND_AMOUNT       = _env_int("FUND_AMOUNT", 3000)
+FUND_MIN_BALANCE  = _env_int("FUND_MIN_BALANCE", 3000)   # 0 = luôn cấp cho mọi nick
+FUND_WAIT_S       = _env_int("FUND_WAIT_S", 300)
+
 MOVETIME_MS       = _env_int("MOVETIME_MS", 150)
 ENGINE_POOL_SIZE  = max(1, _env_int("ENGINE_POOL", 3))
 ENGINE_THREADS    = max(1, _env_int("ENGINE_THREADS", 1))
@@ -88,11 +102,13 @@ BOT_TURN_DURATION   = '60'
 BOT_ACC_DURATION    = '0'
 BOT_BLOCK_SOFTWARE  = '0'
 BOT_TABLE_PASSWORD  = ''
+BOT_BET_XU          = _env_int("BOT_BET_XU", 1000)   # mức cược bàn bot tạo: 1000xu (trước đây 5000xu)
 WS_SNIFF_MODE = _env_str("SNIFF_MODE", "0") == "1"   # mặc định TẮT: 20 acc in sniff là tràn log
 
 WS_URL    = "wss://gamevh.net/ws/gameServer"
 LOGIN_URL = "https://gamevh.net/login.jsp"
 GAME_URL  = "https://gamevh.net/play/xiangqi/0"
+PROFILE_URL = "https://gamevh.net/com/ftl/game/profile/player_profile.jsp"
 GAME_ID   = 'xiangqi'
 _DEFAULT_PLACE = 'Lobby.xiangqi.0'
 
@@ -230,6 +246,7 @@ CMD_NAMES = {
     417: "START_MATCH", 418: "GAMEOVER", 419: "ENTER_STATE",
     420: "SET_TURN", 434: "SET_READY",
     502: "PLAY", 529: "MOVE", 533: "ASK_DRAW", 534: "SURRENDER", 601: "LOGIN_EX",
+    317: "TRANSFER", 319: "BALANCE_CHANGED",
 }
 
 class Conn:
@@ -778,6 +795,340 @@ ENGINE_POOL = EnginePool(ENGINE_POOL_SIZE)
 
 # ==================== ACCOUNT SESSION: 1 tài khoản = 1 luồng độc lập ====================
 
+# ==================== CẤP XU (chuyển xu từ tk chính sang các nick) ====================
+#
+# Cơ chế chuyển xu giống transfer_one.py trong repo (đã kiểm chứng chạy thật):
+#   - HTTP login lấy cookie/token, WS login bằng lệnh "LOGIN"
+#   - Gửi lệnh TRANSFER (317): pack_long(dest_player_id) + pack_long(amount)
+#   - Thành công khi server trả BALANCE_CHANGED (319) hoặc TRANSFER status=0
+#   - Server giới hạn: mỗi lần chuyển phải > 200 xu
+# Funder giữ MỘT kết nối WS duy nhất và phục vụ hàng đợi cấp xu cho các nick.
+
+MIN_TRANSFER_XU = 200
+
+class Funder:
+    """Tài khoản cấp xu (vd nguyenpy2): đăng nhập 1 phiên riêng, nhận yêu cầu
+    cấp xu từ các AccountSession qua hàng đợi, chuyển xu bằng lệnh TRANSFER."""
+
+    def __init__(self):
+        self.enabled = bool(FUND_ACCOUNT and FUND_PASSWD)
+        self.user = FUND_ACCOUNT
+        self.passwd = FUND_PASSWD
+        self.amount = max(0, FUND_AMOUNT)
+        self.min_balance = FUND_MIN_BALANCE
+        self.conn = Conn()
+        self.q = queue.Queue()
+        self._pending = {}                 # user -> {'event': Event, 'result': str}
+        self._pending_lock = threading.Lock()
+        self.cookie = None
+        self.nickname = None
+        self.token = 0
+        self.player_id = 0
+        self.balance = 0
+        self.ws = None
+        self.total_ok = 0
+        self.total_fail = 0
+        self.total_xu = 0
+        self._warned_out = False
+        self.thread = None
+
+    # ---------- API được gọi từ luồng AccountSession ----------
+
+    def request_fund(self, user, player_id, balance):
+        """Xếp hàng xin cấp xu. Trả Event chờ kết quả (None nếu tính năng tắt)."""
+        if not self.enabled:
+            return None
+        with self._pending_lock:
+            cur = self._pending.get(user)
+            if cur and not cur['event'].is_set():
+                return cur['event']        # đã có yêu cầu đang chờ -> tái sử dụng
+            ev = threading.Event()
+            self._pending[user] = {'event': ev, 'result': 'đang xếp hàng...'}
+        self.q.put((user, int(player_id), int(balance)))
+        return ev
+
+    def result_of(self, user):
+        with self._pending_lock:
+            item = self._pending.get(user)
+            return item['result'] if item else 'không có yêu cầu'
+
+    # ---------- Vòng đời của luồng funder ----------
+
+    def start(self):
+        if not self.enabled:
+            return
+        self.thread = threading.Thread(target=self._run, daemon=True, name="funder")
+        self.thread.start()
+
+    def _run(self):
+        log(self.user, "FUND", f"🚀 Funder khởi động | cấp {self.amount:,} xu/nick "
+                               f"| ngưỡng cấp: số dư nick < {self.min_balance:,} (0 = luôn cấp)")
+        while not deadline_reached():
+            if self._http_login():
+                break
+            log(self.user, "FUND", "⚠️ Đăng nhập thất bại -> thử lại sau 60s")
+            self._fail_all_queued("funder chưa đăng nhập được")
+            if STOP_EVENT.wait(60):
+                return
+        if deadline_reached():
+            return
+        log(self.user, "FUND", f"✅ HTTP login OK | nick={self.nickname} | ID={self.player_id} "
+                               f"| số dư={self.balance:,} xu")
+        if self.balance <= self.amount:
+            log(self.user, "FUND", f"⚠️ Số dư funder ({self.balance:,} xu) không dư dả "
+                                   f"-> cân nhắc NẠP THÊM XU cho {self.user}!")
+
+        while not deadline_reached():
+            if not self._ws_login():
+                log(self.user, "FUND", "⚠️ WS login thất bại -> thử lại sau 30s")
+                self._fail_all_queued("funder WS chưa kết nối được")
+                if STOP_EVENT.wait(30):
+                    return
+                continue
+            log(self.user, "FUND", "✅ WS sẵn sàng - chờ các nick xin cấp xu")
+            while not deadline_reached():
+                item = None
+                try:
+                    item = self.q.get(timeout=0.5)
+                except queue.Empty:
+                    pass
+                self._pump_socket(0.05)    # bắt PING giữ kết nối sống lúc rảnh
+                if item:
+                    self._fund_one(*item)
+                if self.ws is None:
+                    # kết nối rớt giữa chừng -> ra ngoài kết nối lại, giữ hàng đợi còn lại
+                    log(self.user, "FUND", "⚠️ WS mất -> kết nối lại sau 5s")
+                    if STOP_EVENT.wait(5):
+                        break
+                    break
+            self._ws_close()
+
+        log(self.user, "FUND", f"Funder dừng | đã cấp {self.total_xu:,} xu cho "
+                               f"{self.total_ok} nick (lỗi: {self.total_fail})")
+
+    # ---------- HTTP login ----------
+
+    def _http_login(self):
+        try:
+            s = requests.Session()
+            ua = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/139.0 Safari/537.36")
+            s.headers.update({"User-Agent": ua, "Accept-Language": "vi-VN,vi;q=0.9,en;q=0.7"})
+            s.get(LOGIN_URL, timeout=20)
+            resp = s.post(LOGIN_URL, timeout=20,
+                          data={"redirect": "/", "USER_NAME": self.user, "PASSWORD": self.passwd,
+                                "AUTO_LOGIN": "true", "LOGIN": "Đăng nhập"},
+                          headers={"Origin": "https://gamevh.net", "Referer": LOGIN_URL},
+                          allow_redirects=True)
+            if "login.jsp" in resp.url:
+                return False
+            page = s.get(GAME_URL, timeout=20).text
+            tm = re.search(r"var\s+token\s*=\s*(-?\d+)", page)
+            nm = re.search(r"var\s+currentPlayerNickName\s*=\s*[\"']([^\"']+)[\"']", page)
+            pid = re.search(r"var\s+currentPlayerId\s*=\s*(\d+)", page)
+            if not tm or not nm:
+                return False
+            self.token = int(tm.group(1))
+            self.nickname = nm.group(1).strip()
+            self.player_id = int(pid.group(1)) if pid else 0
+            self.cookie = "; ".join(f"{k}={v}" for k, v in s.cookies.items())
+            bal = self._http_balance(s)
+            if bal is not None:
+                self.balance = bal
+            return True
+        except Exception as e:
+            log(self.user, "FUND", f"Lỗi HTTP login: {type(e).__name__}: {e}")
+            return False
+
+    @staticmethod
+    def _http_balance(session):
+        try:
+            r = session.get(PROFILE_URL, timeout=15)
+            m = re.search(r'(?is)<div\s+class=["\'][^"\']*chipBalance[^"\']*["\'][^>]*>(.*?)</div>', r.text)
+            if m:
+                return int(re.sub(r"[^\d]", "", m.group(1)) or 0)
+        except Exception:
+            pass
+        return None
+
+    # ---------- WebSocket ----------
+
+    def _ws_send(self, cmd, data=b''):
+        if not self.ws:
+            return
+        try:
+            self.ws.send_binary(self.conn.pack(cmd, data))
+        except Exception:
+            pass
+
+    def _ws_close(self):
+        if self.ws:
+            try:
+                self.ws.close()
+            except Exception:
+                pass
+            self.ws = None
+
+    def _ws_login(self):
+        import websocket
+        try:
+            self.ws = websocket.create_connection(
+                WS_URL, cookie=self.cookie,
+                header={"Origin": "https://gamevh.net"}, timeout=15)
+            data = bytearray()
+            data.extend(self.conn.pack_ascii(self.nickname))
+            data.extend(self.conn.pack_int(self.token))
+            data.extend(self.conn.pack_ascii("5.0.2"))
+            data.extend(self.conn.pack_ascii(""))
+            data.extend(self.conn.pack_ascii(GAME_ID))
+            data.extend(self.conn.pack_byte(1))
+            self.ws.send_binary(self.conn.pack("LOGIN", bytes(data)))
+            deadline = time.time() + 12
+            while time.time() < deadline:
+                try:
+                    self.ws.settimeout(max(0.3, deadline - time.time()))
+                    raw = self.ws.recv()
+                except Exception:
+                    break
+                if not raw:
+                    continue
+                msg = InboundMessage(raw)
+                if msg.command == "PING":
+                    self._ws_send("PONG")
+                    continue
+                if msg.command == "LOGIN":
+                    status = msg.read_byte()
+                    if status == 0:
+                        return True
+                    log(self.user, "FUND", f"❌ WS login bị từ chối (status={status})")
+                    self._ws_close()
+                    return False
+            self._ws_close()
+            return False
+        except Exception as e:
+            log(self.user, "FUND", f"Lỗi WS login: {type(e).__name__}: {e}")
+            self._ws_close()
+            return False
+
+    def _pump_socket(self, timeout):
+        """Đọc 1 gói tin (nếu có) lúc rảnh: trả PONG cho PING, log ALERT."""
+        if not self.ws:
+            return
+        try:
+            self.ws.settimeout(timeout)
+            raw = self.ws.recv()
+        except Exception:
+            return
+        if not raw:
+            return
+        try:
+            msg = InboundMessage(raw)
+            if msg.command == "PING":
+                self._ws_send("PONG")
+            elif msg.command == "ALERT":
+                try:
+                    log(self.user, "SERVER", f"ALERT: {msg.read_string()}")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    # ---------- Chuyển xu ----------
+
+    def _ws_transfer(self, dest_id, amount):
+        """Gửi TRANSFER (317) và chờ phản hồi. Trả chuỗi kết quả ('OK...' = thành công)."""
+        if not self.ws:
+            return "WS chưa kết nối"
+        try:
+            self.ws.send_binary(self.conn.pack(
+                317, struct.pack('>q', dest_id) + struct.pack('>q', amount)))
+        except Exception as e:
+            self._ws_close()
+            return f"gửi lệnh thất bại: {e}"
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            try:
+                self.ws.settimeout(max(0.3, deadline - time.time()))
+                raw = self.ws.recv()
+            except Exception:
+                self._ws_close()
+                return "mất kết nối khi chờ phản hồi server"
+            if not raw:
+                continue
+            try:
+                msg = InboundMessage(raw)
+            except Exception:
+                continue
+            if msg.command == "PING":
+                self._ws_send("PONG")
+                continue
+            if msg.command == "BALANCE_CHANGED":
+                self.balance = max(0, self.balance - amount)
+                return "OK (server xác nhận BALANCE_CHANGED)"
+            if msg.command == "TRANSFER":
+                st = msg.read_byte()
+                try:
+                    txt = msg.read_string()
+                except Exception:
+                    txt = ""
+                if st == 0:
+                    self.balance = max(0, self.balance - amount)
+                    return f"OK (TRANSFER status=0 {txt})".strip()
+                return f"server từ chối (status={st}): {txt}"
+            if msg.command == "ALERT":
+                try:
+                    log(self.user, "SERVER", f"ALERT: {msg.read_string()}")
+                except Exception:
+                    pass
+        return "hết 15s không thấy phản hồi server"
+
+    def _fund_one(self, user, player_id, balance):
+        try:
+            if self.amount <= MIN_TRANSFER_XU:
+                res = f"mức cấp {self.amount:,} xu phải > {MIN_TRANSFER_XU} (giới hạn server)"
+            elif not player_id:
+                res = "nick chưa có playerId"
+            elif player_id == self.player_id:
+                res = "trùng ID với funder -> bỏ qua"
+            else:
+                res = self._ws_transfer(player_id, self.amount)
+        except Exception as e:
+            res = f"lỗi: {type(e).__name__}: {e}"
+        ok = res.startswith("OK")
+        with self._pending_lock:
+            item = self._pending.get(user)
+            if item:
+                item['result'] = ('thành công - ' + res[3:].strip()) if ok else ('thất bại - ' + res)
+                item['event'].set()
+        if ok:
+            self.total_ok += 1
+            self.total_xu += self.amount
+            log(self.user, "FUND", f"✅ {user}: +{self.amount:,} xu (ID {player_id}) "
+                                   f"| tổng {self.total_xu:,} xu / {self.total_ok} nick "
+                                   f"| dư funder ~{self.balance:,}")
+        else:
+            self.total_fail += 1
+            log(self.user, "FUND", f"❌ {user}: {res}")
+            if self.balance <= self.amount and not self._warned_out:
+                self._warned_out = True
+                log(self.user, "FUND", f"⚠️ Số dư {self.user} gần hết ({self.balance:,} xu) "
+                                       f"-> CẦN NẠP THÊM XU để tiếp tục cấp cho nick!")
+        time.sleep(random.uniform(1.2, 2.5))    # nhịp giữa 2 lệnh chuyển, tránh flood
+
+    def _fail_all_queued(self, reason):
+        while True:
+            try:
+                user, _pid, _bal = self.q.get_nowait()
+            except queue.Empty:
+                return
+            with self._pending_lock:
+                item = self._pending.get(user)
+                if item:
+                    item['result'] = f'thất bại - {reason}'
+                    item['event'].set()
+
+FUNDER = Funder()
+
 class AccountSession:
     """Port từ PikafishBot bản gốc. Mọi biến toàn cục (USER/PASSWD/COOKIE/TOKEN/
     CURRENT_PLAYER_ID/PLACE_PATH...) đều chuyển thành thuộc tính của phiên để
@@ -884,49 +1235,39 @@ class AccountSession:
         except Exception as e:
             self._log("PROFILE", f"Lỗi cập nhật tên hiển thị: {e}")
 
-    def _sync_random_avatar(self):
-        """Đổi avatar ngẫu nhiên (có thể phát sinh phí xu)."""
+    def _fetch_balance(self):
+        """Đọc số dư xu (chipBalance) trên trang profile của chính nick này."""
         try:
-            profile_url = "https://gamevh.net/com/ftl/game/profile/player_profile.jsp"
-            before = self.http.get(profile_url, timeout=15)
-            m = re.search(r'/avatar/builtin(\d+)\.(?:webp|png|jpg)', before.text, re.I)
-            old_avatar = int(m.group(1)) if m else None
-
-            catalog = []
-            seen = set()
-            pattern = re.compile(
-                r'''buyAvatar\(\s*(["\']?)(\d+)\1\s*,\s*(["\'])(.*?)\3\s*,\s*(["\']?)([\d,.]+)\5\s*\)''',
-                re.I | re.S)
-            for category in range(1, 7):
-                url = ("https://gamevh.net/com/ftl/game/profile/"
-                       f"avatar_by_category.jsp?excludeLayout=true&category_id={category}")
-                page = self.http.get(url, timeout=15)
-                for match in pattern.finditer(page.text):
-                    avatar_id = int(match.group(2))
-                    if avatar_id in seen:
-                        continue
-                    seen.add(avatar_id)
-                    catalog.append(avatar_id)
-
-            choices = [a for a in catalog if a != old_avatar]
-            if not choices:
-                self._log("PROFILE", "🎭 Không tải được catalog avatar")
-                return
-
-            selected = random.choice(choices)
-            update_url = ("https://gamevh.net/com/ftl/game/profile/update_avatar.jsp"
-                          f"?pk={selected}&redirect=/")
-            self.http.post(update_url, timeout=20,
-                           headers={"Origin": "https://gamevh.net",
-                                    "Referer": "https://gamevh.net/com/ftl/game/profile/avatar.jsp"},
-                           allow_redirects=True)
-
-            after = self.http.get(profile_url, timeout=15)
-            m2 = re.search(r'/avatar/builtin(\d+)\.(?:webp|png|jpg)', after.text, re.I)
-            new_avatar = int(m2.group(1)) if m2 else None
-            self._log("PROFILE", f"🎭 Avatar: builtin{old_avatar} -> builtin{new_avatar}")
+            r = self.http.get(PROFILE_URL, timeout=15)
+            m = re.search(r'(?is)<div\s+class=["\'][^"\']*chipBalance[^"\']*["\'][^>]*>(.*?)</div>', r.text)
+            if m:
+                return int(re.sub(r"[^\d]", "", m.group(1)) or 0)
         except Exception as e:
-            self._log("PROFILE", f"Lỗi đổi avatar: {e}")
+            self._log("FUND", f"Lỗi đọc số dư: {e}")
+        return None
+
+    def _maybe_request_funding(self):
+        """Nếu số dư nick dưới ngưỡng -> xin tk FUND_ACCOUNT cấp xu, chờ tới FUND_WAIT_S.
+        Hết giờ chờ hoặc thất bại thì vẫn vào chơi bình thường (không chặn luồng chính)."""
+        try:
+            bal = self._fetch_balance()
+            if bal is None:
+                self._log("FUND", "Không đọc được số dư -> bỏ qua bước cấp xu")
+                return
+            if FUND_MIN_BALANCE > 0 and bal >= FUND_MIN_BALANCE:
+                self._log("FUND", f"Số dư {bal:,} xu >= ngưỡng {FUND_MIN_BALANCE:,} -> không cần cấp")
+                return
+            ev = FUNDER.request_fund(self.user, self.player_id, bal)
+            if ev is None:
+                return
+            self._log("FUND", f"Số dư {bal:,} xu < ngưỡng {FUND_MIN_BALANCE:,} -> xếp hàng xin "
+                              f"{FUND_AMOUNT:,} xu từ {FUND_ACCOUNT} (chờ tối đa {FUND_WAIT_S}s)")
+            if ev.wait(FUND_WAIT_S):
+                self._log("FUND", f"Kết quả cấp xu: {FUNDER.result_of(self.user)}")
+            else:
+                self._log("FUND", f"⏰ Chờ cấp xu quá {FUND_WAIT_S}s -> vào chơi với số dư hiện có")
+        except Exception as e:
+            self._log("FUND", f"Lỗi xin cấp xu: {e}")
 
     def fetch_session_info(self):
         """Đăng nhập bằng user/passwd và lấy token/nickname/playerId cho TÀI KHOẢN NÀY."""
@@ -949,11 +1290,10 @@ class AccountSession:
                 self._log("SESSION", f"Đăng nhập thất bại (sai tài khoản/mật khẩu?): {resp.url}")
                 return False
 
-            # Đổi tên hiển thị (có dấu chấm) + avatar ngẫu nhiên: 1 lần mỗi phiên
+            # Đổi tên hiển thị (có dấu chấm): 1 lần mỗi phiên
             if not self._identity_synced:
                 self._identity_synced = True
                 self._sync_profile_name()
-                self._sync_random_avatar()
 
             # B3: vào trang game để lấy token / nickname / playerId
             game_resp = session.get(GAME_URL, timeout=20)
@@ -986,6 +1326,11 @@ class AccountSession:
             if self.nickname != self.user:
                 self._log("SESSION", f"Nickname server={self.nickname!r} khác USER={self.user!r}")
             self._log("SESSION", f"Login OK | Token: {self.token} | Nick: {self.nickname} | ID: {self.player_id}")
+
+            # Cấp xu: nick số dư thấp xin tk FUND_ACCOUNT cấp xu trước khi vào chơi
+            if FUNDER.enabled and self.player_id:
+                self._maybe_request_funding()
+
             return True
         except Exception as e:
             self._log("SESSION", f"Lỗi đăng nhập: {e}")
@@ -1107,9 +1452,13 @@ class AccountSession:
         self._last_create_time = now
         bet_amt_id = 0
         for ba in self.bet_amts:
-            if ba["value"] == 1000:
+            if ba["value"] == BOT_BET_XU:
                 bet_amt_id = ba["id"]
                 break
+        else:
+            if self.bet_amts:
+                self._log("CREATE", f"⚠️ Không tìm thấy mức cược {BOT_BET_XU}xu "
+                                    f"(có: {[ba['value'] for ba in self.bet_amts]}) -> dùng mức mặc định")
         args = [
             ("matchDuration", str(BOT_MATCH_DURATION)),
             ("turnDuration", str(BOT_TURN_DURATION)),
@@ -1125,7 +1474,7 @@ class AccountSession:
         for arg_name, arg_value in args:
             data.extend(self.conn.pack_ascii(arg_name))
             data.extend(self.conn.pack_string(arg_value))
-        self._log("CREATE", f"🎯 Tạo bàn 1000xu, bet_id={bet_amt_id}")
+        self._log("CREATE", f"🎯 Tạo bàn {BOT_BET_XU}xu, bet_id={bet_amt_id}")
         if WS_SNIFF_MODE:
             self._log("WS-SNIFF", f"CREATE_RULE send: data_hex={bytes(data).hex()}")
         self.send_message("CREATE_RULE", bytes(data))
@@ -1662,7 +2011,7 @@ class AccountSession:
                         if not self._bet_amts_loaded:
                             self.send_list_bet_amt()
                         else:
-                            self._log("CREATE", "🎯 Tạo bàn mới 1000xu...")
+                            self._log("CREATE", f"🎯 Tạo bàn mới {BOT_BET_XU}xu...")
                             self.send_create_table()
                 time.sleep(1)
             except KeyboardInterrupt:
@@ -1701,7 +2050,10 @@ def load_accounts():
             if u and not u.startswith('#'):
                 users.append(u)
     offset = max(0, ACCOUNT_OFFSET)
-    picked = users[offset:offset + MAX_ACCOUNTS]
+    if MAX_ACCOUNTS > 0:
+        picked = users[offset:offset + MAX_ACCOUNTS]
+    else:
+        picked = users[offset:]   # MAX_ACCOUNTS <= 0 -> lấy TẤT CẢ acc còn lại trong file
     # Chống trùng lặp (file có thể chứa user lặp)
     seen, uniq = set(), []
     for u in picked:
@@ -1781,6 +2133,9 @@ def main():
     print(f"  Runtime        : {RUNTIME_HOURS} giờ", flush=True)
     print(f"  Login stagger  : {LOGIN_STAGGER_MIN:.0f}-{LOGIN_STAGGER_MAX:.0f}s giữa các acc", flush=True)
     print(f"  Sniff mode     : {'BẬT (log cực lớn!)' if WS_SNIFF_MODE else 'tắt'}", flush=True)
+    print("  Cấp xu         : " + (f"BẬT - {FUND_ACCOUNT} cấp {FUND_AMOUNT:,} xu/nick "
+                                      f"(ngưỡng số dư < {FUND_MIN_BALANCE:,}; 0 = luôn cấp)"
+                                      if FUNDER.enabled else "tắt (đặt FUND_ACCOUNT + FUND_PASSWD để bật)"), flush=True)
     print("=" * 72, flush=True)
 
     accounts = load_accounts()
@@ -1795,6 +2150,9 @@ def main():
     atexit.register(ENGINE_POOL.stop)
 
     ENGINE_POOL.start()
+
+    if FUNDER.enabled:
+        FUNDER.start()
 
     threads = []
     for i, user in enumerate(accounts):
