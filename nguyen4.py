@@ -1139,7 +1139,7 @@ class CaroBot:
         if self.slot < 0: return
         if sid == self.slot and self.is_playing and self.running:
             if not self.pending_move and not self._moving:
-                self.pending_move = True; await asyncio.sleep(2); await self.do_move()
+                self.pending_move = True; await asyncio.sleep(0.5); await self.do_move()
 
     async def handle_move(self, r: BinaryReader):
         pos = r.i16(); symbol = r.i8()
