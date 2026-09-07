@@ -1,0 +1,78 @@
+{
+  "updated_at": "2026-09-07 09:03:06 UTC",
+  "total_players": 3,
+  "players": {
+    "68859270": {
+      "player_id": 68859270,
+      "nick": "K.hoa",
+      "balance": 77641,
+      "score": 1000,
+      "game": "chess",
+      "room": 0,
+      "avatar": "",
+      "full_profile": {
+        "player_id": 68859270,
+        "nick": "K.hoa",
+        "balance": 77641,
+        "games": {
+          "Cờ tướng": {
+            "win": "159",
+            "draw": "3",
+            "lost": "41",
+            "score": "1,891",
+            "level": "Tứ đẳng kỳ vương",
+            "progress": "41/100"
+          }
+        }
+      }
+    },
+    "67224828": {
+      "player_id": 67224828,
+      "nick": "Thuthu",
+      "balance": 23720,
+      "score": 1277,
+      "game": "caro",
+      "room": 0,
+      "avatar": "https://vh.game8.io/upload/users/828/67224828.png",
+      "full_profile": {
+        "player_id": 67224828,
+        "nick": "Thuthu",
+        "balance": 23720,
+        "games": {
+          "Cờ caro": {
+            "win": "154",
+            "draw": "2",
+            "lost": "126",
+            "score": "1,277",
+            "level": "Adept 2",
+            "progress": "27/100"
+          }
+        }
+      }
+    },
+    "33827151": {
+      "player_id": 33827151,
+      "nick": "Lớn",
+      "balance": 40,
+      "score": 1075,
+      "game": "xiangqi",
+      "room": 0,
+      "avatar": "https://vh.game8.io/upload/users/151/33827151.png",
+      "full_profile": {
+        "player_id": 33827151,
+        "nick": "Lớn",
+        "balance": 40,
+        "games": {
+          "Cờ tướng": {
+            "win": "429",
+            "draw": "14",
+            "lost": "449",
+            "score": "1,075",
+            "level": "Nhất đẳng kỳ thủ",
+            "progress": "25/100"
+          }
+        }
+      }
+    }
+  }
+}
