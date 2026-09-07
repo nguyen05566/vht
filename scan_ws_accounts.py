@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-QUÉT TÀI KHOẢN HỢP LỆ (HTTP + WEBSOCKET LOGIN) & TẠO FILE MỚI + DỌN DẸP FILE CŨ
-================================================================================
-- Dò toàn bộ tài khoản từ danh sách file (acc*.txt) hoặc dải tên (--range)
-- Kiểm tra chính xác: HTTP login -> lấy token -> kết nối WebSocket -> WS LOGIN handshake (st=0)
-- Tài khoản bị flag/khóa/lỗi sẽ bị loại bỏ
+QUÉT TÀI KHOẢN HỢP LỆ (HTTP + WEBSOCKET LOGIN) ĐA LUỒNG TỐC ĐỘ CAO (100+ LUỒNG)
+==============================================================================
+- Quét đồng thời 100-150 luồng song song
+- Kiểm tra toàn diện: HTTP Login -> Lấy Token -> Kết nối WebSocket -> Xác thực Handshake (st=0)
+- Tài khoản bị flag/khóa/lỗi tự động loại bỏ
 - Tạo file danh sách hợp lệ mới (chia nhỏ theo chunk_size)
-- (Tùy chọn) Xóa sạch các file acc cũ rác để làm gọn repo
+- Xóa sạch các file acc cũ rác để làm gọn repo
 """
 import argparse
 import glob
@@ -51,6 +51,8 @@ class Reader:
     def __init__(self, d):
         self.d, self.p = bytes(d), 0
     def rem(self): return len(self.d) - self.p
+    def u8(self):
+        v = self.d[self.p] if self.p < len(self.d) else 0; self.p += 1; return v
     def i8(self):
         v = struct.unpack_from(">b", self.d, self.p)[0] if self.p < len(self.d) else 0
         self.p += 1; return v
@@ -78,30 +80,28 @@ def parse_frame(raw):
     return (first << 8) | raw[1], Reader(raw[2:])
 
 
-# ==================== KIỂM TRA TÀI KHOẢN ====================
-def check_ws_account(user, passwd, timeout=10):
+# ==================== KIỂM TRA TÀI KHOẢN (TỐC ĐỘ CAO) ====================
+def check_ws_account(user, passwd, timeout=5):
     """
-    Kiểm tra toàn diện:
-    1. HTTP Login
+    Kiểm tra nhanh & chuẩn xác:
+    1. HTTP Login (POST trực tiếp, không GET thừa)
     2. Lấy Token & Session Cookies
     3. Kết nối WebSocket & gửi LOGIN
     4. Xác nhận handshake status == 0
-    Trả về: (user, True, "OK") hoặc (user, False, reason)
     """
-    # 1. HTTP Login
     sess = requests.Session()
     sess.headers.update({"User-Agent": UA, "Accept-Language": "vi-VN,vi;q=0.9"})
     try:
-        sess.get(LOGIN_URL, timeout=timeout)
+        # POST trực tiếp để xác thực đăng nhập ngay trên 1 request duy nhất
         r = sess.post(LOGIN_URL, timeout=timeout,
                       data={"redirect": "/", "USER_NAME": user, "PASSWORD": passwd,
                             "AUTO_LOGIN": "true", "LOGIN": "Đăng nhập"},
                       headers={"Origin": "https://gamevh.net", "Referer": LOGIN_URL},
                       allow_redirects=True)
         if "login.jsp" in r.url:
-            return user, False, "HTTP_LOGIN_FAIL"
+            return user, False, "HTTP_FAIL"
 
-        # 2. Lấy Token
+        # Lấy token vào game
         g = sess.get(GAME_URL, timeout=timeout)
         tm = re.search(r"var\s+token\s*=\s*(-?\d+)", g.text)
         token = int(tm.group(1)) if tm else 0
@@ -111,10 +111,10 @@ def check_ws_account(user, passwd, timeout=10):
         mm = re.search(r"var\s+currentPlayerNickName\s*=\s*[\"']([^\"']+)[\"']", g.text)
         nick = mm.group(1).strip() if mm else user
         cookie = "; ".join(f"{k}={v}" for k, v in sess.cookies.items())
-    except Exception as e:
-        return user, False, f"HTTP_ERR:{type(e).__name__}"
+    except Exception:
+        return user, False, "HTTP_TIMEOUT"
 
-    # 3. WebSocket Connect & Login
+    # Kết nối WebSocket
     ws = None
     try:
         ws = websocket.create_connection(
@@ -143,36 +143,34 @@ def check_ws_account(user, passwd, timeout=10):
                     except Exception: pass
                     return user, True, "WS_OK"
                 else:
-                    path = rd.utf16() if rd.rem() > 0 else ""
                     try: ws.close()
                     except Exception: pass
-                    return user, False, f"FLAGGED_OR_REJECTED(st={st})"
+                    return user, False, f"FLAGGED(st={st})"
         try: ws.close()
         except Exception: pass
         return user, False, "WS_TIMEOUT"
-    except Exception as e:
+    except Exception:
         if ws:
             try: ws.close()
             except Exception: pass
-        return user, False, f"WS_ERR:{type(e).__name__}"
+        return user, False, "WS_ERR"
 
 
 # ==================== ĐỌC TÀI KHOẢN ĐẦU VÀO ====================
 def load_accounts(args):
     if args.user:
-        return [args.user.strip('"\' ')], []
+        return [args.user.replace('\\"', '').replace('"', '').replace("'", "").replace('\\', '').strip()], []
     if args.range:
-        range_str = args.range.strip('"\' ')
+        range_str = args.range.replace('\\"', '').replace('"', '').replace("'", "").replace('\\', '').strip()
         parts = range_str.replace(",", " ").split()
         prefix = parts[0]
         start, end = int(parts[1]), int(parts[2])
         users = [f"{prefix}{i}" for i in range(start, end + 1)]
-        print(f"🔍 Sinh {len(users)} tài khoản từ dải {prefix}{start}..{prefix}{end}")
+        print(f"🔍 Sinh {len(users):,} tài khoản từ dải {prefix}{start}..{prefix}{end}")
         return users, []
 
-    # Quét theo pattern file (tự động loại bỏ dấu nháy kép/đơn/escape nếu có)
+    # Quét theo pattern file
     raw_pattern = args.pattern or "acc*.txt"
-    # Dọn dẹp triệt để các ký tự nháy, escape do shell truyền vào (\", ", ')
     raw_pattern = raw_pattern.replace('\\"', '').replace('"', '').replace("'", "").replace('\\', '').strip()
     patterns = [p.strip() for p in raw_pattern.split(",") if p.strip()]
     files = []
@@ -187,7 +185,6 @@ def load_accounts(args):
     users = []
     print(f"📂 Đang đọc từ {len(files)} file khớp pattern...")
     for fp in files:
-        # Bỏ qua chính các file kết quả mới để không bị lặp
         if "acc_valid" in fp:
             continue
         try:
@@ -203,14 +200,14 @@ def load_accounts(args):
         except Exception as e:
             print(f"  Lỗi đọc file {fp}: {e}")
 
-    print(f"📋 Tổng số tài khoản duy nhất cần kiểm tra: {len(users)} (từ {len(files)} file)")
+    print(f"📋 Tổng số tài khoản duy nhất cần kiểm tra: {len(users):,} (từ {len(files)} file)")
     return users, files
 
 
 # ==================== MAIN ====================
 def main():
     ap = argparse.ArgumentParser(
-        description="Quét tài khoản hợp lệ (HTTP + WS login) & tạo danh sách mới")
+        description="Quét tài khoản hợp lệ (HTTP + WS login) đa luồng tốc độ cao")
     ap.add_argument("--pattern", default="acc*.txt",
                     help="Pattern file acc cần quét (default: acc*.txt)")
     ap.add_argument("--range", default=None,
@@ -219,10 +216,10 @@ def main():
                     help="Kiểm tra 1 tài khoản cụ thể")
     ap.add_argument("--password", "--pwd", required=True,
                     help="Mật khẩu chung của các tài khoản")
-    ap.add_argument("--workers", type=int, default=60,
-                    help="Số luồng quét đồng thời (default: 60)")
-    ap.add_argument("--timeout", type=int, default=10,
-                    help="Timeout cho mỗi kết nối (giây)")
+    ap.add_argument("--workers", type=int, default=100,
+                    help="Số luồng quét song song (default: 100)")
+    ap.add_argument("--timeout", type=int, default=5,
+                    help="Timeout cho mỗi kết nối (default: 5s)")
     ap.add_argument("--out-prefix", default="acc_valid",
                     help="Tiền tố file xuất ra (default: acc_valid)")
     ap.add_argument("--chunk-size", type=int, default=5000,
@@ -241,37 +238,44 @@ def main():
         print("🤷 Không tìm thấy tài khoản nào để quét.")
         return
 
+    total = len(users)
     print("=" * 70)
-    print(f"🚀 BẮT ĐẦU QUÉT WEBSOCKET: {len(users)} tài khoản | {args.workers} luồng | Timeout: {args.timeout}s")
-    print("=" * 70)
+    print(f"🚀 BẮT ĐẦU QUÉT WEBSOCKET ĐA LUỒNG")
+    print(f"👥 Tổng tài khoản : {total:,}")
+    print(f"⚡ Luồng song song : {args.workers} luồng")
+    print(f"⏱️ Timeout        : {args.timeout}s / acc")
+    print("=" * 70 + "\n")
 
     t0 = time.time()
     valid_accounts = []
     invalid_count = 0
     lock = threading.Lock()
+    last_log_time = time.time()
+    processed = 0
 
-    def log(msg):
-        with lock:
-            print(msg, flush=True)
+    # Quét theo chunk (mỗi chunk 5000) để giải phóng bộ nhớ và phản hồi mượt mà
+    chunk_batch = 5000
+    for chunk_start in range(0, total, chunk_batch):
+        sub_users = users[chunk_start:chunk_start + chunk_batch]
+        with ThreadPoolExecutor(max_workers=min(args.workers, len(sub_users) or 1)) as ex:
+            futs = {ex.submit(check_ws_account, u, args.password, args.timeout): u for u in sub_users}
+            for f in as_completed(futs):
+                user, ok, reason = f.result()
+                processed += 1
+                if ok:
+                    with lock:
+                        valid_accounts.append(user)
+                    print(f"  [{processed:,}/{total:,}] ✅ {user} -> HỢP LỆ (Tổng OK: {len(valid_accounts):,})", flush=True)
+                else:
+                    with lock:
+                        invalid_count += 1
 
-    with ThreadPoolExecutor(max_workers=min(args.workers, len(users) or 1)) as ex:
-        futs = {ex.submit(check_ws_account, u, args.password, args.timeout): u for u in users}
-        total = len(users)
-        for i, f in enumerate(as_completed(futs), 1):
-            user, ok, reason = f.result()
-            if ok:
-                with lock:
-                    valid_accounts.append(user)
-                if len(valid_accounts) % 100 == 0 or len(valid_accounts) <= 10:
-                    log(f"  [{i}/{total}] ✅ {user} -> HỢP LỆ (Tổng OK: {len(valid_accounts)})")
-            else:
-                with lock:
-                    invalid_count += 1
-
-            if i % 500 == 0 or i == total:
-                elapsed = time.time() - t0
-                speed = i / elapsed if elapsed > 0 else 0
-                log(f"📊 Tiến độ [{i}/{total}] ({i/total*100:.1f}%) | ✅ {len(valid_accounts)} hợp lệ | ❌ {invalid_count} loại | Tốc độ: {speed:.1f} acc/s")
+                now = time.time()
+                if (now - last_log_time >= 2.0) or (processed % 50 == 0) or (processed == total):
+                    last_log_time = now
+                    elapsed = now - t0
+                    speed = processed / elapsed if elapsed > 0 else 0
+                    print(f"⚡ [{processed:,}/{total:,}] ({processed/total*100:.1f}%) | ✅ {len(valid_accounts):,} OK | ❌ {invalid_count:,} loại | Tốc độ: {speed:.1f} acc/s ({args.workers} luồng)", flush=True)
 
     wall = time.time() - t0
     valid_accounts.sort()
@@ -279,13 +283,14 @@ def main():
     print("\n" + "=" * 70)
     print("🏁 KẾT QUẢ QUÉT TỔNG HỢP")
     print("=" * 70)
-    print(f"  Tổng đã quét    : {len(users):,} tài khoản")
-    print(f"  ✅ Hợp lệ (WS OK): {len(valid_accounts):,} tài khoản ({len(valid_accounts)/len(users)*100:.1f}%)")
-    print(f"  ❌ Không hợp lệ : {invalid_count:,} tài khoản (bị flag/sai mk/khóa)")
+    print(f"  Tổng đã quét     : {total:,} tài khoản")
+    print(f"  ✅ Hợp lệ (WS OK) : {len(valid_accounts):,} tài khoản ({len(valid_accounts)/total*100:.1f}%)")
+    print(f"  ❌ Không hợp lệ  : {invalid_count:,} tài khoản (bị flag/khóa/lỗi)")
+    print(f"  ⚡ Tốc độ trung bình: {total/wall:.1f} acc/s")
     print(f"  ⏱️ Tổng thời gian: {int(wall)}s = {wall/60:.1f} phút")
 
     if not valid_accounts:
-        print("⚠️ Không có tài khoản nào hợp lệ. Giữ nguyên file cũ để bảo toàn dữ liệu.")
+        print("\n⚠️ Không có tài khoản nào hợp lệ. Giữ nguyên file cũ để bảo toàn dữ liệu.")
         return
 
     # ===== LƯU FILE HỢP LỆ MỚI =====
@@ -320,7 +325,6 @@ def main():
         print("=" * 70)
         deleted_count = 0
         for sf in source_files:
-            # Không xóa các file vừa tạo
             if sf in created_files or os.path.abspath(sf) in [os.path.abspath(cf) for cf in created_files]:
                 continue
             try:

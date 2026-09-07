@@ -15,9 +15,9 @@ on:
         required: false
         default: ''
       workers:
-        description: 'Số luồng quét WebSocket song song (10-100, default 60)'
+        description: 'Số luồng quét WebSocket song song (30-150, default 100)'
         required: false
-        default: '60'
+        default: '100'
       chunk_size:
         description: 'Số acc mỗi file hợp lệ mới (default: 5000)'
         required: false
@@ -32,7 +32,7 @@ env:
   PW: ${{ github.event.inputs.pwd }}
   PATTERN: ${{ github.event.inputs.pattern || 'acc*.txt' }}
   RANGE: ${{ github.event.inputs.range || '' }}
-  WORKERS: ${{ github.event.inputs.workers || '60' }}
+  WORKERS: ${{ github.event.inputs.workers || '100' }}
   CHUNK_SIZE: ${{ github.event.inputs.chunk_size || '5000' }}
   CLEAN_OLD: ${{ github.event.inputs.clean_old || 'true' }}
 
