@@ -4,9 +4,9 @@ REGISTER FAST - Đăng ký tk GameVH concurrent, lưu accfast*.txt
 ===============================================================
 - Sinh username hoán vị / ngẫu nhiên chuỗi chữ cái (không theo số thứ tự)
 - Mật khẩu chung mặc định: 123
+- Phát hiện & cảnh báo ngay nếu GameVH đóng cổng đăng ký (Registration closed)
 - 40 luồng song song (asyncio.Semaphore)
 - Mỗi 5000 tk -> ghi accfast1.txt, accfast2.txt... + signal commit
-- Tự tìm số accfast tiếp theo (không ghi đè)
 """
 import asyncio
 import glob
@@ -21,12 +21,11 @@ import websockets
 
 WS_URL = "wss://gamevh.net/ws/gameServer"
 MAX_REGISTER_COUNT = 50000
-CHUNK_SIZE = 5000          # mỗi file chứa 5000 tk
+CHUNK_SIZE = 5000
 DEFAULT_CONCURRENCY = 40
 CAPTCHA_RETRIES = 3
 DEFAULT_PASSWORD = "123"
 
-# OCR singleton
 _ocr_instance = None
 def get_ocr():
     global _ocr_instance
@@ -87,22 +86,21 @@ async def do_register(ws, user, pwd, captcha, clientId):
     w.write_ascii(captcha); w.i64(clientId); w.write_ascii(imei)
     await ws.send(w.build())
     raw=await asyncio.wait_for(ws.recv(), timeout=8)
-    if len(raw) >=3 and raw[0]==0x01 and raw[1]==0x53:
-        status=raw[2]
-        if status==0:
+    if len(raw) >= 3 and raw[0] == 0x01 and raw[1] == 0x53:
+        status = raw[2]
+        if status == 0:
             return True, ""
         try:
-            n=struct.unpack_from('>h', raw, 3)[0]
-            msg=raw[5:5+n*2].decode('utf-16-be', errors='replace') if n>0 else f"status={status}"
+            n = struct.unpack_from('>h', raw, 3)[0]
+            msg = raw[5:5+n*2].decode('utf-16-be', errors='replace') if n > 0 else f"status={status}"
         except:
-            msg=raw[3:].hex()[:200]
+            msg = raw[3:].hex()[:200]
         return False, msg
     return False, "unknown_response"
 
 
 # ===== TẠO USERNAME HOÁN VỊ CHỮ CÁI NGẪU NHIÊN =====
 def load_existing_usernames():
-    """Đọc toàn bộ username đã có từ các file acc*.txt để đảm bảo không tạo trùng."""
     existing = set()
     for fp in glob.glob("acc*.txt"):
         try:
@@ -117,14 +115,8 @@ def load_existing_usernames():
 
 
 def generate_letter_usernames(prefix, count, existing_set):
-    """
-    Sinh danh sách username duy nhất tạo từ chuỗi chữ cái hoán vị/ngẫu nhiên.
-    Không dùng số thứ tự.
-    """
     letters = string.ascii_lowercase
     clean_prefix = re.sub(r'[^a-zA-Z]', '', prefix).lower()
-    
-    # Tính độ dài ngẫu nhiên: prefix + 5-6 ký tự chữ cái
     rand_len = 5 if len(clean_prefix) <= 4 else 4
     if not clean_prefix:
         rand_len = 7
@@ -143,7 +135,6 @@ def generate_letter_usernames(prefix, count, existing_set):
 
 
 def find_next_accfast_number():
-    """Tìm số tiếp theo cho accfast{N}.txt (1-based)."""
     mx = 0
     try:
         for fp in glob.glob("accfast*.txt"):
@@ -162,7 +153,6 @@ def get_config():
     except: count = MAX_REGISTER_COUNT
     count = max(1, min(count, MAX_REGISTER_COUNT))
     
-    # Mật khẩu chung: Mặc định là '123'
     pwd = os.environ.get("REGISTER_PW")
     if not pwd or pwd.strip() == "":
         pwd = DEFAULT_PASSWORD
@@ -174,7 +164,6 @@ def get_config():
 
 # ===== FILE WRITER =====
 class AccFastWriter:
-    """Ghi accfast{N}.txt mỗi CHUNK_SIZE tk, signal YAML commit."""
     def __init__(self, chunk_size=CHUNK_SIZE):
         self.chunk_size = chunk_size
         self.file_index = find_next_accfast_number()
@@ -209,15 +198,19 @@ class AccFastWriter:
         self.files_written.append(fname)
         self.buffer.clear()
         self.file_index += 1
-        try:
-            open(".commit_ready", "w").close()
+        try: open(".commit_ready", "w").close()
         except: pass
 
 
 # ===== WORKER =====
-async def register_one(user, pwd, semaphore, stats):
+async def register_one(user, pwd, semaphore, stats, server_closed_flag):
+    if server_closed_flag[0]:
+        return False, "registration_closed"
+
     async with semaphore:
         for attempt in range(1, CAPTCHA_RETRIES + 1):
+            if server_closed_flag[0]:
+                return False, "registration_closed"
             try:
                 ws = await websockets.connect(
                     WS_URL,
@@ -244,8 +237,14 @@ async def register_one(user, pwd, semaphore, stats):
 
                 if ok:
                     return True, ""
-                if isinstance(msg, str) and "already exist" in msg.lower():
-                    return False, "already_exist"
+                
+                if isinstance(msg, str):
+                    if "registration closed" in msg.lower() or "đóng" in msg.lower():
+                        server_closed_flag[0] = True
+                        return False, "registration_closed"
+                    if "already exist" in msg.lower():
+                        return False, "already_exist"
+                
                 stats['captcha_wrong'] += 1
                 continue
             except asyncio.TimeoutError:
@@ -258,18 +257,23 @@ async def register_one(user, pwd, semaphore, stats):
         return False, "max_retries"
 
 
-async def worker(queue, pwd, semaphore, stats, writer, target, done_event):
+async def worker(queue, pwd, semaphore, stats, writer, target, done_event, server_closed_flag):
     while not done_event.is_set():
+        if server_closed_flag[0]:
+            break
         try:
             user = queue.get_nowait()
         except asyncio.QueueEmpty:
             break
-        ok, msg = await register_one(user, pwd, semaphore, stats)
+        ok, msg = await register_one(user, pwd, semaphore, stats, server_closed_flag)
         if ok:
             stats['ok'] += 1
             await writer.add(user)
             if stats['ok'] % 500 == 0:
                 print(f"  📊 [{stats['ok']}/{target}] Đã đăng ký thành công...")
+        elif msg == "registration_closed":
+            stats['closed'] = stats.get('closed', 0) + 1
+            break
         elif msg == "already_exist":
             stats['exist'] += 1
         else:
@@ -304,12 +308,13 @@ async def main():
 
     semaphore = asyncio.Semaphore(concurrency)
     stats = {'ok': 0, 'fail': 0, 'exist': 0, 'captcha_fail': 0,
-             'captcha_wrong': 0, 'timeout': 0, 'error': 0}
+             'captcha_wrong': 0, 'timeout': 0, 'error': 0, 'closed': 0}
     writer = AccFastWriter(chunk_size=CHUNK_SIZE)
     done_event = asyncio.Event()
+    server_closed_flag = [False]
 
     workers = [asyncio.create_task(
-        worker(queue, pwd, semaphore, stats, writer, count, done_event)
+        worker(queue, pwd, semaphore, stats, writer, count, done_event, server_closed_flag)
     ) for _ in range(concurrency)]
 
     await asyncio.gather(*workers)
@@ -326,7 +331,14 @@ async def main():
     files = writer.files_written
 
     print("\n" + "=" * 65)
-    print(f"🎉 HOÀN TẤT: {stats['ok']}/{count} tk ({elapsed:.1f}s = {rate:.0f} tk/phút)")
+    if server_closed_flag[0]:
+        print("⚠️ [THÔNG BÁO TỪ MÁY CHỦ GAMEVH]")
+        print("❌ Cổng đăng ký tài khoản tự do (WebSocket REGISTER) hiện đang bị máy chủ GameVH ĐÓNG!")
+        print("   Phản hồi từ Server: 'Registration closed'")
+        print("   -> Bot đã tự động dừng lại ngay lập tức để tránh tốn tài nguyên và treo workflow.")
+    else:
+        print(f"🎉 HOÀN TẤT: {stats['ok']}/{count} tk ({elapsed:.1f}s = {rate:.0f} tk/phút)")
+    print(f"  Đã đăng ký : {stats['ok']}")
     print(f"  Đã tồn tại : {stats['exist']}")
     print(f"  Thất bại   : {stats['fail']}")
     print(f"  File đã lưu : {', '.join(files) if files else '(none)'}")
