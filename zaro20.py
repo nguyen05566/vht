@@ -20,7 +20,7 @@ import random
 
 # ==================== TÀI KHOẢN (KHÔNG CẦN COOKIE) ====================
 # Đăng nhập trực tiếp bằng username/password giống các bot nguyen1..nguyen6
-CARO_USER_DIRECT = "**arena1"
+CARO_USER_DIRECT = "nguyen10"
 CARO_PASSWD_DIRECT = "******"
 BOT_DISPLAY_NAME = "Lobby.xiangqi.0"  # Tên hiển thị của bot trên game
 
