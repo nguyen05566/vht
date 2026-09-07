@@ -1,0 +1,102 @@
+name: Quét Acc WebSocket Hợp Lệ & Dọn File Cũ
+
+on:
+  workflow_dispatch:
+    inputs:
+      pwd:
+        description: 'Mật khẩu chung của các tài khoản'
+        required: true
+      pattern:
+        description: 'Pattern file acc cần quét (vd: acc*.txt hoặc accfast*.txt)'
+        required: false
+        default: 'acc*.txt'
+      range:
+        description: 'Dải tên nếu quét theo dải (vd: test 1 5000). Để trống nếu quét file'
+        required: false
+        default: ''
+      workers:
+        description: 'Số luồng quét WebSocket song song (10-100, default 60)'
+        required: false
+        default: '60'
+      chunk_size:
+        description: 'Số acc mỗi file hợp lệ mới (default: 5000)'
+        required: false
+        default: '5000'
+      clean_old:
+        description: 'Xóa toàn bộ file acc cũ sau khi quét xong? (true = chỉ giữ lại file mới)'
+        required: false
+        type: boolean
+        default: true
+
+env:
+  PW: ${{ github.event.inputs.pwd }}
+  PATTERN: ${{ github.event.inputs.pattern || 'acc*.txt' }}
+  RANGE: ${{ github.event.inputs.range || '' }}
+  WORKERS: ${{ github.event.inputs.workers || '60' }}
+  CHUNK_SIZE: ${{ github.event.inputs.chunk_size || '5000' }}
+  CLEAN_OLD: ${{ github.event.inputs.clean_old || 'true' }}
+
+permissions:
+  contents: write
+
+jobs:
+  scan_and_cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Quét WebSocket & Dọn dẹp file
+        run: |
+          ARGS="--password $PW --workers $WORKERS --chunk-size $CHUNK_SIZE"
+          
+          if [ -n "$RANGE" ]; then
+            ARGS="$ARGS --range \"$RANGE\""
+          else
+            ARGS="$ARGS --pattern \"$PATTERN\""
+          fi
+          
+          if [ "$CLEAN_OLD" = "true" ]; then
+            ARGS="$ARGS --clean-old"
+          fi
+          
+          echo "Executing: python scan_ws_accounts.py $ARGS"
+          python scan_ws_accounts.py $ARGS
+
+      - name: Commit & Push danh sách acc hợp lệ mới
+        if: always()
+        run: |
+          git config user.email "bot@users.noreply.github.com"
+          git config user.name "bot"
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m "Update: Lưu danh sách acc WebSocket hợp lệ mới & dọn dẹp file cũ"
+            git push origin main || {
+              echo "Push bị chặn, kéo rebase và đẩy lại..."
+              git pull --rebase origin main || true
+              git push origin main
+            }
+          else
+            echo "Không có thay đổi nào cần commit."
+          fi
+
+      - name: Upload Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: acc-valid-backup-${{ github.run_id }}
+          path: acc_valid*.txt
+          if-no-files-found: ignore
