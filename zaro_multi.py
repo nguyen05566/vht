@@ -1107,7 +1107,7 @@ class AccountSession:
         self._last_create_time = now
         bet_amt_id = 0
         for ba in self.bet_amts:
-            if ba["value"] == 100:
+            if ba["value"] == 1000:
                 bet_amt_id = ba["id"]
                 break
         args = [
@@ -1125,7 +1125,7 @@ class AccountSession:
         for arg_name, arg_value in args:
             data.extend(self.conn.pack_ascii(arg_name))
             data.extend(self.conn.pack_string(arg_value))
-        self._log("CREATE", f"🎯 Tạo bàn 100xu, bet_id={bet_amt_id}")
+        self._log("CREATE", f"🎯 Tạo bàn 1000xu, bet_id={bet_amt_id}")
         if WS_SNIFF_MODE:
             self._log("WS-SNIFF", f"CREATE_RULE send: data_hex={bytes(data).hex()}")
         self.send_message("CREATE_RULE", bytes(data))
@@ -1662,7 +1662,7 @@ class AccountSession:
                         if not self._bet_amts_loaded:
                             self.send_list_bet_amt()
                         else:
-                            self._log("CREATE", "🎯 Tạo bàn mới 100xu...")
+                            self._log("CREATE", "🎯 Tạo bàn mới 1000xu...")
                             self.send_create_table()
                 time.sleep(1)
             except KeyboardInterrupt:
