@@ -64,6 +64,7 @@ FUND_PASSWD      = _env_str("FUND_PASSWD", "nhat434241")
 FUND_AMOUNT      = _env_int("FUND_AMOUNT", 3000)
 FUND_MIN_BALANCE = _env_int("FUND_MIN_BALANCE", 3000)   # chỉ cấp cho nick có số dư < ngưỡng này
 SCAN_WORKERS     = _env_int("SCAN_WORKERS", 8)          # số luồng quét số dư song song
+SCAN_LIMIT       = _env_int("SCAN_LIMIT", 0)            # chỉ quét N nick đầu (0 = toàn bộ file)
 
 # ---- Tầng 2: các nick SAU TIER2_START dòng đầu (dành cho bàn cược nhỏ hơn) ----
 TIER2_START      = _env_int("TIER2_START", 47)          # nick từ dòng 48 trở đi thuộc tầng 2
@@ -263,6 +264,10 @@ def main():
             if u and not u.startswith("#") and u not in users:
                 users.append(u)
     print(f"[FUND] Có {len(users)} nick trong file")
+    if SCAN_LIMIT > 0 and len(users) > SCAN_LIMIT:
+        users = users[:SCAN_LIMIT]
+        print(f"[FUND] SCAN_LIMIT={SCAN_LIMIT} -> chỉ quét {SCAN_LIMIT} nick đầu "
+              f"(đúng phạm vi các shard bot đang chạy)")
 
     # ---------- B1: quét số dư SONG SONG từng nick ----------
     needy = []          # (user, player_id, balance, tier)
@@ -320,8 +325,14 @@ def main():
 
     # ---------- B3: chuyển lần lượt (ưu tiên thứ tự file: tầng 1 trước) ----------
     total_ok = total_fail = total_xu = 0
+    fbal_live = fbal if fbal is not None else None
     for i, (u, pid, bal, tier) in enumerate(needy, 1):
         amt = FUND_AMOUNT if tier == 1 else FUND_AMOUNT_2
+        # Hết xu dự kiến -> dừng sớm, không gửi lệnh chắc chắn thất bại
+        if fbal_live is not None and fbal_live <= amt:
+            print(f"[FUND] ⚠️ Số dư {FUND_ACCOUNT} (~{fbal_live:,} xu) không đủ cho lần cấp tiếp "
+                  f"({amt:,} xu) -> dừng sớm sau {i - 1}/{len(needy)} nick. CẦN NẠP THÊM XU!")
+            break
         if not pid:
             print(f"[FUND] ⏭️ ({i}/{len(needy)}) {u}: thiếu playerId -> bỏ qua")
             total_fail += 1
@@ -329,8 +340,10 @@ def main():
         ok, msg = ws_transfer(ws, pid, amt)
         if ok:
             total_ok += 1; total_xu += amt
+            if fbal_live is not None:
+                fbal_live = max(0, fbal_live - amt)
             print(f"[FUND] ✅ ({i}/{len(needy)}) {u}: +{amt:,} xu (ID {pid}, T{tier}) "
-                  f"| tổng {total_xu:,} xu")
+                  f"| tổng {total_xu:,} xu | funder còn ~{fbal_live:,}")
         else:
             total_fail += 1
             print(f"[FUND] ❌ ({i}/{len(needy)}) {u}: thất bại - {msg}")
