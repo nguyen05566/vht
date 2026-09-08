@@ -23,6 +23,7 @@ import re
 import struct
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import requests
 import websocket
@@ -62,6 +63,12 @@ FUND_ACCOUNT     = _env_str("FUND_ACCOUNT", "nguyenpy2")
 FUND_PASSWD      = _env_str("FUND_PASSWD", "nhat434241")
 FUND_AMOUNT      = _env_int("FUND_AMOUNT", 3000)
 FUND_MIN_BALANCE = _env_int("FUND_MIN_BALANCE", 3000)   # chỉ cấp cho nick có số dư < ngưỡng này
+SCAN_WORKERS     = _env_int("SCAN_WORKERS", 8)          # số luồng quét số dư song song
+
+# ---- Tầng 2: các nick SAU TIER2_START dòng đầu (dành cho bàn cược nhỏ hơn) ----
+TIER2_START      = _env_int("TIER2_START", 47)          # nick từ dòng 48 trở đi thuộc tầng 2
+FUND_AMOUNT_2      = _env_int("FUND_AMOUNT_2", 1000)    # mức cấp tầng 2 (bàn 500xu)
+FUND_MIN_BALANCE_2 = _env_int("FUND_MIN_BALANCE_2", 1000)
 
 
 # ==================== PACK / PARSE (giống transfer_one.py) ====================
@@ -217,12 +224,32 @@ def ws_transfer(ws, dest_id, amount, timeout=12):
 
 # ==================== MAIN ====================
 
+def scan_one(idx_user):
+    """HTTP login 1 nick để đọc playerId + số dư (dùng trong luồng quét song song).
+    Trả về (idx, user, player_id, balance, err)."""
+    idx, u = idx_user
+    info, err = http_login(u, BOT_PASSWD)
+    if not info:
+        return (idx, u, 0, None, err)
+    try: info["session"].close()
+    except Exception: pass
+    return (idx, u, info["player_id"], info["balance"], None)
+
+
+def tier_of(idx):
+    """idx đếm từ 1: nick <= TIER2_START thuộc tầng 1 (bàn lớn), còn lại tầng 2."""
+    return 1 if idx <= TIER2_START else 2
+
+
 def main():
     t0 = time.time()
     print("=" * 64)
-    print(f"[FUND] CẤP XU: {FUND_ACCOUNT} -> mỗi nick thiếu < {FUND_MIN_BALANCE:,} xu "
-          f"được cấp {FUND_AMOUNT:,} xu")
-    print(f"[FUND] File acc: {ACCOUNTS_FILE}")
+    print(f"[FUND] CẤP XU 2 TẦNG từ {FUND_ACCOUNT}:")
+    print(f"[FUND]   Tầng 1 (dòng 1..{TIER2_START}, bàn cược lớn): thiếu < {FUND_MIN_BALANCE:,} "
+          f"-> cấp {FUND_AMOUNT:,} xu")
+    print(f"[FUND]   Tầng 2 (dòng {TIER2_START + 1}.., bàn cược nhỏ): thiếu < {FUND_MIN_BALANCE_2:,} "
+          f"-> cấp {FUND_AMOUNT_2:,} xu")
+    print(f"[FUND] File acc: {ACCOUNTS_FILE} | quét song song {SCAN_WORKERS} luồng")
     print("=" * 64)
 
     if not os.path.isfile(ACCOUNTS_FILE):
@@ -237,33 +264,39 @@ def main():
                 users.append(u)
     print(f"[FUND] Có {len(users)} nick trong file")
 
-    # ---------- B1: quét số dư từng nick ----------
-    needy = []          # (user, player_id, balance)
+    # ---------- B1: quét số dư SONG SONG từng nick ----------
+    needy = []          # (user, player_id, balance, tier)
     ok_count = 0
-    for i, u in enumerate(users, 1):
-        info, err = http_login(u, BOT_PASSWD)
-        if not info:
-            print(f"[SCAN] ❌ ({i}/{len(users)}) {u}: login thất bại - {err}")
-            time.sleep(random.uniform(0.8, 1.5))
-            continue
-        ok_count += 1
-        bal = info["balance"]
-        pid = info["player_id"]
-        if bal is None:
-            print(f"[SCAN] ⚠️ ({i}/{len(users)}) {u}: không đọc được số dư -> xếp vào hàng cấp")
-            needy.append((u, pid, None))
-        elif bal < FUND_MIN_BALANCE:
-            print(f"[SCAN] 💰 ({i}/{len(users)}) {u}: {bal:,} xu < {FUND_MIN_BALANCE:,} -> CẦN CẤP")
-            needy.append((u, pid, bal))
-        else:
-            print(f"[SCAN] ✅ ({i}/{len(users)}) {u}: {bal:,} xu - đủ, không cần cấp")
-        try: info["session"].close()
-        except Exception: pass
-        time.sleep(random.uniform(0.8, 1.5))
+    fail_count = 0
+    done = 0
+    with ThreadPoolExecutor(max_workers=max(1, SCAN_WORKERS)) as pool:
+        for idx, u, pid, bal, err in pool.map(scan_one, enumerate(users, 1)):
+            done += 1
+            tier = tier_of(idx)
+            thr = FUND_MIN_BALANCE if tier == 1 else FUND_MIN_BALANCE_2
+            amt = FUND_AMOUNT if tier == 1 else FUND_AMOUNT_2
+            if err is not None:
+                fail_count += 1
+                if done % 20 == 0 or done == len(users):
+                    print(f"[SCAN] ... {done}/{len(users)} xong")
+                continue
+            ok_count += 1
+            if bal is None:
+                needy.append((u, pid, None, tier))
+                print(f"[SCAN] ⚠️ ({done}/{len(users)}) {u}: không đọc được số dư -> xếp hàng cấp T{tier}")
+            elif bal < thr:
+                needy.append((u, pid, bal, tier))
+                print(f"[SCAN] 💰 ({done}/{len(users)}) {u}: {bal:,} xu < {thr:,} -> CẦN CẤP T{tier} ({amt:,}xu)")
+            else:
+                print(f"[SCAN] ✅ ({done}/{len(users)}) {u}: {bal:,} xu - đủ (T{tier})")
 
     print("-" * 64)
-    print(f"[SCAN] Xong: {ok_count}/{len(users)} login OK | cần cấp: {len(needy)} nick "
-          f"| dự kiến chuyển {len(needy) * FUND_AMOUNT:,} xu")
+    need_t1 = sum(1 for n in needy if n[3] == 1)
+    need_t2 = len(needy) - need_t1
+    est = need_t1 * FUND_AMOUNT + need_t2 * FUND_AMOUNT_2
+    print(f"[SCAN] Xong {time.time() - t0:.0f}s: login OK {ok_count} | lỗi {fail_count} "
+          f"| cần cấp: T1 {need_t1} nick + T2 {need_t2} nick = {len(needy)} nick "
+          f"(~{est:,} xu)")
     if not needy:
         print("[FUND] 🎉 Mọi nick đều đủ xu -> không cần chuyển gì")
         return 0
@@ -275,28 +308,28 @@ def main():
               f"các nick vẫn vào chơi với số dư hiện có")
         return 0
     fbal = finfo["balance"]
-    print(f"[FUND] ✅ {FUND_ACCOUNT} login OK | số dư: {fbal:,} xu "
-          f"({len(needy)} nick cần {len(needy) * FUND_AMOUNT:,} xu)")
-    if fbal is not None and fbal < len(needy) * FUND_AMOUNT:
-        print(f"[FUND] ⚠️ Số dư {FUND_ACCOUNT} KHÔNG ĐỦ -> sẽ chuyển được một phần. "
-              f"CẦN NẠP THÊM XU!")
+    print(f"[FUND] ✅ {FUND_ACCOUNT} login OK | số dư: {fbal:,} xu (cần ~{est:,} xu)")
+    if fbal is not None and fbal < est:
+        print(f"[FUND] ⚠️ Số dư {FUND_ACCOUNT} KHÔNG ĐỦ cho tất cả -> sẽ cấp đến đâu hay đến đó "
+              f"(ưu tiên tầng 1). CẦN NẠP THÊM XU!")
 
     ws = ws_login_funder(finfo["cookie"], finfo["nick"], finfo["token"])
     if not ws:
         print("[FUND] ❌ WS funder không kết nối được -> dừng cấp, bot vẫn chạy")
         return 0
 
-    # ---------- B3: chuyển lần lượt ----------
+    # ---------- B3: chuyển lần lượt (ưu tiên thứ tự file: tầng 1 trước) ----------
     total_ok = total_fail = total_xu = 0
-    for i, (u, pid, bal) in enumerate(needy, 1):
+    for i, (u, pid, bal, tier) in enumerate(needy, 1):
+        amt = FUND_AMOUNT if tier == 1 else FUND_AMOUNT_2
         if not pid:
             print(f"[FUND] ⏭️ ({i}/{len(needy)}) {u}: thiếu playerId -> bỏ qua")
             total_fail += 1
             continue
-        ok, msg = ws_transfer(ws, pid, FUND_AMOUNT)
+        ok, msg = ws_transfer(ws, pid, amt)
         if ok:
-            total_ok += 1; total_xu += FUND_AMOUNT
-            print(f"[FUND] ✅ ({i}/{len(needy)}) {u}: +{FUND_AMOUNT:,} xu (ID {pid}) "
+            total_ok += 1; total_xu += amt
+            print(f"[FUND] ✅ ({i}/{len(needy)}) {u}: +{amt:,} xu (ID {pid}, T{tier}) "
                   f"| tổng {total_xu:,} xu")
         else:
             total_fail += 1
@@ -315,7 +348,7 @@ def main():
 
     print("=" * 64)
     print(f"[FUND] HOÀN TẤT sau {time.time() - t0:.0f}s: thành công {total_ok} nick "
-          f"({total_xu:,} xu) | thất bại {total_fail} | scan được {ok_count}/{len(users)} nick")
+          f"({total_xu:,} xu) | thất bại {total_fail} | quét được {ok_count}/{len(users)} nick")
     print("=" * 64)
     return 0
 
