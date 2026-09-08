@@ -66,7 +66,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        include:
+          - shard: 1
+            offset: 0
+          - shard: 2
+            offset: 16
+          - shard: 3
+            offset: 32
     runs-on: ubuntu-latest
     timeout-minutes: 359
     steps:
@@ -142,7 +148,7 @@ jobs:
         env:
           ACCOUNTS_FILE: acc_valid_2.txt
           MAX_ACCOUNTS: '16'                          # mỗi shard tối đa 16 acc
-          ACCOUNT_OFFSET: ${{ (matrix.shard - 1) * 16 }}   # shard1: 0, shard2: 16, shard3: 32
+          ACCOUNT_OFFSET: ${{ matrix.offset }}            # shard1: 0, shard2: 16, shard3: 32
           BOT_PASSWD: ${{ secrets.BOT_PASSWD || 'nhat123456' }}
           BOT_BET_XU: '1000'   # mức cược bàn bot tạo (trước đây 5000xu)
           MOVETIME_MS: '150'
