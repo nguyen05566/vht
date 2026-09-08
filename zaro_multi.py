@@ -103,6 +103,18 @@ BOT_ACC_DURATION    = '0'
 BOT_BLOCK_SOFTWARE  = '0'
 BOT_TABLE_PASSWORD  = ''
 BOT_BET_XU          = _env_int("BOT_BET_XU", 1000)   # mức cược bàn bot tạo: 1000xu (trước đây 5000xu)
+
+# ---- TÌM BÀN CÓ SẴN Ở CÁC SẢNH (JOIN người chơi thay vì chỉ tạo bàn chờ) ----
+# Dựa trên giao thức client web gamevh: LIST_ZONE_ROOM (412) -> LIST_ZONE_TABLE (411)
+# -> GET_TABLE_DATA (414) -> ENTER_PLACE vào bàn. Bot sẽ đi từng sảnh có người,
+# tìm bàn chưa chơi/còn 1 ghế trống/đúng mức cược rồi VÀO CHƠI; nếu hết sảnh
+# không thấy bàn nào thì quay về tạo bàn chờ như cũ.
+SCAN_TABLES       = _env_str("SCAN_TABLES", "1") == "1"   # 1 = bật quét sảnh tìm bàn
+SCAN_INTERVAL     = _env_int("SCAN_INTERVAL", 25)         # giây nghỉ giữa 2 vòng quét
+SCAN_PAUSE        = _env_int("SCAN_PAUSE", 150)           # quét hết sảnh không thấy bàn -> nghỉ lâu
+SCAN_STEP_TIMEOUT = _env_int("SCAN_STEP_TIMEOUT", 12)     # 1 bước quét quá N giây coi như hỏng
+SCAN_MAX_ROOMS    = _env_int("SCAN_MAX_ROOMS", 4)         # tối đa N sảnh mỗi vòng quét
+SCAN_ANY_BET      = _env_str("SCAN_ANY_BET", "0") == "1"  # 1 = cho vào bàn mức cược CAO hơn BOT_BET_XU
 WS_SNIFF_MODE = _env_str("SNIFF_MODE", "0") == "1"   # mặc định TẮT: 20 acc in sniff là tràn log
 
 WS_URL    = "wss://gamevh.net/ws/gameServer"
@@ -110,6 +122,7 @@ LOGIN_URL = "https://gamevh.net/login.jsp"
 GAME_URL  = "https://gamevh.net/play/xiangqi/0"
 PROFILE_URL = "https://gamevh.net/com/ftl/game/profile/player_profile.jsp"
 GAME_ID   = 'xiangqi'
+ZONE_BASE = 'Lobby.' + GAME_ID          # đường dẫn gốc các sảnh: Lobby.xiangqi.<roomId>
 _DEFAULT_PLACE = 'Lobby.xiangqi.0'
 
 # MultiPV luôn = 1 trong bản multi: TrendAnalyzer theo PV chỉ có ý nghĩa với
@@ -241,8 +254,9 @@ CMD_NAMES = {
     311: "BROADCAST", 314: "SET_CLIENT_MODE", 315: "CONFIG",
     331: "CHAT.SEND", 335: "CHAT.MSG",
     401: "ENTER_PLACE", 405: "CREATE_RULE", 406: "PLAYER_ENTERED", 407: "PLAYER_EXITED",
-    408: "QUICK_PLAY", 410: "KICK_PLAYER", 412: "LIST_ZONE_ROOM", 413: "LIST_BET_AMT",
-    414: "GET_TABLE_DATA", 416: "SLOT_IN_TABLE_CHANGED",
+    408: "QUICK_PLAY", 410: "KICK_PLAYER", 411: "LIST_ZONE_TABLE", 412: "LIST_ZONE_ROOM",
+    413: "LIST_BET_AMT", 414: "GET_TABLE_DATA", 415: "TABLE_IN_ROOM_CHANGED",
+    416: "SLOT_IN_TABLE_CHANGED",
     417: "START_MATCH", 418: "GAMEOVER", 419: "ENTER_STATE",
     420: "SET_TURN", 434: "SET_READY",
     502: "PLAY", 529: "MOVE", 533: "ASK_DRAW", 534: "SURRENDER", 601: "LOGIN_EX",
@@ -1190,6 +1204,19 @@ class AccountSession:
         self._score = "?"
         self._depth = "?"
 
+        # Trạng thái quét bàn qua các sảnh (SCAN)
+        self._enter_kind = None          # 'room' | 'table' | None (phân biệt response với gói 401 đẩy)
+        self._pending_enter = False      # True khi vừa gửi ENTER_PLACE -> gói ENTER_PLACE kế tiếp là response
+        self._join_is_scan = False       # lần join này do quét sảnh (không phải bàn tự tạo)
+        self._scan_state = None          # None|'room_list'|'enter_room'|'table_list'|'checking'
+        self._scan_step_at = 0.0
+        self._scan_next_at = 0.0         # thời điểm được phép quét tiếp
+        self._scan_rooms = []            # hàng đợi room id còn phải thử trong vòng này
+        self._scan_target_room = None
+        self._current_room_id = 0        # room bot đang đứng (đăng nhập là 0)
+        self._scan_candidates = []       # [(|bet-BOT_BET_XU|, table_id, bet, name), ...]
+        self._scan_checks = 0            # số GET_TABLE_DATA đã dùng trong vòng quét
+
     def _log(self, tag, msg):
         log(self.user, tag, msg)
 
@@ -1414,12 +1441,24 @@ class AccountSession:
         data.extend(self.conn.pack_ascii(path or self.place_path))
         data.extend(self.conn.pack_string(""))
         data.extend(self.conn.pack_byte(mode))
+        self._pending_enter = True   # gói ENTER_PLACE kế tiếp từ server là RESPONSE (không phải gói 401 đẩy)
         if WS_SNIFF_MODE:
             self._log("WS-SNIFF", f"ENTER_PLACE send: path={path or self.place_path}")
         self.send_message("ENTER_PLACE", bytes(data))
 
     def send_list_bet_amt(self):
         self.send_message("LIST_BET_AMT")
+
+    def send_list_zone_room(self):
+        self.send_message("LIST_ZONE_ROOM")
+
+    def send_list_zone_table(self, room_filter=1):
+        # room_filter theo client web: 0=tất cả, 1=chưa đầy, 2=chưa chơi, 3=đang chơi
+        self.send_message("LIST_ZONE_TABLE", self.conn.pack_byte(room_filter))
+
+    def send_get_table_data(self, room_id, table_id):
+        self.send_message("GET_TABLE_DATA",
+                          self.conn.pack_ascii(f"{ZONE_BASE}.{room_id}.{table_id}"))
 
     def is_family_bot(self, name):
         """Nhận diện bot đồng đội: mọi tài khoản do tiến trình này điều khiển."""
@@ -1438,12 +1477,14 @@ class AccountSession:
             unregister_bot_table(self._table_path)
         self.in_game = False
         self._joining_table = False
+        self._join_is_scan = False
         self._table_path = None
         self._table_created_by_me = False
         self._sit_alone_since = None
         self.slot_players.clear()
         self.board.reset()
         self._enter_fail_at = 0.0
+        self._current_room_id = 0      # ENTER_PLACE về Lobby.xiangqi.0 như cũ
         self.send_enter_place(self.place_path)
 
     def send_create_table(self):
@@ -1524,6 +1565,9 @@ class AccountSession:
             elif cmd == "LOGIN": self._handle_login_response(msg)
             elif cmd == "ENTER_PLACE": self._handle_enter_place_response(msg)
             elif cmd == "LIST_BET_AMT": self._handle_list_bet_amt_response(msg)
+            elif cmd == "LIST_ZONE_ROOM": self._handle_list_zone_room(msg)
+            elif cmd == "LIST_ZONE_TABLE": self._handle_list_zone_table(msg)
+            elif cmd == "GET_TABLE_DATA": self._handle_get_table_data(msg)
             elif cmd == "CREATE_RULE": self._handle_create_rule_response(msg)
             elif cmd == "SLOT_IN_TABLE_CHANGED": self._handle_slot_changed(msg)
             elif cmd == "PLAYER_ENTERED": self._handle_player_entered(msg)
@@ -1553,20 +1597,56 @@ class AccountSession:
 
     def _handle_enter_place_response(self, msg):
         status = msg.read_byte()
+
+        # Phân biệt RESPONSE với gói 401 server ĐẨY khi có người vào/ra chỗ mình
+        if not self._pending_enter:
+            # Gói đẩy -> chỉ quan tâm khi đang trong bàn (bỏ qua như bản cũ)
+            return
+        self._pending_enter = False
+        kind = self._enter_kind or 'room'
+        self._enter_kind = None
+
+        # ---- Quét sảnh: response của bước VÀO SẢNH ----
+        if kind == 'room' and self._scan_state == 'enter_room':
+            if status == 0:
+                self._current_room_id = self._scan_target_room
+                self._log("SCAN", f"🏠 Đã vào sảnh #{self._current_room_id} -> lấy danh sách bàn")
+                self._scan_step('table_list')
+                self.send_list_zone_table(1)
+            else:
+                self._log("SCAN", f"⚠️ Vào sảnh #{self._scan_target_room} bị từ chối (status={status}) -> thử sảnh khác")
+                self._scan_next_room()
+            return
+
         if status != 0:
             if self._joining_table:
-                self._log("TABLE", f"ENTER_PLACE trả status={status} -> coi như đã trong bàn, bấm Sẵn sàng")
-                self._joining_table = False
-                self.in_game = True
-                self._enter_fail_at = time.time()
-                threading.Thread(
-                    target=lambda: (time.sleep(3.0), self.send_ready(1)), daemon=True).start()
+                if self._join_is_scan:
+                    # Bàn người khác: vừa đầy/đang chơi/cần mật khẩu -> hủy, thử bàn khác
+                    self._log("TABLE", f"ENTER_PLACE vào bàn quét được trả status={status} -> bỏ bàn này")
+                    self._joining_table = False
+                    self._join_is_scan = False
+                    self._table_path = None
+                    self.in_game = False
+                    if self._scan_candidates:
+                        self._scan_try_join()
+                    else:
+                        self._scan_next_room()
+                else:
+                    self._log("TABLE", f"ENTER_PLACE trả status={status} -> coi như đã trong bàn, bấm Sẵn sàng")
+                    self._joining_table = False
+                    self.in_game = True
+                    self._enter_fail_at = time.time()
+                    threading.Thread(
+                        target=lambda: (time.sleep(3.0), self.send_ready(1)), daemon=True).start()
             return
 
         if self._joining_table:
             if is_block_software_message(msg.data):
                 self._log("GAME", "🛡️ Bàn có chế độ Chống Software (blockSoftware=1). Vẫn sẵn sàng thi đấu!")
             self._joining_table = False
+            self._join_is_scan = False
+            self._scan_state = None
+            self._scan_next_at = 0.0     # hết ván sẽ quét ngay
             self.in_game = True
             self._enter_fail_at = 0.0
             self.last_action_timestamp = time.time()
@@ -1581,7 +1661,7 @@ class AccountSession:
                 self._joining_table = True
                 path = self._table_path
                 threading.Thread(
-                    target=lambda: (time.sleep(0.5), self.send_enter_place(path=path, mode=1)),
+                    target=lambda: (time.sleep(0.5), self._send_enter_table(path)),
                     daemon=True).start()
                 return
             self._bet_amts_loaded = False
@@ -1589,6 +1669,10 @@ class AccountSession:
         else:
             # Gói 401 server đẩy khi đang ngồi trong bàn (người khác ra/vào) -> bỏ qua
             pass
+
+    def _send_enter_table(self, path):
+        self._enter_kind = 'table'
+        self.send_enter_place(path=path, mode=1)
 
     def _handle_list_bet_amt_response(self, msg):
         if msg.read_byte() != 0: return
@@ -1607,15 +1691,229 @@ class AccountSession:
             self._sit_alone_since = time.time()
             self._table_path = table_path; self._table_path_ts = time.time()
             register_bot_table(table_path, self.user)
+            self._scan_state = None
+            self._join_is_scan = False
             pwd_info = " (có mật khẩu)" if BOT_TABLE_PASSWORD else ""
             self._log("CREATE", f"🎉 Tạo bàn thành công{pwd_info}: {table_path}. Chờ người chơi...")
             def async_join():
                 time.sleep(0.5)
-                self.send_enter_place(path=table_path, mode=1)
+                self._send_enter_table(table_path)
             threading.Thread(target=async_join, daemon=True).start()
         else:
             self._log("CREATE", f"❌ Tạo bàn thất bại (status={status}).")
             self._joining_table = False
+
+    # ==================== QUÉT CÁC SẢNH TÌM BÀN CÓ NGƯỜI ====================
+
+    def _scan_step(self, state):
+        self._scan_state = state
+        self._scan_step_at = time.time()
+
+    def _scan_begin(self):
+        self._log("SCAN", "🔎 Quét các sảnh tìm bàn có người chơi...")
+        self._scan_checks = 0
+        self._scan_candidates = []
+        self._scan_step('room_list')
+        self.send_list_zone_room()
+
+    def _scan_pause(self, reason, pause=None):
+        wait = SCAN_PAUSE if pause is None else pause
+        self._scan_state = None
+        self._scan_next_at = time.time() + wait
+        self._log("SCAN", f"⏹ {reason} -> nghỉ {wait:.0f}s (trong lúc chờ sẽ tạo bàn chờ người vào)")
+
+    def _scan_abort_step(self, reason):
+        self._scan_state = None
+        self._scan_next_at = time.time() + SCAN_INTERVAL
+        self._log("SCAN", f"⚠️ Vòng quét dừng: {reason}")
+
+    def _scan_next_room(self):
+        """Thử sảnh tiếp theo trong hàng đợi; hết sảnh -> nghỉ một đoạn."""
+        self._scan_candidates = []
+        while self._scan_rooms:
+            rid = self._scan_rooms.pop(0)
+            if rid == self._current_room_id:
+                # đã đứng trong sảnh này -> khỏi ENTER_PLACE
+                self._scan_step('table_list')
+                self.send_list_zone_table(1)
+                return
+            self._scan_target_room = rid
+            self._scan_step('enter_room')
+            self._enter_kind = 'room'
+            self.send_enter_place(path=f"{ZONE_BASE}.{rid}", mode=1)
+            return
+        self._scan_pause("đã quét hết các sảnh không có bàn phù hợp")
+
+    def _bet_value_of(self, bet_id):
+        for ba in self.bet_amts:
+            if ba["id"] == bet_id:
+                return ba["value"]
+        return None
+
+    def _pick_scan_tables(self, tables):
+        """Lọc bàn đáng vào: chưa chơi, còn 1 ghế trống, có 1 người đang chờ,
+        không mật khẩu, bàn thường, đúng/không vượt mức cược của mình."""
+        active = set()
+        for tp in get_active_bot_tables():
+            s = str(tp)
+            active.add(s)
+            if "." in s:
+                active.add(s.rsplit(".", 1)[-1])
+        cands = []
+        for t in tables:
+            if t["playing"]:   continue   # đang chơi -> không vào giữa chừng
+            if t["pwd"]:       continue
+            if t["type"] != 0: continue   # chỉ bàn thường
+            if t["slots"] != 1: continue  # cần đúng 1 người chờ + 1 ghế trống
+            if str(t["id"]) in active: continue   # bàn của bot nhà mình
+            bet = self._bet_value_of(t["bet_id"])
+            if bet is None or bet <= 0:   continue
+            if not SCAN_ANY_BET and bet > BOT_BET_XU: continue
+            cands.append((abs(bet - BOT_BET_XU), t["id"], bet, t["name"]))
+        cands.sort(key=lambda c: (c[0], c[1]))
+        return cands[:4]
+
+    def _handle_list_zone_room(self, msg):
+        if self._scan_state != 'room_list':
+            return
+        status = msg.read_byte()
+        if status != 0:
+            self._scan_abort_step(f"LIST_ZONE_ROOM status={status}")
+            return
+        try:
+            count = msg.read_byte()
+            rooms = []
+            for _ in range(count):
+                rid = msg.read_byte()
+                name = msg.read_string()
+                clients = msg.read_short()
+                tables = msg.read_short()
+                max_tables = msg.read_short()
+                rooms.append({"id": rid, "name": name, "clients": clients,
+                              "tables": tables, "max": max_tables})
+        except Exception as e:
+            self._scan_abort_step(f"parse sảnh lỗi: {e}")
+            return
+        if not rooms:
+            self._scan_pause("server không trả sảnh nào")
+            return
+        info = ", ".join(f"#{r['id']}{r['name']}({r['clients']}ng/{r['tables']}b)"
+                         for r in rooms[:12])
+        self._log("SCAN", f"🏘️ {len(rooms)} sảnh: {info}")
+        # Ưu tiên sảnh đang đứng (khỏi di chuyển), rồi tới sảnh đông người nhất
+        rooms.sort(key=lambda r: (0 if r["id"] == self._current_room_id else 1, -r["clients"]))
+        picked = [r["id"] for r in rooms if r["clients"] > 0 and r["tables"] > 0]
+        if not picked:   # không sảnh nào có người -> vẫn thử sảnh có bàn
+            picked = [r["id"] for r in rooms if r["tables"] > 0]
+        if not picked:
+            self._scan_pause("không có sảnh nào có bàn")
+            return
+        self._scan_rooms = picked[:max(1, SCAN_MAX_ROOMS)]
+        self._scan_next_room()
+
+    def _handle_list_zone_table(self, msg):
+        if self._scan_state != 'table_list':
+            return
+        status = msg.read_byte()
+        if status != 0:
+            self._scan_abort_step(f"LIST_ZONE_TABLE status={status}")
+            return
+        try:
+            count = msg.read_int()
+            tables = []
+            for _ in range(count):
+                tid = msg.read_short()
+                name = msg.read_string()
+                ttype = msg.read_byte()
+                bet_id = msg.read_byte()
+                slots = msg.read_byte()
+                playing = (msg.read_byte() == 0)   # byte 0 = ĐANG chơi (theo client web)
+                pwd = (msg.read_byte() == 1)
+                tables.append({"id": tid, "name": name, "type": ttype, "bet_id": bet_id,
+                               "slots": slots, "playing": playing, "pwd": pwd})
+        except Exception as e:
+            self._scan_abort_step(f"parse bàn lỗi: {e}")
+            return
+        self._scan_candidates = self._pick_scan_tables(tables)
+        waiting = sum(1 for t in tables if t["playing"] and t["slots"] == 1)
+        if not self._scan_candidates:
+            self._log("SCAN", f"👁 Sảnh #{self._current_room_id}: {count} bàn "
+                              f"({waiting} đang chơi 1 người) -> không có bàn phù hợp")
+            self._scan_next_room()
+            return
+        pretty = ", ".join(f"#{tid}({bet:,}xu)" for _, tid, bet, _ in self._scan_candidates)
+        self._log("SCAN", f"🎯 Sảnh #{self._current_room_id}: {len(self._scan_candidates)}/{count} "
+                          f"bàn phù hợp: {pretty}")
+        self._scan_try_join()
+
+    def _scan_try_join(self):
+        """Lần lượt kiểm tra ứng viên bằng GET_TABLE_DATA (tránh bàn bot đồng đội)."""
+        if not self._scan_candidates:
+            self._scan_next_room()
+            return
+        if self._scan_checks >= 2:
+            self._scan_pause("đã kiểm tra 2 bàn vẫn chưa rõ người ngồi -> tạo bàn chờ")
+            return
+        _, tid, bet, name = self._scan_candidates[0]
+        self._scan_checks += 1
+        self._scan_step('checking')
+        self.send_get_table_data(self._current_room_id, tid)
+
+    def _handle_get_table_data(self, msg):
+        if self._scan_state != 'checking':
+            return
+        status = msg.read_byte()
+        if status != 0 or not self._scan_candidates:
+            if self._scan_candidates:
+                self._scan_candidates.pop(0)   # bàn vừa đầy/mất -> bỏ, xét bàn kế
+                self._scan_try_join()
+            else:
+                self._scan_next_room()
+            return
+        try:
+            owner = msg.read_long()
+            count = msg.read_byte()
+            players = []
+            for _ in range(count):
+                pid = msg.read_long()
+                fname = msg.read_string()
+                _avatar = msg.read_ascii()
+                _avatar_id = msg.read_short()
+                _tag = msg.read_byte()
+                chip = msg.read_long()
+                _star = msg.read_long()
+                _score = msg.read_long()
+                _level = msg.read_byte()
+                players.append((pid, fname, chip))
+        except Exception as e:
+            self._scan_abort_step(f"parse người trong bàn lỗi: {e}")
+            return
+        if not self._scan_candidates:
+            self._scan_next_room()
+            return
+        _, tid, bet, name = self._scan_candidates.pop(0)
+        fam = [f for pid, f, _c in players
+               if pid != self.player_id and (is_known_family(f) or ("." in (f or "")))]
+        if owner == self.player_id or fam:
+            self._log("SCAN", f"🤝 Bàn #{tid} ({name}) là nhà mình ({fam or 'chính mình'}) -> bỏ qua")
+            self._scan_try_join()
+            return
+        who = ", ".join(f"{f or '?'}({_c:,}xu)" for pid, f, _c in players[:2]) or "trống"
+        self._log("SCAN", f"✅ Vào bàn #{tid} ({name}) sảnh #{self._current_room_id} "
+                          f"cược {bet:,}xu - có {len(players)} người: {who}")
+        self._scan_join_table(tid, bet, name)
+
+    def _scan_join_table(self, table_id, bet, name):
+        path = f"{ZONE_BASE}.{self._current_room_id}.{table_id}"
+        self._joining_table = True
+        self._join_is_scan = True
+        self._table_path = path
+        self._table_path_ts = time.time()
+        self._scan_state = None
+        self._scan_next_at = 0.0
+        register_bot_table(str(table_id), self.user)
+        self._log("TABLE", f"➡️ VÀO BÀN #{table_id} ({name}) sảnh #{self._current_room_id}, cược {bet:,}xu...")
+        self._send_enter_table(path)
 
     def _handle_player_entered(self, msg):
         try:
@@ -1969,6 +2267,13 @@ class AccountSession:
                     self.logged_in = False
                     self.in_game = False
                     self._joining_table = False
+                    self._join_is_scan = False
+                    self._enter_kind = None
+                    self._pending_enter = False
+                    self._scan_state = None
+                    self._scan_rooms = []
+                    self._scan_candidates = []
+                    self._current_room_id = 0
                     self._bet_amts_loaded = False
                     self.bet_amts = []
                     self.fixed_pawn_positions = set()
@@ -2003,16 +2308,23 @@ class AccountSession:
                     self._enter_fail_at = 0.0
                     self.leave_table()
 
-                # Tạo bàn mới khi chưa trong bàn
+                # Tạo bàn mới khi chưa trong bàn - hoặc QUÉT CÁC SẢNH tìm bàn có người
                 if (self.connected and self.logged_in and not self.in_game
                         and not self._joining_table):
                     now = time.time()
-                    if now - self._last_create_time >= self._CREATE_INTERVAL:
-                        if not self._bet_amts_loaded:
+                    if not self._bet_amts_loaded:
+                        if now - self._last_create_time >= self._CREATE_INTERVAL:
+                            self._last_create_time = now
                             self.send_list_bet_amt()
-                        else:
-                            self._log("CREATE", f"🎯 Tạo bàn mới {BOT_BET_XU}xu...")
-                            self.send_create_table()
+                    elif self._scan_state:
+                        # đang quét -> một bước quá lâu (mất gói) thì hủy vòng này
+                        if now - self._scan_step_at > SCAN_STEP_TIMEOUT:
+                            self._scan_abort_step("một bước quét quá lâu (mất gói?)")
+                    elif SCAN_TABLES and now >= self._scan_next_at:
+                        self._scan_begin()
+                    elif now - self._last_create_time >= self._CREATE_INTERVAL:
+                        self._log("CREATE", f"🎯 Tạo bàn mới {BOT_BET_XU}xu...")
+                        self.send_create_table()
                 time.sleep(1)
             except KeyboardInterrupt:
                 break
