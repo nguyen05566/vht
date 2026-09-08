@@ -52,6 +52,7 @@ jobs:
           FUND_AMOUNT: '3000'
           FUND_MIN_BALANCE: '3000'
           TIER2_START: '47'
+          SCAN_LIMIT: '303'   # chỉ quét phạm vi 11 shard đang chạy (303 nick)
           FUND_AMOUNT_2: '1000'
           FUND_MIN_BALANCE_2: '1000'
         run: python3 -u fund_all.py
