@@ -1851,8 +1851,8 @@ class AccountSession:
         if not self._scan_candidates:
             self._scan_next_room()
             return
-        if self._scan_checks >= 2:
-            self._scan_pause("đã kiểm tra 2 bàn vẫn chưa rõ người ngồi -> tạo bàn chờ")
+        if self._scan_checks >= 4:   # đủ bằng số ứng viên tối đa - check rẻ (1 gói/1 bàn)
+            self._scan_pause("tất cả ứng viên đều là nhà mình -> tạo bàn chờ")
             return
         _, tid, bet, name = self._scan_candidates[0]
         self._scan_checks += 1
@@ -1892,6 +1892,10 @@ class AccountSession:
             self._scan_next_room()
             return
         _, tid, bet, name = self._scan_candidates.pop(0)
+        if not players:
+            self._log("SCAN", f"👁 Bàn #{tid} ({name}) vừa trống (người chờ đã đi) -> bỏ qua")
+            self._scan_try_join()
+            return
         fam = [f for pid, f, _c in players
                if pid != self.player_id and (is_known_family(f) or ("." in (f or "")))]
         if owner == self.player_id or fam:
