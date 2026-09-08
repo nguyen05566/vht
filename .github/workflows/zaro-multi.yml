@@ -19,7 +19,54 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  run-multi-bot:
+  # ==========================================================
+  # JOB 1: CẤP XU TRƯỚC KHI CHƠI
+  # - nguyenpy2 chỉ giữ được 1 phiên duy nhất trên server
+  #   nên phải cấp xu ở job RIÊNG, xong rồi mới tới các bot
+  # - Nick có số dư < 3000 xu được cấp đúng 3000 xu
+  # - fund_all.py luôn thoát mã 0 nên job này không bao giờ chặn bot
+  # ==========================================================
+  fund:
+    name: cap-xu-nguyenpy2
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: pip install websocket-client requests --break-system-packages
+
+      - name: Cap 3000 xu cho nick co so du < 3000
+        env:
+          ACCOUNTS_FILE: acc_valid_2.txt
+          BOT_PASSWD: ${{ secrets.BOT_PASSWD || 'nhat123456' }}
+          FUND_ACCOUNT: 'nguyenpy2'
+          FUND_PASSWD: ${{ secrets.FUND_PASSWD || 'nhat434241' }}
+          FUND_AMOUNT: '3000'
+          FUND_MIN_BALANCE: '3000'
+        run: python3 -u fund_all.py
+
+  # ==========================================================
+  # JOB 2-4: 3 SHARD × 16 ACC (3 runner = 3 IP khác nhau)
+  # - Chạy 47 acc trên 1 runner/IP dễ bị server chặn giới hạn phiên
+  #   và quá tải CPU 2-core -> chia 3 shard, mỗi shard ~16 acc
+  #   (đúng quy mô 20 acc/runner đã chạy ổn định nhiều giờ)
+  # - Xu đã được cấp xong ở job fund -> FUND_ACCOUNT rỗng (tắt funder)
+  # - File acc lớn hơn 48 nick thì thêm shard 4 (shard: [1,2,3,4])
+  # ==========================================================
+  bot:
+    name: bot-shard-${{ matrix.shard }}
+    needs: fund
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     runs-on: ubuntu-latest
     timeout-minutes: 359
     steps:
@@ -91,38 +138,27 @@ jobs:
           ls -lh "$HOME/pikafish" "$HOME/pikafish.nnue"
           echo -e "uci\nquit" | "$HOME/pikafish" | head -3
 
-      # ==========================================================
-      # 1 JOB DUY NHẤT chạy N tài khoản (MAX_ACCOUNTS=0 -> toàn bộ file, hiện 47 acc)
-      # - Mỗi tài khoản 1 luồng WebSocket riêng, dùng chung EnginePool
-      # - Bàn bot tạo có mức cược BOT_BET_XU (1000xu, trước đây 5000xu)
-      # - Nick có số dư < FUND_MIN_BALANCE (3000xu) mới được FUND_ACCOUNT
-      #   (nguyenpy2) cấp FUND_AMOUNT (3000xu) qua WS ngay sau khi login
-      # - Muốn cấp cho TẤT CẢ nick mỗi lần chạy: đặt FUND_MIN_BALANCE: '0'
-      # ==========================================================
-      - name: Run Xiangqi Bot zaro-multi (nhieu tai khoan / 1 pool engine)
+      - name: Run Xiangqi Bot zaro-multi (shard ${{ matrix.shard }})
         env:
           ACCOUNTS_FILE: acc_valid_2.txt
-          MAX_ACCOUNTS: '0'      # 0 = lấy TẤT CẢ acc trong file (hiện 47 acc, tự động theo file)
-          ACCOUNT_OFFSET: '0'
+          MAX_ACCOUNTS: '16'                          # mỗi shard tối đa 16 acc
+          ACCOUNT_OFFSET: ${{ (matrix.shard - 1) * 16 }}   # shard1: 0, shard2: 16, shard3: 32
           BOT_PASSWD: ${{ secrets.BOT_PASSWD || 'nhat123456' }}
           BOT_BET_XU: '1000'   # mức cược bàn bot tạo (trước đây 5000xu)
           MOVETIME_MS: '150'
-          ENGINE_POOL: '5'
+          ENGINE_POOL: '3'
           ENGINE_THREADS: '1'
           ENGINE_HASH: '256'
           LOGIN_STAGGER: '5-15'
           SNIFF_MODE: '0'
-          # ---- Cấp xu: nguyenpy2 chuyển 3000 xu cho nick có số dư < 3000 (qua WS cmd TRANSFER) ----
-          FUND_ACCOUNT: 'nguyenpy2'
-          FUND_PASSWD: ${{ secrets.FUND_PASSWD || 'nhat434241' }}
-          FUND_AMOUNT: '3000'
-          FUND_MIN_BALANCE: '3000'
-          FUND_WAIT_S: '300'
+          # Xu đã cấp xong ở job fund -> tắt funder trong giai đoạn chơi
+          # (nguyenpy2 chỉ giữ 1 phiên, 3 shard cùng đăng nhập sẽ đá nhau)
+          FUND_ACCOUNT: ''
           CARO_RUNTIME_HOURS: ${{ inputs.runtime_hours || '5.9' }}
         run: |
-          echo "Starting zaro_multi.py; it will auto-restart until job timeout (~6h)"
+          echo "Starting zaro_multi.py shard ${{ matrix.shard }}; auto-restart until job timeout (~6h)"
           while true; do
-            echo "=== $(date -u +'%Y-%m-%dT%H:%M:%SZ') Starting zaro_multi.py ==="
+            echo "=== $(date -u +'%Y-%m-%dT%H:%M:%SZ') Starting zaro_multi.py (shard ${{ matrix.shard }}) ==="
             python3 -u zaro_multi.py || echo "zaro_multi.py exited with code $?"
             echo "Restarting zaro_multi.py in 15 seconds"
             sleep 15
