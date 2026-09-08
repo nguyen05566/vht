@@ -169,6 +169,12 @@ jobs:
           ENGINE_HASH: '256'
           LOGIN_STAGGER: '5-15'
           SNIFF_MODE: '0'
+          # QUÉT CÁC SẢNH: đi từng sảnh có người, VÀO bàn sẵn (1 người đang chờ)
+          # thay vì chỉ tạo bàn chờ; không thấy bàn nào mới quay lại tạo bàn
+          SCAN_TABLES: '1'
+          SCAN_INTERVAL: '25'     # nghỉ 25s giữa các vòng quét
+          SCAN_MAX_ROOMS: '4'     # tối đa 4 sảnh mỗi vòng
+          SCAN_ANY_BET: '0'       # chỉ vào bàn cược <= mức của mình
           # Xu đã cấp xong ở job fund -> tắt funder trong giai đoạn chơi
           # (nguyenpy2 chỉ giữ 1 phiên, các shard cùng đăng nhập sẽ đá nhau)
           FUND_ACCOUNT: ''
