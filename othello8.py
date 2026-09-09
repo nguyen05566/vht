@@ -196,7 +196,7 @@ def http_login():
 async def _ws(url, ck):
     h={"Cookie":ck,"Origin":"https://gamevh.net","User-Agent":"Mozilla/5.0"}
     for kw in ({"additional_headers":h},{"extra_headers":h}):
-        try: return await websockets.connect(url,max_size=2**20,ping_interval=None,**kw)
+        try: return await websockets.connect(url,max_size=2**20,ping_interval=30,ping_timeout=None,**kw)
         except TypeError: continue
         except: continue
     raise Exception("WS fail")
