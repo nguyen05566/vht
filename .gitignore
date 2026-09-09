@@ -5,3 +5,6 @@ acc_invalid.txt
 acc_scanned_valid.txt
 batch_*
 
+.gh_token
+drain_logs/
+acc_files/
