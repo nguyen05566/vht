@@ -169,6 +169,8 @@ def main():
     ap.add_argument("--phase-gap", type=int, default=15)
     ap.add_argument("--no-shuffle", action="store_true",
                     help="không xáo trộn thứ tự account")
+    ap.add_argument("--exclude", default="",
+                    help="file chứa tên acc cần BỎ QUA (giữ làm vốn) — cách nhau bằng dòng mới")
     ap.add_argument("--dry", action="store_true", help="chỉ liệt kê, không chạy")
     args = ap.parse_args()
 
@@ -192,6 +194,19 @@ def main():
 
     print(f"\n[2/3] Đọc + dedupe account:")
     users = load_users(files)
+    if args.exclude:
+        try:
+            ex = set()
+            with open(args.exclude, encoding="utf-8") as ef:
+                for line in ef:
+                    n = line.strip().split("\t")[0].strip().lower()
+                    if n:
+                        ex.add(n)
+            before = len(users)
+            users = [u for u in users if u.lower() not in ex]
+            print(f"  loại {before - len(users)} tk theo --exclude ({args.exclude})")
+        except Exception as e:
+            print(f"  ⚠️ không đọc được --exclude: {e}")
     if args.no_shuffle:
         print("  (giữ thứ tự gốc)")
     else:
@@ -200,6 +215,13 @@ def main():
     if args.limit > 0:
         users = users[:args.limit]
     print(f"  → TỔNG: {len(users)} tk duy nhất | mật khẩu: {args.password}")
+
+    # Lưu danh sách.tk lần này sẽ chạy — để quản lý vốn dự phòng, lần sau --exclude file này
+    os.makedirs(LOG_DIR, exist_ok=True)
+    sel_path = os.path.join(LOG_DIR, f"selected_{time.strftime('%Y%m%d_%H%M%S')}_{len(users)}.txt")
+    with open(sel_path, "w", encoding="utf-8") as sf:
+        sf.write("\n".join(users) + "\n")
+    print(f"  📋 danh sách.tk lần này: {sel_path} (lần sau dùng --exclude {sel_path} để giữ vốn)")
     print(f"  ⚙️  CHẾ ĐỘ GIỐNG NGƯỜI: {args.workers} luồng | delay ngẫu nhiên "
           f"{args.delay_min:.0f}-{args.delay_max:.0f}s/acc | lô {args.batch_size} | "
           f"nghỉ lô {args.batch_pause}-{args.batch_pause * 3}s")
