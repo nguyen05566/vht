@@ -1,0 +1,20 @@
+name: Othello8 Bot
+
+on:
+  workflow_dispatch:
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install requests websockets py7zr
+
+      - name: Run Othello bot
+        run: python -u othello8.py
