@@ -3,15 +3,23 @@
 """
 BANXU TERMUX — GOM XU VỀ ACC ĐÍCH, 1 FILE DUY NHẤT, CHẠY TRÊN TERMUX (ANDROID)
 ================================================================================
-Chỉ dùng thư viện chuẩn của Python (không cần cài gì thêm):
+Chỉ dùng thư viện chuẩn của Python (không cần cài gì thêm).
 
-    pkg update -y && pkg install python -y
-    python banxu_termux.py
+CÁCH DÙNG TRÊN ĐIỆN THOẠI (KHUYÊN DÙNG — KHÔNG CẦN LINK/TOKEN):
+  1) pkg install python -y
+  2) termux-setup-storage   (chọn "Cho phép" quyền bộ nhớ — chỉ làm 1 lần)
+  3) Đặt FILE ACC (vd acc_valid_1.txt) CÙNG THƯ MỤC với banxu_termux.py
+     trong Bộ nhớ trong điện thoại (hoặc thư mục Download)
+  4) Mở Termux, cd vào thư mục đó (vd: cd /sdcard/Download) rồi chạy:
+        python banxu_termux.py
+  5) Khi được hỏi acc: gõ TÊN FILE, vd: acc_valid_1.txt
+     hoặc gõ vắn tắt:  acc_valid   -> tự lấy TẤT CẢ file bắt đầu bằng acc_valid
+     hoặc Enter trống  -> tự tìm mọi file acc*.txt trong thư mục
 
-Máy sẽ hỏi:
-  1. 🔗 Link GitHub chứa danh sách acc (link raw, nhiều link cách nhau bởi dấu phẩy)
-     vd: https://raw.githubusercontent.com/nguyen05566/vht/main/acc_valid_1.txt
-  2. 🔑 Token GitHub (chỉ cần khi repo private — Enter để bỏ qua nếu public)
+  (Muốn tải thẳng bằng link thì dán link raw khi được hỏi — repo private thì
+   nhập token khi được hỏi. CHÚ Ý: chỉ dán token, KHÔNG kèm chữ "token"/"Bearer".)
+
+Máy sẽ hỏi tiếp:
   3. 🔒 Mật khẩu chung các acc (Enter = nhat123456)
   4. 🎯 ID acc nhận xu (Enter = 10055407 - ban_xu)
   5. 👥 Số luồng (Enter = 8)  6. 🔢 Số acc chạy (Enter = hết)
@@ -30,14 +38,16 @@ CHẾ ĐỘ GIỐNG NGƯỜI (tránh nghi):
 Tự nhớ: acc đã chạy được ghi vào banxu_done.txt -> lần chạy sau TỰ BỎ QUA,
 không quay lại acc cũ. Xóa file này nếu muốn chạy lại từ đầu.
 
-Chạy nhanh không cần hỏi:
-    python banxu_termux.py --url <LINK> --yes
+Chạy nhanh không cần hỏi (file acc để cạnh script):
+    python banxu_termux.py --url acc_valid_1.txt --yes
+    python banxu_termux.py --yes                (tự tìm mọi file acc*.txt)
     python banxu_termux.py --url <LINK> --limit 100 --delay 5-15 --yes
 
 Mẹo Termux: chạy `termux-wake-lock` (script tự bật) để tắt màn hình vẫn chạy.
 """
 import argparse
 import base64
+import fnmatch
 import http.cookiejar
 import os
 import random
@@ -505,51 +515,164 @@ def _load_token(script_dir):
     return ""
 
 
+def _clean_token(t):
+    """Người dùng hay dán thừa 'token ...' / 'Bearer ...' / ngoặc kép -> tự cắt."""
+    t = (t or "").strip().strip('"').strip("'")
+    m = re.match(r"(?i)^(?:token|bearer)\s+(.+)$", t)
+    if m: t = m.group(1).strip()
+    return t
+
+
+def _auth_header(tok):
+    return ("Bearer " + tok) if tok.startswith("github_pat_") else ("token " + tok)
+
+
+def _normalize_url(url):
+    """Chuẩn hoá link: bỏ ngoặc/khoảng trắng, đổi github.com/blob -> raw."""
+    u = url.strip().strip('"').strip("'")
+    m = re.match(r"https?://(?:www\.)?github\.com/([^/]+)/([^/]+)/(?:blob|raw|tree)/(.+)$", u)
+    if m:
+        u = f"https://raw.githubusercontent.com/{m.group(1)}/{m.group(2)}/{m.group(3)}"
+    return u
+
+
+def _search_dirs(script_dir):
+    """Các thư mục sẽ tìm file acc trong điện thoại."""
+    dirs = [script_dir, os.getcwd(),
+            "/sdcard", "/sdcard/Download",
+            "/storage/emulated/0", "/storage/emulated/0/Download",
+            os.path.expanduser("~/storage/shared"),
+            os.path.expanduser("~/storage/downloads")]
+    seen, out = set(), []
+    for d in dirs:
+        if d and d not in seen and os.path.isdir(d):
+            seen.add(d)
+            out.append(d)
+    return out
+
+
+def _find_local_files(part, script_dir):
+    """Tìm file acc trong máy: đúng tên -> gõ vắn tắt (prefix) -> glob pattern.
+    Trả danh sách đường dẫn tìm được."""
+    p = part.strip().strip('"').strip("'").replace("\\", "/")
+    out, seenp = [], set()
+    def add(cands):
+        for c in cands:
+            if c not in seenp:
+                seenp.add(c)
+                out.append(c)
+    if os.path.isfile(p):
+        add([os.path.abspath(p)])
+        return out
+    base = os.path.basename(p) or p
+    has_glob = any(ch in base for ch in "*?[")
+    dirs = _search_dirs(script_dir)
+    # 1) đúng tên file nằm trong các thư mục chuẩn
+    for d in dirs:
+        full = os.path.join(d, base if has_glob else p)
+        if not has_glob and os.path.isfile(full):
+            add([full])
+    if out:
+        return out
+    # 2) quét theo tiền tố hoặc glob (chỉ xét file .txt)
+    for d in dirs:
+        try:
+            names = os.listdir(d)
+        except Exception:
+            continue
+        for fn in sorted(names):
+            if not fn.lower().endswith(".txt"):
+                continue
+            if has_glob:
+                if not fnmatch.fnmatch(fn.lower(), base.lower()):
+                    continue
+            elif not fn.lower().startswith(base.lower()):
+                continue
+            full = os.path.join(d, fn)
+            if os.path.isfile(full):
+                add([full])
+    return out
+
+
+def _hint_local(log):
+    log("    💡 Không tải được bằng link? Mở link trên máy tính để tải file acc về,"
+        " gửi sang điện thoại,")
+    log("       chép CÙNG THƯ MỤC với banxu_termux.py (Bộ nhớ trong), chạy lại và"
+        " gõ TÊN FILE, vd: acc_valid_1.txt")
+
+
+def _hint_storage(log):
+    log("    💡 Thư mục đã tìm: thư mục chứa script, thư mục hiện tại, /sdcard,"
+        " /sdcard/Download")
+    log("       Nếu chưa có /sdcard: chạy lệnh 'termux-setup-storage' rồi chọn Cho phép.")
+
+
 def _fetch_url(url, token):
     req = urllib.request.Request(url)
     req.add_header("User-Agent", random.choice(UA_POOL))
     if token:
-        req.add_header("Authorization", "token " + token)
+        req.add_header("Authorization", _auth_header(token))
     with urllib.request.urlopen(req, timeout=30) as resp:
         return resp.read().decode("utf-8", "replace")
 
 
-def load_accounts(url_spec, token, log, allow_prompt=True):
-    """url_spec: 1 hoặc nhiều link raw / file local, cách nhau bởi dấu phẩy."""
+def _absorb(text, label, users, seen, log):
+    n0 = len(users)
+    for line in text.splitlines():
+        name = line.strip().replace("\r", "").split("\t")[0].strip()
+        if name and not name.startswith("#") and name.lower() not in seen:
+            seen.add(name.lower())
+            users.append(name)
+    log(f"  ✓ {label}: +{len(users) - n0} tk")
+
+
+def load_accounts(url_spec, token, log, allow_prompt=True, script_dir="."):
+    """url_spec: 1 hoặc nhiều mục cách nhau bởi dấu phẩy. Mỗi mục có thể là:
+    - link GitHub raw (repo private thì kèm token khi được hỏi)
+    - TÊN FILE trong điện thoại (đặt cùng thư mục với script, hoặc /sdcard,/Download)
+    - gõ vắn tắt 'acc_valid' (lấy mọi acc_valid*.txt) hoặc glob 'acc*.txt'"""
     users, seen = [], set()
     for part in [x.strip() for x in url_spec.split(",") if x.strip()]:
         text = None
         if part.startswith("http://") or part.startswith("https://"):
-            m = re.match(r"https?://([^@/]+)@(.+)$", part)
-            tok, url = (m.group(1), "https://" + m.group(2)) if m else (token, part)
+            url = _normalize_url(part)
+            m = re.match(r"https?://([^@/]+)@(.+)$", url)
+            tok, url = (m.group(1), "https://" + m.group(2)) if m else (token, url)
+            tok = _clean_token(tok)
             for attempt in (1, 2):
                 try:
                     text = _fetch_url(url, tok)
                     break
                 except urllib.error.HTTPError as e:
                     if e.code in (401, 403, 404) and attempt == 1 and allow_prompt:
-                        try: t = input("  🔑 Token GitHub cho repo private (Enter = bỏ qua): ").strip()
+                        try: t = input("  🔑 Token GitHub cho repo private (Enter = bỏ qua): ")
                         except EOFError: t = ""
+                        t = _clean_token(t)
                         if t: tok = t; continue
-                    log(f"  ✗ Tải thất bại: {url} ({e})")
+                    log(f"  ✗ Tải {url} thất bại (HTTP {e.code})")
+                    _hint_local(log)
                     break
                 except Exception as e:
-                    log(f"  ✗ Tải thất bại: {url} ({e})")
+                    log(f"  ✗ Tải {url} thất bại ({e})")
+                    _hint_local(log)
                     break
+            if text is None: continue
+            _absorb(text, url, users, seen, log)
         else:
-            try:
-                text = open(part, encoding="utf-8", errors="replace").read()
-            except Exception as e:
-                log(f"  ✗ {part}: {e}")
+            files = _find_local_files(part, script_dir)
+            if not files:
+                log(f"  ✗ Không thấy file '{part}' trong máy")
+                _hint_storage(log)
                 continue
-        if text is None: continue
-        n0 = len(users)
-        for line in text.splitlines():
-            name = line.strip().split("\t")[0].strip()
-            if name and not name.startswith("#") and name.lower() not in seen:
-                seen.add(name.lower())
-                users.append(name)
-        log(f"  ✓ {part}: +{len(users) - n0} tk")
+            if len(files) > 1:
+                log(f"  🔎 '{part}' khớp {len(files)} file:")
+            for fp in files:
+                try:
+                    text = open(fp, encoding="utf-8", errors="replace").read()
+                except Exception as e:
+                    log(f"  ✗ {fp}: {e}")
+                    continue
+                _absorb(text, fp, users, seen, log)
     return users
 
 
@@ -587,7 +710,9 @@ def make_logger(path):
 def main():
     ap = argparse.ArgumentParser(description="Gom xu về acc đích — 1 file, chạy Termux")
     ap.add_argument("--url", default="",
-                    help="link GitHub raw chứa acc (nhiều link cách nhau bởi dấu phẩy)")
+                    help="link GitHub raw HOẶC tên file acc trong máy (nhiều mục cách "
+                         "nhau bởi dấu phẩy; 'acc_valid' = mọi acc_valid*.txt; "
+                         "'acc*' = mọi file acc*.txt)")
     ap.add_argument("--token", default="", help="token GitHub (repo private)")
     ap.add_argument("--password", "--pwd", default=DEFAULT_PASS)
     ap.add_argument("--dest", type=int, default=DEST_ID, help="playerId nhận xu")
@@ -616,13 +741,16 @@ def main():
 
     # ---- Hỏi thông tin nếu chưa có ----
     if not args.url and not args.yes:
+        log("📎 Danh sách acc — chọn 1 trong 3 cách:")
+        log("   1) Gõ TÊN FILE đã tải về máy (đặt cùng thư mục với file này), vd: acc_valid_1.txt")
+        log("   2) Gõ vắn tắt, vd: acc_valid  -> lấy TẤT CẢ file bắt đầu bằng acc_valid")
+        log("   3) Dán link GitHub raw (repo private thì sẽ được hỏi token)")
         try:
-            args.url = input("🔗 Link GitHub chứa danh sách acc (link raw): ").strip()
+            args.url = input("🔗 Acc (tên file hoặc link, Enter trống = tự tìm acc*.txt): ").strip()
         except EOFError:
             args.url = ""
     if not args.url:
-        log("✗ Chưa có link/file danh sách acc! (vd: https://raw.githubusercontent.com/nguyen05566/vht/main/acc_valid_1.txt)")
-        return 1
+        args.url = "acc*"          # tự tìm file acc*.txt cạnh script / trong máy
 
     token = args.token or _load_token(script_dir)
     if not token and not args.yes:
@@ -650,13 +778,16 @@ def main():
     try_wake_lock()
 
     # ---- Tải + lọc danh sách acc ----
-    log("\n[1/3] Tải danh sách acc:")
-    users = load_accounts(args.url, token, log, allow_prompt=not args.yes)
+    log("\n[1/3] Danh sách acc (link hoặc file trong máy):")
+    users = load_accounts(args.url, token, log, allow_prompt=not args.yes,
+                          script_dir=script_dir)
     if not users:
-        log("✗ Danh sách acc trống!")
+        log("✗ Danh sách acc trống! Đặt file acc CÙNG THƯ MỤC với banxu_termux.py"
+            " rồi chạy lại (gõ tên file khi được hỏi).")
         return 1
     if args.exclude:
-        ex_users = load_accounts(args.exclude, token, log, allow_prompt=False)
+        ex_users = load_accounts(args.exclude, token, log, allow_prompt=False,
+                                 script_dir=script_dir)
         ex_set = {x.lower() for x in ex_users}
         before = len(users)
         users = [u for u in users if u.lower() not in ex_set]
