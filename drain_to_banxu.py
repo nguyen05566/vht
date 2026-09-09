@@ -154,6 +154,9 @@ def run_batch(batch_file, args, idx, total):
 def main():
     ap = argparse.ArgumentParser(description="Gom toàn bộ xu acc_valid về ban_xu")
     ap.add_argument("--only", default="", help="chỉ dùng file số này, vd: 1,3")
+    ap.add_argument("--use", default="",
+                    help="dùng TRỰC TIẾP file danh sách acc có sẵn thay vì tải từ GitHub "
+                         "(cách nhau bởi dấu phẩy) — vd chạy tiếp đợt dở dang")
     ap.add_argument("--limit", type=int, default=0, help="giới hạn tổng số tk (0=hết)")
     ap.add_argument("--password", "--pwd", default=DEFAULT_PASS)
     ap.add_argument("--dest", type=int, default=DEST_ID, help="playerId nhận xu")
@@ -186,8 +189,16 @@ def main():
         return 1
     os.makedirs(LOG_DIR, exist_ok=True)
 
-    print("\n[1/3] Tải danh sách account từ GitHub:")
-    files = download_acc_files(only)
+    print("\n[1/3] Danh sách account:")
+    if args.use:
+        files = [f.strip() for f in args.use.split(",") if os.path.exists(f.strip())]
+        for f in args.use.split(","):
+            f = f.strip()
+            if f and not os.path.exists(f):
+                print(f"  ✗ không thấy file: {f}")
+        print(f"  dùng file có sẵn: {files}")
+    else:
+        files = download_acc_files(only)
     if not files:
         print("✗ Không có file account nào!")
         return 1
