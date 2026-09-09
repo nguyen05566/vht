@@ -21,6 +21,7 @@ Cách chạy:
 import argparse
 import glob
 import os
+import random
 import re
 import subprocess
 import sys
@@ -124,6 +125,8 @@ def run_batch(batch_file, args, idx, total):
            "--batch-size", str(args.batch_size),
            "--batch-pause", str(args.batch_pause),
            "--phase-gap", str(args.phase_gap),
+           "--delay-min", str(args.delay_min),
+           "--delay-max", str(args.delay_max),
            "--workers", str(args.workers)]
     print(f"\n{'=' * 66}\nLÔ {idx}/{total} — {batch_file} → log: {log_path}\n{'=' * 66}")
     ok = xu = fail = 0
@@ -154,10 +157,18 @@ def main():
     ap.add_argument("--limit", type=int, default=0, help="giới hạn tổng số tk (0=hết)")
     ap.add_argument("--password", "--pwd", default=DEFAULT_PASS)
     ap.add_argument("--dest", type=int, default=DEST_ID, help="playerId nhận xu")
-    ap.add_argument("--workers", type=int, default=30)
-    ap.add_argument("--batch-size", type=int, default=750)
-    ap.add_argument("--batch-pause", type=int, default=10)
+    ap.add_argument("--workers", type=int, default=8,
+                    help="số luồng (default 8 — ít luồng cho giống người)")
+    ap.add_argument("--batch-size", type=int, default=120)
+    ap.add_argument("--batch-pause", type=int, default=30,
+                    help="nghỉ giữa các lô (ngẫu nhiên x1-x3)")
+    ap.add_argument("--delay-min", type=float, default=8.0,
+                    help="delay ngẫu nhiên tối thiểu trước mỗi acc (giây)")
+    ap.add_argument("--delay-max", type=float, default=25.0,
+                    help="delay ngẫu nhiên tối đa trước mỗi acc (giây)")
     ap.add_argument("--phase-gap", type=int, default=15)
+    ap.add_argument("--no-shuffle", action="store_true",
+                    help="không xáo trộn thứ tự account")
     ap.add_argument("--dry", action="store_true", help="chỉ liệt kê, không chạy")
     args = ap.parse_args()
 
@@ -181,9 +192,17 @@ def main():
 
     print(f"\n[2/3] Đọc + dedupe account:")
     users = load_users(files)
+    if args.no_shuffle:
+        print("  (giữ thứ tự gốc)")
+    else:
+        random.shuffle(users)   # xáo trộn để không đi tuần tự a->z như máy móc
+        print("  đã xáo trộn thứ tự account (giống người)")
     if args.limit > 0:
         users = users[:args.limit]
     print(f"  → TỔNG: {len(users)} tk duy nhất | mật khẩu: {args.password}")
+    print(f"  ⚙️  CHẾ ĐỘ GIỐNG NGƯỜI: {args.workers} luồng | delay ngẫu nhiên "
+          f"{args.delay_min:.0f}-{args.delay_max:.0f}s/acc | lô {args.batch_size} | "
+          f"nghỉ lô {args.batch_pause}-{args.batch_pause * 3}s")
 
     if args.dry:
         print("\n[DRY] Không chạy. Lệnh thật sẽ là:")
@@ -205,8 +224,9 @@ def main():
         except Exception:
             pass
         if i < len(batches):
-            print(f"  Nghỉ {args.batch_pause}s…")
-            time.sleep(args.batch_pause)
+            bp = random.uniform(args.batch_pause, args.batch_pause * 3)
+            print(f"  Nghỉ {bp:.0f}s…")
+            time.sleep(bp)
 
     mins = (time.time() - t0) / 60
     print(f"\n{'=' * 66}")

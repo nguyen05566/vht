@@ -11,6 +11,7 @@ QUAY VÒNG QUAY MAY MẮN + CHUYỂN XU VỀ ĐÍCH (TRỰC TIẾP, CHIA LÔ, KH
 import argparse
 import glob
 import os
+import random
 import re
 import struct
 import sys
@@ -485,6 +486,10 @@ def main():
     ap.add_argument("--phase", choices=["spin", "transfer", "all"], default="all")
     ap.add_argument("--phase-gap", type=int, default=15,
                     help="nghỉ giữa pha quay và pha chuyển (giây)")
+    ap.add_argument("--delay-min", type=float, default=0.0,
+                    help="delay tối thiểu ngẫu nhiên trước khi xử lý 1 acc (giây)")
+    ap.add_argument("--delay-max", type=float, default=0.0,
+                    help="delay tối đa ngẫu nhiên trước khi xử lý 1 acc (giây)")
     ap.add_argument("--pipeline", action="store_true",
                     help="pipeline: quay lô sau song song với chuyển lô trước (gấp 2x nhanh)")
     ap.add_argument("--dry-run", action="store_true")
@@ -519,8 +524,14 @@ def main():
 
     def run_phase(fn, chunk):
         results = []
+        dmin, dmax = getattr(args, "delay_min", 0.0), getattr(args, "delay_max", 0.0)
+        def _human(u):
+            # Giống người: mỗi acc "vào game" lệch nhau ngẫu nhiên
+            if dmax > 0:
+                time.sleep(random.uniform(dmin, dmax))
+            return fn(u, args.password, args.dest, log)
         with ThreadPoolExecutor(max_workers=min(args.workers, len(chunk) or 1)) as ex:
-            futs = [ex.submit(fn, u, args.password, args.dest, log) for u in chunk]
+            futs = [ex.submit(_human, u) for u in chunk]
             for f in as_completed(futs):
                 r = f.result()
                 results.append(r[0] if isinstance(r, tuple) else r)
@@ -573,8 +584,9 @@ def main():
                         return
                     time.sleep(1)
                 chunk = batches[bi]
-                log(f"⏳ Lô {bi+1}: nghỉ {args.phase_gap}s trước khi chuyển...")
-                time.sleep(args.phase_gap)
+                gap = random.uniform(args.phase_gap * 0.6, args.phase_gap * 1.6)
+                log(f"⏳ Lô {bi+1}: nghỉ {gap:.0f}s trước khi chuyển...")
+                time.sleep(gap)
                 log(f"\n{'='*70}\n💎 LÔ {bi+1}/{len(batches)} — CHUYỂN {len(chunk)} acc\n{'='*70}")
                 results = run_phase(phase_transfer, chunk)
                 with trans_lock:
@@ -609,8 +621,9 @@ def main():
                 log(f"✅ lô {bi}: quay xong ({len(s)} quay được)")
             if args.phase in ("transfer", "all"):
                 if args.phase == "all" and execute and len(chunk) > 1:
-                    log(f"⏳ Nghỉ {args.phase_gap}s giữa quay và chuyển...")
-                    time.sleep(args.phase_gap)
+                    gap = random.uniform(args.phase_gap * 0.6, args.phase_gap * 1.6)
+                    log(f"⏳ Nghỉ {gap:.0f}s giữa quay và chuyển...")
+                    time.sleep(gap)
                 if execute:
                     log("PHA 2 — CHUYỂN...")
                     all_trans += run_phase(phase_transfer, chunk)
@@ -624,8 +637,9 @@ def main():
                         ld = http_login(u, args.password)
                         log(f"  DRY [{u}]: balance={ld['balance'] if ld else 0:,}")
             if bi < len(batches):
-                log(f"😴 Nghỉ {args.batch_pause}s giữa lô {bi} và {bi+1}...")
-                time.sleep(args.batch_pause)
+                bp = random.uniform(args.batch_pause * 0.5, args.batch_pause * 1.5)
+                log(f"😴 Nghỉ {bp:.0f}s giữa lô {bi} và {bi+1}...")
+                time.sleep(bp)
 
     spun = [r for r in all_spin if r.get("status") == "SPUN"]
     ok = [r for r in all_trans if r.get("status") == "OK"]
