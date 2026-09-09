@@ -201,9 +201,9 @@ async def _ws(url, ck):
         except: continue
     raise Exception("WS fail")
 
-async def main():
+async def _session():
     info=http_login()
-    if not info: return
+    if not info: return False
     ck,tok,nick,path=info
     ws=await _ws(WS_URL,ck)
     async def send(b): await ws.send(b)
@@ -212,7 +212,7 @@ async def main():
     await asyncio.sleep(1); w=BW(); w.cmd("LIST_BET_AMT"); await send(w.build())
 
     edax=Edax(level=ENGINE_LEVEL)
-    if not edax.start(): print("[!] Edax fail"); return
+    if not edax.start(): print("[!] Edax fail"); return False
     my_seat=-1; in_game=False; cells=[None]*64; my_color=1; pending_turn=None
 
     async def play_turn(to):
@@ -227,63 +227,82 @@ async def main():
             print(f"[PLAY] đã gửi {chr(65+x)}{y+1}")
         else: print("[EDAX] không nước (pass?)")
 
+    try:
+        while True:
+            try: raw=await asyncio.wait_for(ws.recv(),timeout=2.0)
+            except asyncio.TimeoutError: continue
+            except Exception as e: print("[!]",e); break
+            if not isinstance(raw,bytes): continue
+            r=BR(raw); c=r.cmd(); tail=r.d[r.p:]
+
+            if c=="LIST_BET_AMT":
+                r.i8(); n=r.i8(); bets=[r.i32() for _ in range(n)]
+                bid=bets.index(TARGET_BET) if TARGET_BET in bets else 0
+                print(f"[bàn] mức cược {bets[bid]} x (id={bid})")
+                w=BW(); w.cmd("CREATE_RULE"); w.i8(bid); w.i8(2)
+                w.ascii("matchDuration"); w.utf("1800"); w.ascii("turnDuration"); w.utf("60")
+                await send(w.build())
+            elif c=="CREATE_RULE":
+                st=r.i8(); tid=r.ascii() if st==0 else ""
+                print(f"[bàn] {tid}")
+                if st==0: await asyncio.sleep(0.5); w=BW(); w.cmd("GET_TABLE_DATA_EX"); w.ascii(""); await send(w.build())
+            elif c=="GET_TABLE_DATA_EX":
+                fb=r.i8()
+                if fb==0:
+                    try:
+                        sc=r.u8()
+                        for _ in range(sc):
+                            r.u8();r.ascii();r.u8();cc=r.u8()
+                            for _ in range(cc): r.u8();r.ascii();r.utf();r.u8();r.u8()
+                        r.u8(); my_seat=r.i8(); print(f"[table] ghế {my_seat}")
+                    except: pass
+            elif c=="START_MATCH":
+                in_game=True
+                cells,ct=decode_start(tail)
+                my_color=my_seat
+                print(f"\n[VÁN] tôi ghế {my_seat} = {'ĐEN' if my_color==1 else 'TRẮNG'} | đi {'trước' if ct==my_color else 'sau'} (ct={ct})")
+                pboard(cells)
+                if pending_turn is not None:
+                    tt=pending_turn; pending_turn=None
+                    print(f"[VÁN] lượt đi trước đã đến trước START_MATCH → chơi sau khi bàn sẵn sàng")
+                    await play_turn(tt)
+            elif c=="SET_TURN":
+                ts=r.i8(); to=r.i16()
+                if ts==my_seat:
+                    if in_game:
+                        await play_turn(to)
+                    else:
+                        pending_turn=to
+                        print(f"[TURN] đến lượt (seat {ts}) nhưng chưa START_MATCH → chờ")
+            elif c=="MOVE":
+                pos=r.i16(); pc=r.u8()
+                if pos>=0 and in_game:
+                    if pc==my_color:
+                        print(f"[MOVE] echo nước mình {chr(65+pos%8)}{pos//8+1} (đã apply khi đi, bỏ qua)")
+                    else:
+                        apply_move(cells,pos,pc)
+                        print(f"[MOVE] đối thủ {chr(65+pos%8)}{pos//8+1}")
+            elif c in ("GAMEOVER","DROP"): in_game=False; print(f"[{c}]")
+            elif c=="PING": w=BW(); w.cmd("PONG"); await send(w.build())
+    finally:
+        edax.stop()
+        try: await ws.close()
+        except: pass
+    return True
+
+async def main():
     while True:
-        try: raw=await asyncio.wait_for(ws.recv(),timeout=2.0)
-        except asyncio.TimeoutError: continue
-        except Exception as e: print("[!]",e); break
-        if not isinstance(raw,bytes): continue
-        r=BR(raw); c=r.cmd(); tail=r.d[r.p:]
-
-        if c=="LIST_BET_AMT":
-            r.i8(); n=r.i8(); bets=[r.i32() for _ in range(n)]
-            bid=bets.index(TARGET_BET) if TARGET_BET in bets else 0
-            print(f"[bàn] mức cược {bets[bid]} x (id={bid})")
-            w=BW(); w.cmd("CREATE_RULE"); w.i8(bid); w.i8(2)
-            w.ascii("matchDuration"); w.utf("1800"); w.ascii("turnDuration"); w.utf("60")
-            await send(w.build())
-        elif c=="CREATE_RULE":
-            st=r.i8(); tid=r.ascii() if st==0 else ""
-            print(f"[bàn] {tid}")
-            if st==0: await asyncio.sleep(0.5); w=BW(); w.cmd("GET_TABLE_DATA_EX"); w.ascii(""); await send(w.build())
-        elif c=="GET_TABLE_DATA_EX":
-            fb=r.i8()
-            if fb==0:
-                try:
-                    sc=r.u8()
-                    for _ in range(sc):
-                        r.u8();r.ascii();r.u8();cc=r.u8()
-                        for _ in range(cc): r.u8();r.ascii();r.utf();r.u8();r.u8()
-                    r.u8(); my_seat=r.i8(); print(f"[table] ghế {my_seat}")
-                except: pass
-        elif c=="START_MATCH":
-            in_game=True
-            cells,ct=decode_start(tail)
-            my_color=my_seat
-            print(f"\n[VÁN] tôi ghế {my_seat} = {'ĐEN' if my_color==1 else 'TRẮNG'} | đi {'trước' if ct==my_color else 'sau'} (ct={ct})")
-            pboard(cells)
-            if pending_turn is not None:
-                tt=pending_turn; pending_turn=None
-                print(f"[VÁN] lượt đi trước đã đến trước START_MATCH → chơi sau khi bàn sẵn sàng")
-                await play_turn(tt)
-        elif c=="SET_TURN":
-            ts=r.i8(); to=r.i16()
-            if ts==my_seat:
-                if in_game:
-                    await play_turn(to)
-                else:
-                    pending_turn=to
-                    print(f"[TURN] đến lượt (seat {ts}) nhưng chưa START_MATCH → chờ")
-        elif c=="MOVE":
-            pos=r.i16(); pc=r.u8()
-            if pos>=0 and in_game:
-                if pc==my_color:
-                    print(f"[MOVE] echo nước mình {chr(65+pos%8)}{pos//8+1} (đã apply khi đi, bỏ qua)")
-                else:
-                    apply_move(cells,pos,pc)
-                    print(f"[MOVE] đối thủ {chr(65+pos%8)}{pos//8+1}")
-        elif c in ("GAMEOVER","DROP"): in_game=False; print(f"[{c}]")
-        elif c=="PING": w=BW(); w.cmd("PONG"); await send(w.build())
-
-    edax.stop(); await ws.close(); print("[done]")
+        print("\n[RECONNECT] kết nối lại...")
+        try:
+            ok=await _session()
+            if not ok:
+                print("[!] login fail, chờ 60s...")
+                await asyncio.sleep(60)
+            else:
+                print("[!] mất kết nối, chờ 10s...")
+                await asyncio.sleep(10)
+        except Exception as e:
+            print(f"[!] lỗi: {e}, chờ 30s...")
+            await asyncio.sleep(30)
 
 if __name__=="__main__": asyncio.run(main())
