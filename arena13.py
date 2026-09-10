@@ -74,9 +74,50 @@ VN_TEN_KHONG_DAU = [
 ]
 
 def generate_random_full_name() -> str:
+    """Tên VN ngẫu nhiên + chèn 1 dấu '.' (marker nhận diện đồng đội, thống nhất arena/zaro)."""
     has_accent = random.choice([True, False])
     name_list = VN_TEN_DAU if has_accent else VN_TEN_KHONG_DAU
-    return random.choice(name_list)
+    name = random.choice(name_list)
+    if len(name) >= 2:
+        pos = random.randint(1, len(name) - 1)
+        name = name[:pos] + "." + name[pos:]
+    return name
+
+
+# ==================== NHẬN DIỆN ĐỒNG ĐỘI (thống nhất arena + zaro) ====================
+_FAMILY_PREFIX_RE = re.compile(
+    r'^(?:arena|zaro|nguyen|nguyenpy)\d+[a-z0-9_]*$',
+    re.IGNORECASE,
+)
+
+def _family_extra_names():
+    raw = os.environ.get("FAMILY_EXTRA", "") or ""
+    return {x.strip().upper() for x in raw.split(",") if x and x.strip()}
+
+def is_family_name(name, self_names=None):
+    """True nếu `name` là bot đồng đội (không phải chính mình)."""
+    if not name:
+        return False
+    n = str(name).strip()
+    if not n:
+        return False
+    nu = n.upper()
+    self_set = set()
+    for x in (self_names or []):
+        if x is None:
+            continue
+        s = str(x).strip()
+        if s:
+            self_set.add(s.upper())
+    if nu in self_set:
+        return False
+    if "." in n:
+        return True
+    if _FAMILY_PREFIX_RE.match(n):
+        return True
+    if nu in _family_extra_names():
+        return True
+    return False
 
 
 # ======================== EMBRYO CONFIG ========================
@@ -1074,6 +1115,16 @@ class CaroBot:
             self.is_playing = is_playing
             log.info(f"[TABLE] Slot={self.slot} Playing={is_playing} Turn=slot{current_player}")
 
+            # Tránh đánh đồng đội: nếu ghế đối diện là bot nhà → tạo bàn mới
+            if not is_playing and has_opponent:
+                for sid, p in list(self.players.items()):
+                    if sid == self.slot or sid < 0:
+                        continue
+                    opp_name = (p or {}).get("name") or ""
+                    if self.is_family_bot(opp_name):
+                        await self._avoid_family_and_remake(opp_name)
+                        return
+
             if is_playing and current_player == self.slot:
                 if not self._moving and not self.pending_move:
                     self.pending_move = True; await self.do_move()
@@ -1265,6 +1316,9 @@ class CaroBot:
 
         if place_level < 4: return
         log.info(f"[BOT] {name} vào bàn → cập nhật trạng thái...")
+        if not self.is_playing and self.is_family_bot(name):
+            await self._avoid_family_and_remake(name)
+            return
         await self.send(self.make_get_table())
 
     async def handle_player_exit(self, r: BinaryReader):
@@ -1357,6 +1411,23 @@ class CaroBot:
             if name:
                 data[name] = html_lib.unescape(match.group(2)).strip()
         return action, data
+
+
+    def is_family_bot(self, name: str) -> bool:
+        """Nhận diện bot đồng đội (rule thống nhất arena + zaro)."""
+        self_names = [getattr(self, "nickname", None), USER]
+        return is_family_name(name, self_names=self_names)
+
+    async def _avoid_family_and_remake(self, name: str):
+        """Rời bàn đồng đội và tạo bàn mới (caro tự tạo bàn)."""
+        log.info(f"[AVOID] ⚠️ Đối thủ '{name}' là bot đồng đội → tạo bàn mới")
+        self.ready = False
+        self.in_table = False
+        self.table_id = None
+        self.players = {}
+        self.player_slot_by_id = {}
+        await asyncio.sleep(0.5)
+        await self.create_new_table()
 
     def update_random_full_name(self, session: requests.Session) -> Dict:
         edit_url = 'https://gamevh.net/com/ftl/game/profile/update_profile.jsp'

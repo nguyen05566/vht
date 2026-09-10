@@ -108,6 +108,54 @@ VN_TEN_KHONG_DAU = [
 
 _IDENTITY_SYNCED = False
 
+
+# ==================== NHẬN DIỆN ĐỒNG ĐỘI (thống nhất arena + zaro) ====================
+# Rule:
+#  1. FULL_NAME có dấu '.' (marker bot tự chèn khi sync profile)
+#  2. Nick/username khớp prefix bot: arenaNN / zaroNN / nguyenNN / nguyenpyNN
+#  3. Khớp marker cố định BOT_DISPLAY_NAME (nếu có) + env FAMILY_EXTRA (csv)
+# Cross-runner: không phụ thuộc /tmp — chỉ cần tên hiển thị/username.
+_FAMILY_PREFIX_RE = re.compile(
+    r'^(?:arena|zaro|nguyen|nguyenpy)\d+[a-z0-9_]*$',
+    re.IGNORECASE,
+)
+
+def _family_extra_names():
+    raw = os.environ.get("FAMILY_EXTRA", "") or ""
+    out = {x.strip().upper() for x in raw.split(",") if x and x.strip()}
+    try:
+        bd = str(BOT_DISPLAY_NAME).strip()
+        if bd:
+            out.add(bd.upper())
+    except NameError:
+        pass
+    return out
+
+def is_family_name(name, self_names=None):
+    """True nếu `name` là bot đồng đội (không phải chính mình)."""
+    if not name:
+        return False
+    n = str(name).strip()
+    if not n:
+        return False
+    nu = n.upper()
+    self_set = set()
+    for x in (self_names or []):
+        if x is None:
+            continue
+        s = str(x).strip()
+        if s:
+            self_set.add(s.upper())
+    if nu in self_set:
+        return False
+    if "." in n:
+        return True
+    if _FAMILY_PREFIX_RE.match(n):
+        return True
+    if nu in _family_extra_names():
+        return True
+    return False
+
 def generate_dotted_full_name():
     """Tạo tên tiếng Việt ngẫu nhiên + chèn 1 dấu chấm ngẫu nhiên (marker nhận diện đồng đội)."""
     name = random.choice(VN_TEN_DAU if random.choice([True, False]) else VN_TEN_KHONG_DAU)
@@ -143,7 +191,7 @@ def sync_profile_name(session):
                 data[k] = v
 
         old_full_name = data.get('FULL_NAME', '')
-        new_full_name = BOT_DISPLAY_NAME
+        new_full_name = generate_dotted_full_name()  # marker '.' = đồng đội
         data['FULL_NAME'] = new_full_name
         data['OLD_PASSWORD'] = PASSWD
         data['SAVE'] = '\uf046'
@@ -154,7 +202,7 @@ def sync_profile_name(session):
                      'Referer': page.url,
                      'Content-Type': 'application/x-www-form-urlencoded'},
             allow_redirects=True)
-        print(f"[PROFILE] 👤 Đổi tên hiển thị: '{old_full_name}' -> '{new_full_name}'")
+        print(f"[PROFILE] 👤 Đổi tên hiển thị: '{old_full_name}' -> '{new_full_name}' (dấu chấm = đồng đội)")
     except Exception as e:
         print(f"[PROFILE] Lỗi cập nhật tên hiển thị: {e}")
 
@@ -990,10 +1038,26 @@ class PikafishBot:
 
 
     def is_family_bot(self, name):
-        """Nhận diện bot đồng đội: tên hiển thị trùng BOT_DISPLAY_NAME."""
-        if not name or name.strip().lower() == CURRENT_PLAYER_NICKNAME.lower():
-            return False
-        return name.strip().upper() == BOT_DISPLAY_NAME.upper()
+        """Nhận diện bot đồng đội (rule thống nhất arena + zaro)."""
+        self_names = []
+        try:
+            self_names.append(CURRENT_PLAYER_NICKNAME)
+        except NameError:
+            pass
+        try:
+            self_names.append(USER)
+        except NameError:
+            pass
+        try:
+            self_names.append(BOT_DISPLAY_NAME)
+        except NameError:
+            pass
+        # zaro_multi-style: nickname thuộc tính instance (nếu có)
+        for attr in ("nickname", "user", "display_name"):
+            if hasattr(self, attr):
+                self_names.append(getattr(self, attr))
+        return is_family_name(name, self_names=self_names)
+
 
     def leave_table(self):
         """Rời bàn hiện tại và quay về sảnh để tạo bàn mới."""
@@ -1009,6 +1073,7 @@ class PikafishBot:
         self._table_created_by_me = False
         self._sit_alone_since = None
         self.slot_players.clear()
+        self._pending_opp_ready = False
         self.board.reset()
         self._quick_play_attempts = 0
         self._search_room_idx = 0
@@ -1253,10 +1318,21 @@ class PikafishBot:
             if pid > 0 and pid != CURRENT_PLAYER_ID:
                 self.player_names[pid] = name
                 print(f"[PLAYER] 👤 Người chơi '{name}' (id={pid}) vào bàn/phòng (level={place_level})")
-                if not self.board.is_playing and self.is_family_bot(name) and self.opponent_player_id() == pid:
-                    print(f"[AVOID] ⚠️ Phát hiện đồng đội '{name}' ở ghế đối diện! Rời bàn ngay + giảm cược...")
-                    self.leave_table()
-                    self._lower_bet_level()
+                if not self.board.is_playing and self.opponent_player_id() == pid:
+                    if self.is_family_bot(name):
+                        print(f"[AVOID] ⚠️ Phát hiện đồng đội '{name}' ở ghế đối diện! Rời bàn ngay + giảm cược...")
+                        self.leave_table()
+                        self._lower_bet_level()
+                    elif getattr(self, "_pending_opp_ready", False):
+                        self._pending_opp_ready = False
+                        self._sit_alone_since = None
+                        def delay_ready_on_name():
+                            time.sleep(3.0)
+                            if (not self.board.is_playing
+                                    and self.opponent_player_id() == pid
+                                    and not self.is_family_bot(self.player_names.get(pid, ""))):
+                                self.send_ready(1)
+                        threading.Thread(target=delay_ready_on_name, daemon=True).start()
         except Exception: pass
 
     def _handle_slot_changed(self, msg):
@@ -1277,15 +1353,30 @@ class PikafishBot:
                 if player_id > 0:
                     name = self.player_names.get(player_id, "")
                     print(f"[TABLE] 👤 Ghế đối diện (slot={slot_id}): playerId={player_id}{f', name={name}' if name else ''}")
-                    if not self.board.is_playing and self.is_family_bot(name):
+                    if not self.board.is_playing and name and self.is_family_bot(name):
                         print(f"[AVOID] ⚠️ Đối thủ '{name}' là bot đồng đội! Rời bàn + giảm cược...")
                         self.leave_table()
                         self._lower_bet_level()
                         return
                     self._sit_alone_since = None
                     if not self.board.is_playing:
+                        if not name:
+                            # SLOT tới trước PLAYER_ENTERED → chưa biết tên, hoãn ready
+                            print(f"[TABLE] ⏳ Chưa có tên đối thủ (id={player_id}) → hoãn ready, chờ PLAYER_ENTERED...")
+                            self._pending_opp_ready = True
+                            return
+                        self._pending_opp_ready = False
                         def delay_ready_on_player():
-                            time.sleep(3.0)  
+                            time.sleep(3.0)
+                            if self.board.is_playing:
+                                return
+                            # Re-check family phòng trường hợp tên cập nhật muộn
+                            n2 = self.player_names.get(player_id, name)
+                            if self.is_family_bot(n2):
+                                print(f"[AVOID] ⚠️ Đối thủ '{n2}' là bot đồng đội (phát hiện muộn)! Rời bàn + giảm cược...")
+                                self.leave_table()
+                                self._lower_bet_level()
+                                return
                             self.send_ready(1)
                         threading.Thread(target=delay_ready_on_player, daemon=True).start()
                 else:
