@@ -126,8 +126,8 @@ WS_URL="wss://gamevh.net/ws/gameServer"
 GAME_URL="https://gamevh.net/play/othello/0"; LOGIN_URL="https://gamevh.net/login.jsp"
 
 # Tk tích hợp sẵn
-USER = os.environ.get("OTHELLO_USER", "nguyen8").strip()
-PWWD = os.environ.get("OTHELLO_PW", "abc123")
+USER = os.environ.get("OTHELLO_USER", "arena7").strip()
+PWWD = os.environ.get("OTHELLO_PW", "nhat123456")
 
 VERSION="5.0.2"; GAME_ID="othello"
 TARGET_BET=int(os.environ.get("OTHELLO_BET","300"))
