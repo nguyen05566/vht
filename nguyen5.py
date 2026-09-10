@@ -601,6 +601,8 @@ class CaroBot:
         self.players = {}; self.nickname = ""; self.token = 0; self.cookie = ""
         self.place_path = "Lobby.caro.0"; self.lock_key = ""
         self.start_time = None; self.last_activity = time.time(); self._running = True
+        self._lobby_idle_since = None   # ANTISTUCK: mốc thời gian đứng sảnh
+        self._ghost_table_since = None  # ANTISTUCK: mốc ngồi bàn không chơi
         self.wins = 0; self.losses = 0; self.draws = 0; self.total_games = 0
         self.pending_move = False
         self.bet_amts = []; self._resolved_bet_id = None
@@ -1185,6 +1187,38 @@ class CaroBot:
                 self.save_stats(); self.stop(); return
             
             if not self.ws or self.ws.close_code is not None: continue
+
+            # ===== ANTISTUCK: đứng sảnh quá 90s không có bàn -> reset cờ kẹt, nạp lại cược =====
+            try:
+                if not self.is_playing and not self.in_table:
+                    if self._lobby_idle_since is None:
+                        self._lobby_idle_since = time.time()
+                    elif time.time() - self._lobby_idle_since > 90:
+                        log.warning("[ANTISTUCK] >90s đứng sảnh không bàn -> reset cờ (_joining/_rejoining/_bet_amts), ENTER lại sảnh")
+                        self._lobby_idle_since = time.time()
+                        self._joining_table = False
+                        self._rejoining = False
+                        self._want_rejoin = False
+                        self.table_id = None
+                        self._bet_amts_loaded = False
+                        self._resolved_bet_id = None
+                        await self.send(self.make_enter(self.place_path))
+                else:
+                    self._lobby_idle_since = None
+            except Exception: pass
+
+            # ===== GHOST TABLE: ngồi bàn >5 phút không chơi -> hỏi server xác nhận =====
+            try:
+                if self.in_table and not self.is_playing:
+                    if self._ghost_table_since is None:
+                        self._ghost_table_since = time.time()
+                    elif time.time() - self._ghost_table_since > 300:
+                        log.info("[ANTISTUCK] Ngồi bàn >300s không chơi -> GET_TABLE xác nhận với server")
+                        self._ghost_table_since = time.time()
+                        await self.send(self.make_get_table())
+                else:
+                    self._ghost_table_since = None
+            except Exception: pass
             
             try:
                 if (self.opponent_gone_at is not None and self.is_playing
@@ -1457,19 +1491,12 @@ class CaroBot:
         self.start_time = time.time(); self._running = True
         log.info(f"{'='*50}")
 
-        # ===== CHUYỂN X 50% NGAY KHI KHỞI ĐỘNG (TRƯỚC KHI VÀO BÀN) =====
-        log.info("[TRANSFER] 🔄 Chuyển 50% x cho xxxx trước khi vào bàn...")
+        # ===== CHUYỂN X 20% VỀ 10055407 NGAY KHI KHỞI ĐỘNG (SỬA LỖI asyncio.run(Thread)) =====
+        log.info("[TRANSFER] 🔄 Chuyển 20% x về 10055407 trước khi vào bàn...")
         try:
-            import asyncio
             from transfer_xu_bot import transfer_xu_async
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(None, lambda: asyncio.run(
-                transfer_xu_async(USER, PWWD, dest_id=10055407, percent=20)
-            ))
-            if result:
-                log.info("[TRANSFER] ✅ Chuyển x thành công!")
-            else:
-                log.info("[TRANSFER] ⚠️ Chuyển x thất bại, tiếp tục chạy bot...")
+            transfer_xu_async(USER, PWWD, dest_id=10055407, percent=20)
+            log.info("[TRANSFER] ✅ Đã đẩy tác vụ chuyển 20% x về 10055407 (thread nền)")
         except ImportError as ie:
             log.error(f"[TRANSFER] ❌ Không tìm thấy transfer_xu_bot: {ie}")
         except Exception as e:
