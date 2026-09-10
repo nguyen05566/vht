@@ -133,6 +133,8 @@ jobs:
           SCAN_INTERVAL: '25'
           SCAN_MAX_ROOMS: '4'
           SCAN_ANY_BET: '0'
+          # Chờ đối thủ trong bàn trước khi rời (trước hardcode 30s)
+          SIT_ALONE_SECONDS: '300'
           # TẮT mọi nguồn cấp xu ngoài (nguyenpy2 lỗi; không fund trong process)
           FUND_ACCOUNT: ''
           FUND_PASSWD: ''

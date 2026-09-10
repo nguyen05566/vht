@@ -104,6 +104,10 @@ BOT_BLOCK_SOFTWARE  = '0'
 BOT_TABLE_PASSWORD  = ''
 BOT_BET_XU          = _env_int("BOT_BET_XU", 1000)   # mức cược bàn bot tạo: 1000xu (create-only)
 
+# Chờ đối thủ trong bàn (chưa có ván): hết thời gian mới rời bàn / tạo lại.
+# Trước đây hardcode ~30s — quá ngắn, bàn bot biến mất trước khi người vào.
+SIT_ALONE_SECONDS = _env_float("SIT_ALONE_SECONDS", 300)  # mặc định 5 phút
+
 # ---- TÌM BÀN CÓ SẴN Ở CÁC SẢNH (JOIN người chơi thay vì chỉ tạo bàn chờ) ----
 # Dựa trên giao thức client web gamevh: LIST_ZONE_ROOM (412) -> LIST_ZONE_TABLE (411)
 # -> GET_TABLE_DATA (414) -> ENTER_PLACE vào bàn. Bot sẽ đi từng sảnh có người,
@@ -1960,7 +1964,7 @@ class AccountSession:
                         threading.Thread(target=delay_ready_on_player, daemon=True).start()
                 else:
                     if not self.board.is_playing and self.opponent_player_id() is None:
-                        self._log("TABLE", "🚪 Không còn đối thủ. Đếm ngược 30s chờ người chơi...")
+                        self._log("TABLE", f"🚪 Không còn đối thủ. Đếm ngược {int(SIT_ALONE_SECONDS)}s chờ người chơi...")
                         self._sit_alone_since = time.time()
         except Exception: pass
 
@@ -2300,15 +2304,25 @@ class AccountSession:
                 if self.board.is_playing:
                     self._sit_alone_since = None
                 else:
+                    # Trong bàn, chưa có ván: chờ đối thủ tối đa SIT_ALONE_SECONDS rồi mới rời
                     if self.in_game and not self._joining_table:
                         opp_id = self.opponent_player_id()
-                        if opp_id is not None:
+                        if opp_id is None:
+                            if self._sit_alone_since is None:
+                                self._sit_alone_since = time.time()
+                                self._log("TABLE", f"⏳ Chờ người vào bàn (tối đa {int(SIT_ALONE_SECONDS)}s)...")
+                            else:
+                                elapsed = time.time() - self._sit_alone_since
+                                if elapsed >= SIT_ALONE_SECONDS:
+                                    self._log("TABLE", f"⏱️ Đã chờ {int(elapsed)}s không có người -> rời bàn, tạo bàn mới")
+                                    self.leave_table()
+                        else:
                             self._sit_alone_since = None
 
-                # Sau ENTER_PLACE lỗi: 60s không vào ván -> bỏ bàn cũ, tạo bàn mới
+                # Sau ENTER_PLACE lỗi: lâu không vào ván -> bỏ bàn cũ, tạo bàn mới
                 if (self._enter_fail_at and self.in_game and not self.board.is_playing
-                        and time.time() - self._enter_fail_at > 60):
-                    self._log("TABLE", "Chờ 60s không vào được ván nào -> bỏ bàn cũ, tạo bàn mới")
+                        and time.time() - self._enter_fail_at > max(60.0, SIT_ALONE_SECONDS)):
+                    self._log("TABLE", f"Chờ {int(max(60.0, SIT_ALONE_SECONDS))}s không vào được ván nào -> bỏ bàn cũ, tạo bàn mới")
                     self._enter_fail_at = 0.0
                     self.leave_table()
 
@@ -2449,6 +2463,7 @@ def main():
     print(f"  Runtime        : {RUNTIME_HOURS} giờ", flush=True)
     print(f"  Login stagger  : {LOGIN_STAGGER_MIN:.0f}-{LOGIN_STAGGER_MAX:.0f}s giữa các acc", flush=True)
     print(f"  Sniff mode     : {'BẬT (log cực lớn!)' if WS_SNIFF_MODE else 'tắt'}", flush=True)
+    print(f"  Chờ người vào : {int(SIT_ALONE_SECONDS)}s (SIT_ALONE_SECONDS) rồi mới rời bàn", flush=True)
     print("  Cấp xu         : " + (f"BẬT - {FUND_ACCOUNT} cấp {FUND_AMOUNT:,} xu/nick "
                                       f"(ngưỡng số dư < {FUND_MIN_BALANCE:,}; 0 = luôn cấp)"
                                       if FUNDER.enabled else "tắt (đặt FUND_ACCOUNT + FUND_PASSWD để bật)"), flush=True)
