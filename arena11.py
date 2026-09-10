@@ -5,7 +5,7 @@
 ║  Engine: Embryo Caro6 v1.2.3 (Linux Native)                        ║
 ║  Mục đích:                                                       ║
 ║  - Chơi Caro tự động trên gamevh.net                             ║
-║  - THÍ NGHIỆM HUNT: ngồi sảnh, dò bàn 10k→100k rồi vào chơi  ║
+║  - HUNT: dò bàn 10k→100k; hết ván đổi tên (no-dot) rồi hunt lại ║
 ║  - Monitor SET_TURN packets, phát hiện timer reset bug           ║
 ║  - SET_READY handling chính xác                                   ║
 ╚══════════════════════════════════════════════════════════════════════╝
@@ -74,14 +74,16 @@ VN_TEN_KHONG_DAU = [
 ]
 
 def generate_random_full_name() -> str:
-    """Tên VN ngẫu nhiên + chèn 1 dấu '.' (marker nhận diện đồng đội, thống nhất arena/zaro)."""
+    """arena11: tên VN ngẫu nhiên, KHÔNG dấu chấm (tránh false-positive family + đổi tên mỗi ván)."""
     has_accent = random.choice([True, False])
     name_list = VN_TEN_DAU if has_accent else VN_TEN_KHONG_DAU
-    name = random.choice(name_list)
-    if len(name) >= 2:
-        pos = random.randint(1, len(name) - 1)
-        name = name[:pos] + "." + name[pos:]
-    return name
+    # Đôi khi ghép 2 tiếng cho đỡ trùng (vẫn không có '.')
+    if random.random() < 0.35:
+        a = random.choice(name_list)
+        b = random.choice(name_list)
+        if a != b:
+            return f"{a} {b}"
+    return random.choice(name_list)
 
 
 # ==================== NHẬN DIỆN ĐỒNG ĐỘI (thống nhất arena + zaro) ====================
@@ -460,7 +462,9 @@ HUNT_MAX_ROOMS = int(os.environ.get("CARO_HUNT_MAX_ROOMS", "8") or 8)
 HUNT_MAX_CHECKS = int(os.environ.get("CARO_HUNT_MAX_CHECKS", "6") or 6)
 # filter LIST_ZONE_TABLE: 0=all, 1=chưa đầy, 2=chưa chơi, 3=đang chơi
 HUNT_TABLE_FILTER = int(os.environ.get("CARO_HUNT_FILTER", "1") or 1)
-HUNT_LEAVE_AFTER = os.environ.get("CARO_HUNT_LEAVE_AFTER", "0") == "1"  # 0=Ở LẠI chơi; 1=hết ván về sảnh dò tiếp
+# arena11 riêng: hết ván → rời bàn + đổi tên (no-dot) + hunt lại
+HUNT_LEAVE_AFTER = os.environ.get("CARO_HUNT_LEAVE_AFTER", "1") == "1"  # mặc định 1 cho arena11
+HUNT_RENAME_AFTER = os.environ.get("CARO_HUNT_RENAME_AFTER", "1") == "1"  # 1=đổi FULL_NAME sau mỗi ván
 HUNT_AVOID_FAMILY = os.environ.get("CARO_HUNT_AVOID_FAMILY", "0") == "1"  # 0=không tránh family khi hunt
 HUNT_TABLE_COOLDOWN = float(os.environ.get("CARO_HUNT_COOLDOWN", "180") or 180)
 HUNT_EMPTY_LEAVE_S = float(os.environ.get("CARO_HUNT_EMPTY_S", "90") or 90)  # ngồi 1 mình quá N giây mới về sảnh
@@ -1035,18 +1039,18 @@ class CaroBot:
         if reason:
             log.info(f"[HUNT] 🔓 Mở khóa dò bàn ({reason})")
 
-    def _can_leave_table(self, reason: str = "") -> bool:
-        if self.is_playing:
+    def _can_leave_table(self, reason: str = "", force: bool = False) -> bool:
+        if self.is_playing and not force:
             log.info(f"[HUNT] Đang trong ván — không rời bàn ({reason})")
             return False
-        if time.time() < getattr(self, "_join_lock_until", 0):
+        if (not force) and time.time() < getattr(self, "_join_lock_until", 0):
             log.info(f"[HUNT] Vừa vào bàn — bỏ qua leave ({reason})")
             return False
         return True
 
-    async def leave_to_lobby_and_hunt(self, reason: str = ""):
+    async def leave_to_lobby_and_hunt(self, reason: str = "", force: bool = False):
         """Rời bàn (nếu có) về sảnh gốc rồi bắt đầu/tiếp tục dò bàn mục tiêu."""
-        if not self._can_leave_table(reason):
+        if not self._can_leave_table(reason, force=force):
             return
         log.info(f"[HUNT] 🚪 Về sảnh dò bàn {HUNT_BETS} xu ({reason})")
         if self.table_id:
@@ -1785,13 +1789,38 @@ class CaroBot:
 
         if self._table_lost_at is not None:
             self._table_lost_at = None
-            await asyncio.sleep(2)
-            if HUNT_MODE:
-                await self.leave_to_lobby_and_hunt("table lost @gameover")
+            await asyncio.sleep(1)
+            if HUNT_MODE and (HUNT_LEAVE_AFTER or HUNT_RENAME_AFTER):
+                await self.rename_after_game_and_rehunt("table lost")
+            elif HUNT_MODE:
+                await self.leave_to_lobby_and_hunt("table lost @gameover", force=True)
             else:
                 await self.create_new_table()
             return
 
+        # arena11 hunt: hết ván → (kick nếu thua) → rời bàn → đổi tên no-dot → hunt lại
+        if HUNT_MODE and (HUNT_LEAVE_AFTER or HUNT_RENAME_AFTER):
+            if bot_lost:
+                winner_sid = next((sid for sid, result in results.items()
+                                   if sid != self.slot and sid >= 0 and result in (1, 11)), None)
+                if winner_sid is None:
+                    winner_sid = next((sid for sid in self.players
+                                       if sid != self.slot and sid >= 0), None)
+                winner = self.players.get(winner_sid) if winner_sid is not None else None
+                winner_id = winner.get('id') if winner else None
+                if winner_id is not None:
+                    log.info(f"[BOT] Bot thua; kick {winner.get('name', winner_id)} rồi đổi tên + hunt...")
+                    asyncio.create_task(self._delay_kick(winner_id, 3.0))
+                    await asyncio.sleep(5.0)
+                else:
+                    await asyncio.sleep(1.5)
+            else:
+                await asyncio.sleep(1.5)
+            if not self.is_playing:
+                await self.rename_after_game_and_rehunt("gameover")
+            return
+
+        # create-mode / stay-mode cũ
         if bot_lost:
             winner_sid = next((sid for sid, result in results.items()
                                if sid != self.slot and sid >= 0 and result in (1, 11)), None)
@@ -1803,33 +1832,17 @@ class CaroBot:
             if winner_id is not None:
                 log.info(f"[BOT] Bot thua; kick người thắng {winner.get('name', winner_id)} sau 5 giây...")
                 asyncio.create_task(self._delay_kick(winner_id, 5.0))
-                if HUNT_MODE and HUNT_LEAVE_AFTER:
-                    async def _kick_then_hunt():
-                        await asyncio.sleep(8.0)
-                        if not self.is_playing:
-                            self._unlock_seat("gameover-lose")
-                            await self.leave_to_lobby_and_hunt("gameover-lose")
-                    asyncio.create_task(_kick_then_hunt())
-                else:
-                    # Thua + kick xong vẫn ở lại bàn chờ ván mới — không hunt
-                    self._seated = True
-                    self.in_table = True
-                    self._stop_hunt_activity("lose stay")
+                self._seated = True
+                self.in_table = True
+                self._stop_hunt_activity("lose stay")
                 return
             log.warning("[BOT] Bot thua nhưng không tìm thấy playerId người thắng; chuyển sang sẵn sàng")
 
-        # Mặc định Ở LẠI BÀN chơi tiếp (HUNT_LEAVE_AFTER=0). Chỉ leave khi bật env=1.
-        if HUNT_MODE and HUNT_LEAVE_AFTER:
-            log.info("[HUNT] Hết ván → về sảnh dò bàn tới 100k tiếp (LEAVE_AFTER=1)")
-            await asyncio.sleep(2)
-            self._unlock_seat("gameover leave_after")
-            await self.leave_to_lobby_and_hunt("gameover")
-        else:
-            log.info("[HUNT] Hết ván → Ở LẠI BÀN, ready sau 5s (không dò bàn nữa)")
-            self._seated = True
-            self.in_table = True
-            self._stop_hunt_activity("gameover stay")
-            asyncio.create_task(self._delay_ready(5.0))
+        log.info("[BOT] Ở lại bàn, ready sau 5s")
+        self._seated = True
+        self.in_table = True
+        self._stop_hunt_activity("gameover stay")
+        asyncio.create_task(self._delay_ready(5.0))
 
     async def handle_kick(self, r: BinaryReader):
         status = r.i8(); content = r.read_utf()
@@ -2060,9 +2073,39 @@ class CaroBot:
         else:
             await self.create_new_table()
 
+    def _session_from_cookie(self) -> requests.Session:
+        """Tái dùng cookie login để đổi tên giữa các ván (không login lại)."""
+        session = requests.Session()
+        ua = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/139.0 Safari/537.36")
+        session.headers.update({
+            'User-Agent': ua,
+            'Accept-Language': 'vi-VN,vi;q=0.9,en;q=0.7',
+        })
+        if self.cookie:
+            # cookie string "k=v; k2=v2"
+            for part in self.cookie.split(';'):
+                part = part.strip()
+                if not part or '=' not in part:
+                    continue
+                k, v = part.split('=', 1)
+                session.cookies.set(k.strip(), v.strip(), domain='gamevh.net', path='/')
+        return session
+
     def update_random_full_name(self, session: requests.Session) -> Dict:
+        """Đổi FULL_NAME — arena11: tên KHÔNG dấu chấm."""
         edit_url = 'https://gamevh.net/com/ftl/game/profile/update_profile.jsp'
+        # tránh trùng tên cũ
+        old_hint = ''
         new_name = generate_random_full_name()
+        for _ in range(5):
+            candidate = generate_random_full_name()
+            if candidate and candidate != old_hint and '.' not in candidate:
+                new_name = candidate
+                break
+        # ép strip mọi dấu chấm nếu generator lỡ
+        new_name = new_name.replace('.', '').strip() or generate_random_full_name().replace('.', '')
+
         page = session.get(edit_url, timeout=15, allow_redirects=True)
         action, data = self._read_profile_form(page.text, page.url)
         if not action or data is None:
@@ -2070,6 +2113,9 @@ class CaroBot:
             return {'ok': False, 'new_full_name': new_name, 'error': 'form_not_found'}
 
         old_name = data.get('FULL_NAME', '')
+        # regenerate if same as old
+        if new_name == (old_name or '').strip():
+            new_name = generate_random_full_name().replace('.', '').strip()
         data['FULL_NAME'] = new_name
         data['OLD_PWD'] = PWWD
         data['SAVE'] = '\uf046'
@@ -2084,10 +2130,84 @@ class CaroBot:
         verified_name = (verify_data or {}).get('FULL_NAME')
         ok = verified_name == new_name
         if ok:
-            log.info(f'[Identity] FULL_NAME: {old_name!r} -> {new_name!r}')
+            log.info(f'[Identity] FULL_NAME: {old_name!r} -> {new_name!r} (no-dot)')
         else:
             log.warning(f'[Identity] FULL_NAME verify failed: expected={new_name!r}, actual={verified_name!r}')
-        return {'ok': ok, 'old_full_name': old_name, 'new_full_name': new_name}
+        return {'ok': ok, 'old_full_name': old_name, 'new_full_name': new_name if ok else (verified_name or new_name)}
+
+    def rename_display_name_sync(self) -> Dict:
+        """Đổi tên hiển thị bằng cookie hiện tại (gọi từ executor)."""
+        try:
+            session = self._session_from_cookie()
+            # cookie có thể hết hạn → thử login nhanh
+            probe = session.get('https://gamevh.net/com/ftl/game/profile/update_profile.jsp',
+                                timeout=12, allow_redirects=True)
+            if 'login.jsp' in (probe.url or ''):
+                log.info('[Identity] Cookie hết hạn → login lại để đổi tên')
+                session = requests.Session()
+                ua = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/139.0 Safari/537.36")
+                session.headers.update({'User-Agent': ua, 'Accept-Language': 'vi-VN,vi;q=0.9'})
+                session.get('https://gamevh.net/login.jsp', timeout=10)
+                resp = session.post(
+                    'https://gamevh.net/login.jsp', timeout=10,
+                    data={'redirect': '/', 'USER_NAME': USER, 'PASSWORD': PWWD,
+                          'AUTO_LOGIN': 'true', 'LOGIN': 'Đăng nhập'},
+                    headers={'Origin': 'https://gamevh.net',
+                             'Referer': 'https://gamevh.net/login.jsp',
+                             'Content-Type': 'application/x-www-form-urlencoded'},
+                    allow_redirects=True)
+                if 'login.jsp' in resp.url:
+                    return {'ok': False, 'error': 'relogin_failed'}
+                self.cookie = '; '.join(f'{k}={v}' for k, v in session.cookies.items())
+            result = self.update_random_full_name(session)
+            # refresh cookie if session advanced
+            if session.cookies:
+                self.cookie = '; '.join(f'{k}={v}' for k, v in session.cookies.items())
+            return result
+        except Exception as e:
+            log.warning(f'[Identity] rename error: {e}')
+            return {'ok': False, 'error': str(e)}
+
+    async def rename_after_game_and_rehunt(self, reason: str = "gameover"):
+        """Hết ván: rời bàn → đổi tên (no-dot) → về sảnh hunt bàn mới."""
+        if self.is_playing:
+            return
+        log.info(f"[HUNT] 🏁 Hết ván → rời bàn + đổi tên + hunt lại ({reason})")
+        # Blacklist + unlock + leave
+        self.is_playing = False
+        self.ready = False
+        self._join_lock_until = 0.0
+        tid = self.table_id
+        if tid:
+            self._blacklist_table(tid, reason)
+        self._unlock_seat(reason)
+        self.in_table = False
+        self.table_id = None
+        self.players = {}
+        self.player_slot_by_id = {}
+        self.slot = -1
+        self._joining_table = False
+        self._join_is_scan = False
+        self._scan_state = None
+        self._scan_candidates = []
+        self._scan_rooms = []
+
+        # Đổi tên HTTP (thread pool) trước khi vào sảnh — tên mới áp cho ván sau
+        if HUNT_RENAME_AFTER:
+            try:
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None, self.rename_display_name_sync)
+                if result.get('ok'):
+                    log.info(f"[Identity] ✅ Đã đổi tên → {result.get('new_full_name')!r}")
+                else:
+                    log.warning(f"[Identity] ⚠️ Đổi tên thất bại: {result}")
+            except Exception as e:
+                log.warning(f"[Identity] ⚠️ rename_after_game: {e}")
+            await asyncio.sleep(0.8)
+
+        # Về sảnh hunt
+        await self.leave_to_lobby_and_hunt(f"{reason}+rename", force=True)
 
     @staticmethod
     def _extract_profile_avatar(page_text: str) -> Optional[int]:
@@ -2210,6 +2330,7 @@ class CaroBot:
         log.info(f"User: {USER} | Runtime: {RUNTIME}s | Mode: {CARO_MODE}")
         if HUNT_MODE:
             log.info(f"HUNT bets={HUNT_BETS} interval={HUNT_INTERVAL}s pause={HUNT_PAUSE}s")
+            log.info(f"HUNT leave_after={int(HUNT_LEAVE_AFTER)} rename_after={int(HUNT_RENAME_AFTER)} (tên KHÔNG dấu chấm)")
         log.info(f"Engine: Embryo v{EMBRYO_VERSION}")
         log.info("=" * 60)
 
