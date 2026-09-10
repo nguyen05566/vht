@@ -5,7 +5,7 @@
 ║  Engine: Embryo Caro6 v1.2.3 (Linux Native)                        ║
 ║  Mục đích:                                                       ║
 ║  - Chơi Caro tự động trên gamevh.net                             ║
-║  - HUNT: dò bàn 10k→100k; hết ván đổi tên (no-dot) rồi hunt lại ║
+║  - HUNT: hết ván đóng WS + đổi tên/avatar + WS mới + hunt lại   ║
 ║  - Monitor SET_TURN packets, phát hiện timer reset bug           ║
 ║  - SET_READY handling chính xác                                   ║
 ╚══════════════════════════════════════════════════════════════════════╝
@@ -462,9 +462,11 @@ HUNT_MAX_ROOMS = int(os.environ.get("CARO_HUNT_MAX_ROOMS", "8") or 8)
 HUNT_MAX_CHECKS = int(os.environ.get("CARO_HUNT_MAX_CHECKS", "6") or 6)
 # filter LIST_ZONE_TABLE: 0=all, 1=chưa đầy, 2=chưa chơi, 3=đang chơi
 HUNT_TABLE_FILTER = int(os.environ.get("CARO_HUNT_FILTER", "1") or 1)
-# arena11 riêng: hết ván → rời bàn + đổi tên (no-dot) + hunt lại
-HUNT_LEAVE_AFTER = os.environ.get("CARO_HUNT_LEAVE_AFTER", "1") == "1"  # mặc định 1 cho arena11
-HUNT_RENAME_AFTER = os.environ.get("CARO_HUNT_RENAME_AFTER", "1") == "1"  # 1=đổi FULL_NAME sau mỗi ván
+# arena11 riêng: hết ván → đóng WS → đổi tên+avatar → WS mới → hunt lại
+HUNT_LEAVE_AFTER = os.environ.get("CARO_HUNT_LEAVE_AFTER", "1") == "1"  # mặc định 1
+HUNT_RENAME_AFTER = os.environ.get("CARO_HUNT_RENAME_AFTER", "1") == "1"  # đổi FULL_NAME
+HUNT_AVATAR_AFTER = os.environ.get("CARO_HUNT_AVATAR_AFTER", "1") == "1"  # đổi avatar
+HUNT_WS_RESTART_AFTER = os.environ.get("CARO_HUNT_WS_RESTART", "1") == "1"  # restart websocket mỗi ván
 HUNT_AVOID_FAMILY = os.environ.get("CARO_HUNT_AVOID_FAMILY", "0") == "1"  # 0=không tránh family khi hunt
 HUNT_TABLE_COOLDOWN = float(os.environ.get("CARO_HUNT_COOLDOWN", "180") or 180)
 HUNT_EMPTY_LEAVE_S = float(os.environ.get("CARO_HUNT_EMPTY_S", "90") or 90)  # ngồi 1 mình quá N giây mới về sảnh
@@ -829,6 +831,8 @@ class CaroBot:
         self._sit_alone_since = None
         self._join_lock_until = 0.0      # chặn leave/hunt ngay sau khi join
         self._table_cooldown = {}       # table_id -> expire ts
+        self._ws_restart_requested = False  # hết ván: đóng WS để đổi identity rồi vào lại
+        self._post_game_reason = ""
 
     def init_engine(self):
         if self.engine is not None: return self.embryo_available
@@ -2135,53 +2139,117 @@ class CaroBot:
             log.warning(f'[Identity] FULL_NAME verify failed: expected={new_name!r}, actual={verified_name!r}')
         return {'ok': ok, 'old_full_name': old_name, 'new_full_name': new_name if ok else (verified_name or new_name)}
 
-    def rename_display_name_sync(self) -> Dict:
-        """Đổi tên hiển thị bằng cookie hiện tại (gọi từ executor)."""
+    def _http_relogin_session(self) -> Optional[requests.Session]:
+        """Login HTTP mới, cập nhật cookie/token/player_id. Dùng trước mỗi vòng WS."""
         try:
-            session = self._session_from_cookie()
-            # cookie có thể hết hạn → thử login nhanh
-            probe = session.get('https://gamevh.net/com/ftl/game/profile/update_profile.jsp',
-                                timeout=12, allow_redirects=True)
-            if 'login.jsp' in (probe.url or ''):
-                log.info('[Identity] Cookie hết hạn → login lại để đổi tên')
-                session = requests.Session()
-                ua = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                      "(KHTML, like Gecko) Chrome/139.0 Safari/537.36")
-                session.headers.update({'User-Agent': ua, 'Accept-Language': 'vi-VN,vi;q=0.9'})
-                session.get('https://gamevh.net/login.jsp', timeout=10)
-                resp = session.post(
-                    'https://gamevh.net/login.jsp', timeout=10,
-                    data={'redirect': '/', 'USER_NAME': USER, 'PASSWORD': PWWD,
-                          'AUTO_LOGIN': 'true', 'LOGIN': 'Đăng nhập'},
-                    headers={'Origin': 'https://gamevh.net',
-                             'Referer': 'https://gamevh.net/login.jsp',
-                             'Content-Type': 'application/x-www-form-urlencoded'},
-                    allow_redirects=True)
-                if 'login.jsp' in resp.url:
-                    return {'ok': False, 'error': 'relogin_failed'}
-                self.cookie = '; '.join(f'{k}={v}' for k, v in session.cookies.items())
-            result = self.update_random_full_name(session)
-            # refresh cookie if session advanced
+            session = requests.Session()
+            ua = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/139.0 Safari/537.36")
+            session.headers.update({
+                'User-Agent': ua,
+                'Accept-Language': 'vi-VN,vi;q=0.9,en;q=0.7',
+            })
+            session.get('https://gamevh.net/login.jsp', timeout=10)
+            resp = session.post(
+                'https://gamevh.net/login.jsp', timeout=12,
+                data={'redirect': '/', 'USER_NAME': USER, 'PASSWORD': PWWD,
+                      'AUTO_LOGIN': 'true', 'LOGIN': 'Đăng nhập'},
+                headers={'Origin': 'https://gamevh.net',
+                         'Referer': 'https://gamevh.net/login.jsp',
+                         'Content-Type': 'application/x-www-form-urlencoded'},
+                allow_redirects=True)
+            if 'login.jsp' in (resp.url or ''):
+                log.error('[Identity] Relogin failed')
+                return None
+            self.cookie = '; '.join(f'{k}={v}' for k, v in session.cookies.items())
+            # token từ trang game
+            game_resp = session.get(GAME_URL, timeout=12)
+            page_html = game_resp.text
+            m = re.search(r'var\s+token\s*=\s*(-?\d+)', page_html)
+            if not m:
+                m = re.search(r'"token"\s*:\s*(-?\d+)', page_html)
+            if m:
+                self.token = int(m.group(1))
+            pid_m = re.search(r'var\s+currentPlayerId\s*=\s*(\d+)', page_html)
+            if pid_m:
+                self.player_id = int(pid_m.group(1))
+            nick_m = re.search(r'var\s+currentPlayerNickName\s*=\s*[\'\"]([^\'\"]+)[\'\"]', page_html)
+            if nick_m:
+                self.nickname = nick_m.group(1).strip() or self.nickname
+            # refresh cookie after game page
+            self.cookie = '; '.join(f'{k}={v}' for k, v in session.cookies.items())
+            log.info(f"[Identity] Relogin OK token={self.token} id={self.player_id} nick={self.nickname!r}")
+            return session
+        except Exception as e:
+            log.warning(f'[Identity] relogin error: {e}')
+            return None
+
+    def refresh_identity_sync(self) -> Dict:
+        """Đổi tên (no-dot) + avatar, rồi refresh token/cookie cho WS mới."""
+        out = {'ok': False, 'name': None, 'avatar': None}
+        try:
+            session = self._http_relogin_session()
+            if session is None:
+                # fallback cookie cũ
+                session = self._session_from_cookie()
+
+            if HUNT_RENAME_AFTER:
+                nr = self.update_random_full_name(session)
+                out['name'] = nr
+                if nr.get('ok'):
+                    log.info(f"[Identity] ✅ Tên mới: {nr.get('new_full_name')!r}")
+                else:
+                    log.warning(f"[Identity] ⚠️ Đổi tên fail: {nr}")
+
+            if HUNT_AVATAR_AFTER:
+                try:
+                    ar = self.update_random_avatar(session)
+                    out['avatar'] = ar
+                    if ar.get('ok'):
+                        log.info(f"[Identity] ✅ Avatar mới: builtin{ar.get('new_avatar')}")
+                    else:
+                        log.warning(f"[Identity] ⚠️ Đổi avatar fail: {ar}")
+                except Exception as e:
+                    log.warning(f"[Identity] avatar error: {e}")
+
+            # token/cookie sau khi đổi profile
             if session.cookies:
                 self.cookie = '; '.join(f'{k}={v}' for k, v in session.cookies.items())
-            return result
-        except Exception as e:
-            log.warning(f'[Identity] rename error: {e}')
-            return {'ok': False, 'error': str(e)}
+            try:
+                game_resp = session.get(GAME_URL, timeout=12)
+                page_html = game_resp.text
+                m = re.search(r'var\s+token\s*=\s*(-?\d+)', page_html)
+                if not m:
+                    m = re.search(r'"token"\s*:\s*(-?\d+)', page_html)
+                if m:
+                    self.token = int(m.group(1))
+                self.cookie = '; '.join(f'{k}={v}' for k, v in session.cookies.items())
+            except Exception:
+                pass
 
-    async def rename_after_game_and_rehunt(self, reason: str = "gameover"):
-        """Hết ván: rời bàn → đổi tên (no-dot) → về sảnh hunt bàn mới."""
-        if self.is_playing:
-            return
-        log.info(f"[HUNT] 🏁 Hết ván → rời bàn + đổi tên + hunt lại ({reason})")
-        # Blacklist + unlock + leave
+            out['ok'] = True
+            out['token'] = self.token
+            out['cookie_len'] = len(self.cookie or '')
+            return out
+        except Exception as e:
+            log.warning(f'[Identity] refresh_identity error: {e}')
+            out['error'] = str(e)
+            return out
+
+    def _reset_table_state(self, reason: str = ""):
+        """Xóa state bàn/hunt trước khi reconnect WS."""
         self.is_playing = False
         self.ready = False
+        self.pending_move = False
+        self._moving = False
         self._join_lock_until = 0.0
         tid = self.table_id
         if tid:
-            self._blacklist_table(tid, reason)
-        self._unlock_seat(reason)
+            try:
+                self._blacklist_table(tid, reason or "reset")
+            except Exception:
+                pass
+        self._seated = False
         self.in_table = False
         self.table_id = None
         self.players = {}
@@ -2189,25 +2257,48 @@ class CaroBot:
         self.slot = -1
         self._joining_table = False
         self._join_is_scan = False
+        self._rejoining = False
+        self._want_rejoin = False
+        self._enter_kind = None
         self._scan_state = None
         self._scan_candidates = []
         self._scan_rooms = []
+        self._scan_checks = 0
+        self._scan_next_at = 0.0
+        self._sit_alone_since = None
+        self._table_lost_at = None
+        self.opponent_gone_at = None
+        self.place_path = f"{ZONE_BASE}.0"
+        self._current_room_id = 0
+        self._bet_amts_loaded = False
+        self._resolved_bet_id = None
+        self.bet_amts = []
+        try:
+            self.board = Board(width=15, height=19)
+        except Exception:
+            pass
 
-        # Đổi tên HTTP (thread pool) trước khi vào sảnh — tên mới áp cho ván sau
-        if HUNT_RENAME_AFTER:
+    async def request_ws_restart_after_game(self, reason: str = "gameover"):
+        """Hết ván: đánh dấu restart WS. run() sẽ đóng socket → đổi tên/avatar → login WS mới → hunt."""
+        if self.is_playing:
+            return
+        log.info(f"[HUNT] 🏁 Hết ván → đóng WebSocket, đổi tên+avatar, vào lại ({reason})")
+        self._post_game_reason = reason
+        self._reset_table_state(reason)
+        self._stop_hunt_activity("ws-restart")
+        self._ws_restart_requested = True
+        # Đóng WS hiện tại → async for thoát → run() xử lý identity + reconnect
+        ws = self.ws
+        self.ws = None
+        if ws is not None:
             try:
-                result = await asyncio.get_event_loop().run_in_executor(
-                    None, self.rename_display_name_sync)
-                if result.get('ok'):
-                    log.info(f"[Identity] ✅ Đã đổi tên → {result.get('new_full_name')!r}")
-                else:
-                    log.warning(f"[Identity] ⚠️ Đổi tên thất bại: {result}")
+                await ws.close()
             except Exception as e:
-                log.warning(f"[Identity] ⚠️ rename_after_game: {e}")
-            await asyncio.sleep(0.8)
+                log.warning(f"[HUNT] ws.close: {e}")
 
-        # Về sảnh hunt
-        await self.leave_to_lobby_and_hunt(f"{reason}+rename", force=True)
+    async def rename_after_game_and_rehunt(self, reason: str = "gameover"):
+        """Tương thích cũ: chuyển sang chu trình restart WS đầy đủ."""
+        await self.request_ws_restart_after_game(reason)
 
     @staticmethod
     def _extract_profile_avatar(page_text: str) -> Optional[int]:
@@ -2330,7 +2421,10 @@ class CaroBot:
         log.info(f"User: {USER} | Runtime: {RUNTIME}s | Mode: {CARO_MODE}")
         if HUNT_MODE:
             log.info(f"HUNT bets={HUNT_BETS} interval={HUNT_INTERVAL}s pause={HUNT_PAUSE}s")
-            log.info(f"HUNT leave_after={int(HUNT_LEAVE_AFTER)} rename_after={int(HUNT_RENAME_AFTER)} (tên KHÔNG dấu chấm)")
+            log.info(
+                f"HUNT leave={int(HUNT_LEAVE_AFTER)} rename={int(HUNT_RENAME_AFTER)} "
+                f"avatar={int(HUNT_AVATAR_AFTER)} ws_restart={int(HUNT_WS_RESTART_AFTER)} (tên no-dot)"
+            )
         log.info(f"Engine: Embryo v{EMBRYO_VERSION}")
         log.info("=" * 60)
 
@@ -2356,9 +2450,36 @@ class CaroBot:
             log.warning(f"[TRANSFER] ❌ Lỗi chuyển xu: {e}")
 
         # WebSocket connection loop
+        # Mỗi ván (HUNT_WS_RESTART_AFTER): đóng WS → đổi tên+avatar → login lại → connect WS mới → hunt
+        first_connect = True
         while self.running:
             try:
-                log.info(f"Connecting to {WS_URL}...")
+                # Chỉ khi HẾT VÁN (flag) mới đổi tên/avatar + token trước WS mới
+                if self._ws_restart_requested:
+                    reason = self._post_game_reason or "gameover"
+                    log.info(f"[HUNT] 🔄 Phiên mới sau ván ({reason}): đổi tên+avatar + token...")
+                    self._ws_restart_requested = False
+                    self._post_game_reason = ""
+                    self._reset_table_state(reason)
+                    if HUNT_MODE and HUNT_WS_RESTART_AFTER and (HUNT_RENAME_AFTER or HUNT_AVATAR_AFTER):
+                        try:
+                            result = await asyncio.get_event_loop().run_in_executor(
+                                None, self.refresh_identity_sync)
+                            log.info(
+                                f"[Identity] refresh ok={result.get('ok')} "
+                                f"name={((result.get('name') or {}).get('new_full_name'))!r} "
+                                f"avatar={((result.get('avatar') or {}).get('new_avatar'))}"
+                            )
+                        except Exception as e:
+                            log.warning(f"[Identity] refresh failed: {e} → http_login fallback")
+                            await asyncio.get_event_loop().run_in_executor(None, self.http_login)
+                    else:
+                        # Vẫn refresh token nhẹ
+                        await asyncio.get_event_loop().run_in_executor(None, self.http_login)
+                    await asyncio.sleep(1.0)
+                first_connect = False
+
+                log.info(f"Connecting to {WS_URL}... (token={self.token})")
                 extra_headers = {}
                 if self.cookie:
                     extra_headers['Cookie'] = self.cookie
@@ -2370,6 +2491,7 @@ class CaroBot:
                     max_size=2**20,
                 ) as ws:
                     self.ws = ws
+                    self._ws_restart_requested = False
                     log.info("WebSocket connected!")
                     await self.send(self.make_login())
 
@@ -2377,7 +2499,11 @@ class CaroBot:
 
                     try:
                         async for msg in ws:
-                            if not self.running: break
+                            if not self.running:
+                                break
+                            if self._ws_restart_requested:
+                                log.info("[HUNT] WS restart flagged → đóng kết nối hiện tại")
+                                break
                             if isinstance(msg, bytes):
                                 await self.handle(msg)
                             elif isinstance(msg, str):
@@ -2385,14 +2511,23 @@ class CaroBot:
                     except websockets.exceptions.ConnectionClosed as e:
                         log.warning(f"Connection closed: {e}")
                     finally:
+                        self.ws = None
                         watchdog_task.cancel()
-                        try: await watchdog_task
-                        except asyncio.CancelledError: pass
+                        try:
+                            await watchdog_task
+                        except asyncio.CancelledError:
+                            pass
 
             except Exception as e:
                 log.error(f"WebSocket error: {e}")
 
-            if self.running:
+            if not self.running:
+                break
+
+            if self._ws_restart_requested:
+                log.info("[HUNT] Reconnect nhanh sau hết ván (0.5s)...")
+                await asyncio.sleep(0.5)
+            else:
                 log.info("Reconnecting in 5s...")
                 await asyncio.sleep(5)
 

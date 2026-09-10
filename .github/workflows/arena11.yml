@@ -68,6 +68,8 @@ jobs:
           CARO_HUNT_PAUSE: '25'
           CARO_HUNT_LEAVE_AFTER: '1'
           CARO_HUNT_RENAME_AFTER: '1'
+          CARO_HUNT_AVATAR_AFTER: '1'
+          CARO_HUNT_WS_RESTART: '1'
           CARO_HUNT_AVOID_FAMILY: '0'
           CARO_HUNT_COOLDOWN: '180'
         run: |
