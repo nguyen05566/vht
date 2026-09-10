@@ -248,7 +248,7 @@ def ws_transfer(ws, dest_id, amount, timeout=12):
 
 
 # ==================== MAIN FUNCTION ====================
-def transfer_xu_sync(user, passwd, dest_id=10055407, percent=20):
+def transfer_xu_sync(user, passwd, dest_id=10055407, percent=0):
     """
     Chuyển X% xu từ tài khoản user về dest_id.
     Trả về True nếu thành công, False nếu thất bại.
