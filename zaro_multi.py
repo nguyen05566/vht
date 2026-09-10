@@ -97,11 +97,12 @@ MIN_MOVE_SECONDS = _env_float("MIN_MOVE_SECONDS", 0.2)
 KICK_MODE  = _env_str("KICK_MODE", "when_lose")
 KICK_DELAY = _env_float("KICK_DELAY", 5.0)
 
-BOT_MATCH_DURATION  = '10'
-BOT_TURN_DURATION   = '60'
-BOT_ACC_DURATION    = '0'
-BOT_BLOCK_SOFTWARE  = '0'
-BOT_TABLE_PASSWORD  = ''
+# matchDuration = phút/ván (UI: N'/ván). turnDuration = giây/nước (UI: Ns/nước).
+BOT_MATCH_DURATION  = _env_str("BOT_MATCH_DURATION", "5")    # 5 phút / ván
+BOT_TURN_DURATION   = _env_str("BOT_TURN_DURATION", "30")   # 30 giây / nước
+BOT_ACC_DURATION    = _env_str("BOT_ACC_DURATION", "0")
+BOT_BLOCK_SOFTWARE  = _env_str("BOT_BLOCK_SOFTWARE", "0")
+BOT_TABLE_PASSWORD  = _env_str("BOT_TABLE_PASSWORD", "")
 BOT_BET_XU          = _env_int("BOT_BET_XU", 1000)   # mức cược bàn bot tạo: 1000xu (create-only)
 
 # Chờ đối thủ trong bàn (chưa có ván): hết thời gian mới rời bàn / tạo lại.
@@ -1519,7 +1520,8 @@ class AccountSession:
         for arg_name, arg_value in args:
             data.extend(self.conn.pack_ascii(arg_name))
             data.extend(self.conn.pack_string(arg_value))
-        self._log("CREATE", f"🎯 Tạo bàn {BOT_BET_XU}xu, bet_id={bet_amt_id}")
+        self._log("CREATE", f"🎯 Tạo bàn {BOT_BET_XU}xu, bet_id={bet_amt_id}, "
+                            f"ván={BOT_MATCH_DURATION}' / nước={BOT_TURN_DURATION}s")
         if WS_SNIFF_MODE:
             self._log("WS-SNIFF", f"CREATE_RULE send: data_hex={bytes(data).hex()}")
         self.send_message("CREATE_RULE", bytes(data))
@@ -2464,6 +2466,7 @@ def main():
     print(f"  Login stagger  : {LOGIN_STAGGER_MIN:.0f}-{LOGIN_STAGGER_MAX:.0f}s giữa các acc", flush=True)
     print(f"  Sniff mode     : {'BẬT (log cực lớn!)' if WS_SNIFF_MODE else 'tắt'}", flush=True)
     print(f"  Chờ người vào : {int(SIT_ALONE_SECONDS)}s (SIT_ALONE_SECONDS) rồi mới rời bàn", flush=True)
+    print(f"  Thời gian bàn : {BOT_MATCH_DURATION}' /ván, {BOT_TURN_DURATION}s/nước", flush=True)
     print("  Cấp xu         : " + (f"BẬT - {FUND_ACCOUNT} cấp {FUND_AMOUNT:,} xu/nick "
                                       f"(ngưỡng số dư < {FUND_MIN_BALANCE:,}; 0 = luôn cấp)"
                                       if FUNDER.enabled else "tắt (đặt FUND_ACCOUNT + FUND_PASSWD để bật)"), flush=True)
