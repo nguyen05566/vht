@@ -509,10 +509,8 @@ CMD_MAP = {
     529: "MOVE", 533: "ASK_DRAW", 534: "SURRENDER", 535: "RETREAT",
 }
 
-# WS 323 CHANGE_NICK_NAME đổi USERNAME đăng nhập (không phải FULL_NAME hiển thị).
-# Payload reverse live: byte(0)+utf16(new)+int32(0)+ascii(password) → status=0.
-# Mặc định TẮT — bật CARO_WS_CHANGE_NICK=1 nếu thật sự cần đổi username login.
-WS_CHANGE_NICK = os.environ.get("CARO_WS_CHANGE_NICK", "0") == "1"
+# WS 323/324 chỉ map opcode — bot KHÔNG gọi đổi nick login / mật khẩu.
+# Chỉ đổi FULL_NAME (tên hiển thị) qua HTTP update_profile.
 
 
 # ======================== BINARY PROTOCOL ========================
@@ -856,7 +854,6 @@ class CaroBot:
         self._table_cooldown = {}       # table_id -> expire ts
         self._ws_restart_requested = False  # hết ván: đóng WS để đổi identity rồi vào lại
         self._post_game_reason = ""
-        self._pending_ws_nick = None  # optional: username mới qua WS 323
 
     def init_engine(self):
         if self.engine is not None: return self.embryo_available
@@ -936,26 +933,6 @@ class CaroBot:
         w = BinaryWriter(); w.write_command("LOGIN"); w.write_ascii(self.nickname)
         w.i32(self.token); w.write_ascii(VERSION); w.write_ascii(self.lock_key)
         w.write_ascii(GAME_ID); w.i8(1); return w.build()
-
-    def make_change_nick_name(self, new_nick: str, password: str = None) -> bytes:
-        """WS 323 CHANGE_NICK_NAME — đổi USERNAME đăng nhập (không phải FULL_NAME).
-
-        Protocol (probe live):
-          i8(0) + utf16(new_nick) + i32(0) + ascii(password)  → status=0
-        Response: i8 status + ascii new_nick (khi OK).
-        CẨN THẬN: sau khi đổi phải login bằng nick mới.
-        """
-        password = password if password is not None else PWWD
-        w = BinaryWriter()
-        w.write_command("CHANGE_NICK_NAME")
-        w.i8(0)
-        w.write_utf(new_nick)
-        w.i32(0)
-        w.write_ascii(password)
-        return w.build()
-
-    def make_get_nick_change_count(self) -> bytes:
-        w = BinaryWriter(); w.write_command("GET_NICK_CHANGE_COUNT"); return w.build()
 
     def make_enter(self, path: str, pw: str = "", mode: int = 1) -> bytes:
         w = BinaryWriter(); w.write_command("ENTER_PLACE"); w.write_ascii(path)
@@ -1340,8 +1317,6 @@ class CaroBot:
             elif cmd == "KICK_PLAYER": await self.handle_kick(r)
             elif cmd == "PLAYER_ENTERED": await self.handle_player_enter(r)
             elif cmd == "PLAYER_EXITED": await self.handle_player_exit(r)
-            elif cmd == "CHANGE_NICK_NAME": await self.handle_change_nick_name(r)
-            elif cmd == "GET_NICK_CHANGE_COUNT": await self.handle_nick_change_count(r)
         except Exception as e: log.error(f"Error {cmd}: {e}", exc_info=True)
 
     async def handle_login(self, r: BinaryReader):
@@ -1353,12 +1328,6 @@ class CaroBot:
                 if login_ok: await self.send(self.make_login())
                 return
             if r.remaining() > 0: self.lock_key = r.read_ascii()
-            # Optional WS đổi username login (CARO_WS_CHANGE_NICK=1) — mặc định tắt
-            if WS_CHANGE_NICK and getattr(self, "_pending_ws_nick", None):
-                new_nick = self._pending_ws_nick
-                self._pending_ws_nick = None
-                log.info(f"[Identity] WS CHANGE_NICK_NAME → {new_nick!r}")
-                await self.send(self.make_change_nick_name(new_nick, PWWD))
             await self.send(self.make_enter(self.place_path))
         else:
             log.error(f"LOGIN failed status={status}")
@@ -1948,40 +1917,6 @@ class CaroBot:
                 self.ready = True
                 await self.send(self.make_ready())
 
-    async def handle_change_nick_name(self, r: BinaryReader):
-        """Response WS 323: i8 status + ascii new_nick (nếu OK)."""
-        try:
-            status = r.i8()
-            new_nick = ""
-            if r.remaining() > 0:
-                try:
-                    new_nick = r.read_ascii()
-                except Exception:
-                    try:
-                        new_nick = r.read_utf()
-                    except Exception:
-                        new_nick = ""
-            if status == 0:
-                if new_nick:
-                    old = self.nickname
-                    self.nickname = new_nick
-                    log.info(f"[Identity] ✅ WS CHANGE_NICK_NAME OK {old!r} → {self.nickname!r}")
-                    log.warning("[Identity] Username login đã đổi — set CARO_USER / secrets cho nick mới")
-                else:
-                    log.info("[Identity] ✅ WS CHANGE_NICK_NAME OK (no nick in body)")
-            else:
-                log.warning(f"[Identity] ❌ WS CHANGE_NICK_NAME fail status={status} msg={new_nick!r}")
-        except Exception as e:
-            log.warning(f"[Identity] CHANGE_NICK parse: {e}")
-
-    async def handle_nick_change_count(self, r: BinaryReader):
-        try:
-            a = r.i8() if r.remaining() else 0
-            b = r.i8() if r.remaining() else 0
-            c = r.i8() if r.remaining() else 0
-            log.info(f"[Identity] GET_NICK_CHANGE_COUNT => {a},{b},{c}")
-        except Exception as e:
-            log.warning(f"[Identity] nick count parse: {e}")
 
     async def handle_player_enter(self, r: BinaryReader):
         place_level = r.i8()
@@ -2189,7 +2124,11 @@ class CaroBot:
         return session
 
     def update_random_full_name(self, session: requests.Session) -> Dict:
-        """Đổi FULL_NAME — arena11: tên KHÔNG dấu chấm."""
+        """Chỉ đổi FULL_NAME (tên hiển thị, no-dot).
+
+        Không đổi USER_NAME/NICK đăng nhập, không đổi mật khẩu.
+        OLD_PASSWORD trên form chỉ để xác nhận chủ TK (gửi pass hiện tại).
+        """
         edit_url = 'https://gamevh.net/com/ftl/game/profile/update_profile.jsp'
         # tránh trùng tên cũ
         old_hint = ''
@@ -2213,9 +2152,12 @@ class CaroBot:
         if new_name == (old_name or '').strip():
             new_name = generate_random_full_name().replace('.', '').strip()
         data['FULL_NAME'] = new_name
-        # Server form field là OLD_PASSWORD (không phải OLD_PWD) — verify live 2026-09-10
+        # OLD_PASSWORD = xác nhận chủ TK (KHÔNG đổi mật khẩu). Field form thật, không phải OLD_PWD.
         data['OLD_PASSWORD'] = PWWD
         data.pop('OLD_PWD', None)
+        # Không gửi field đổi nick/pass nếu form lỡ có
+        for _k in ('NICK_NAME', 'NEW_PASSWORD', 'CONFIRM_PASSWORD', 'PASSWORD', 'NEW_PWD'):
+            data.pop(_k, None)
         if not data.get('SAVE'):
             data['SAVE'] = '\uf046'
         response = session.post(
@@ -2295,7 +2237,7 @@ class CaroBot:
             return None
 
     def refresh_identity_sync(self) -> Dict:
-        """Đổi tên (no-dot) + avatar, rồi refresh token/cookie cho WS mới."""
+        """Đổi FULL_NAME (no-dot) + avatar only — không đổi login/password. Refresh token/cookie."""
         out = {'ok': False, 'name': None, 'avatar': None}
         try:
             session = self._http_relogin_session()
@@ -2304,20 +2246,13 @@ class CaroBot:
                 session = self._session_from_cookie()
 
             if HUNT_RENAME_AFTER:
-                # FULL_NAME hiển thị = HTTP update_profile (OLD_PASSWORD). WS 323 là username login.
+                # CHỈ FULL_NAME (tên hiển thị) — không đổi username login / mật khẩu
                 nr = self.update_random_full_name(session)
                 out['name'] = nr
                 if nr.get('ok'):
-                    log.info(f"[Identity] ✅ FULL_NAME (HTTP): {nr.get('new_full_name')!r}")
+                    log.info(f"[Identity] ✅ FULL_NAME only: {nr.get('new_full_name')!r}")
                 else:
                     log.warning(f"[Identity] ⚠️ FULL_NAME HTTP fail: {nr}")
-                if WS_CHANGE_NICK:
-                    # Sinh nick login ASCII ngắn; CẨN THẬN — đổi username
-                    import string as _string
-                    cand = 'h' + ''.join(random.choices(_string.ascii_lowercase + _string.digits, k=7))
-                    self._pending_ws_nick = cand
-                    out['ws_nick_pending'] = cand
-                    log.warning(f"[Identity] CARO_WS_CHANGE_NICK=1 → sẽ đổi login nick WS → {cand!r}")
 
             if HUNT_AVATAR_AFTER:
                 try:
