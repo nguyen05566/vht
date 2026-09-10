@@ -1,0 +1,147 @@
+[INIT] candidates unique=35311 target=335
+[SCAN] Cần 335 nick hợp lệ | candidates=35311 | workers=12
+[SCAN] progress checked=80 valid=0 fail=80
+[SCAN] progress checked=160 valid=0 fail=160
+[SCAN] progress checked=240 valid=0 fail=240
+[SCAN] progress checked=320 valid=0 fail=320
+[SCAN] progress checked=400 valid=0 fail=400
+[SCAN] progress checked=480 valid=0 fail=480
+[SCAN] progress checked=560 valid=0 fail=560
+[SCAN] progress checked=640 valid=0 fail=640
+[SCAN] progress checked=720 valid=0 fail=720
+[SCAN] progress checked=800 valid=0 fail=800
+[SCAN] progress checked=880 valid=0 fail=880
+[SCAN] progress checked=960 valid=0 fail=960
+[SCAN] progress checked=1040 valid=0 fail=1040
+[SCAN] progress checked=1120 valid=0 fail=1120
+[SCAN] progress checked=1200 valid=0 fail=1200
+[SCAN] progress checked=1280 valid=0 fail=1280
+[SCAN] progress checked=1360 valid=0 fail=1360
+[SCAN] progress checked=1440 valid=0 fail=1440
+[SCAN] OK 1/335 (checked=1489 fail=1488) last=abul8000 bal=500
+[SCAN] OK 2/335 (checked=1501 fail=1499) last=abul8002 bal=400
+[SCAN] OK 3/335 (checked=1502 fail=1499) last=abul8004 bal=400
+[SCAN] OK 4/335 (checked=1503 fail=1499) last=abul8013 bal=400
+[SCAN] OK 5/335 (checked=1504 fail=1499) last=abul8015 bal=400
+[SCAN] progress checked=1520 valid=9 fail=1511
+[SCAN] OK 25/335 (checked=1549 fail=1524) last=abul8064 bal=400
+[SCAN] progress checked=1600 valid=48 fail=1552
+[SCAN] OK 50/335 (checked=1602 fail=1552) last=abul8138 bal=400
+[SCAN] OK 75/335 (checked=1653 fail=1578) last=abul8190 bal=400
+[SCAN] progress checked=1680 valid=89 fail=1591
+[SCAN] OK 100/335 (checked=1698 fail=1598) last=abul8241 bal=400
+[SCAN] OK 125/335 (checked=1743 fail=1618) last=abul8300 bal=400
+[SCAN] progress checked=1760 valid=132 fail=1628
+[SCAN] OK 150/335 (checked=1796 fail=1646) last=abul8370 bal=400
+[SCAN] progress checked=1840 valid=171 fail=1669
+[SCAN] OK 175/335 (checked=1844 fail=1669) last=abul8425 bal=400
+[SCAN] OK 200/335 (checked=1893 fail=1693) last=abul8482 bal=400
+[SCAN] progress checked=1920 valid=216 fail=1704
+[SCAN] OK 225/335 (checked=1937 fail=1712) last=abul8536 bal=400
+[SCAN] OK 250/335 (checked=1978 fail=1728) last=abul8585 bal=400
+[SCAN] progress checked=2000 valid=260 fail=1740
+[SCAN] OK 275/335 (checked=2023 fail=1748) last=abul8641 bal=400
+[SCAN] OK 300/335 (checked=2065 fail=1765) last=abul8696 bal=400
+[SCAN] progress checked=2080 valid=304 fail=1776
+[SCAN] OK 325/335 (checked=2122 fail=1797) last=abul8760 bal=400
+[SCAN] progress checked=2140 valid=335 fail=1805
+[OUT] wrote acc_zaro_335.txt (335 nicks)
+[FUND] 335/335 nick cần cấp (min=3,000, amount=3,000)
+[FUND] pool arena13: 448,042
+[FUND] pool arena12: 254,525
+[FUND] pool arena8: 234,661
+[FUND] pool arena11: 289,097
+[FUND] pool arena5: 195,453
+[FUND] pool arena10: 146,506
+[FUND] pool arena17: 143,422
+[FUND] pool arena15: 137,244
+[FUND] pool arena20: 122,412
+[FUND] pool arena16: 121,163
+[FUND] pool arena18: 115,641
+[FUND] pool arena9: 111,963
+[FUND] pool arena14: 111,090
+[FUND] pool arena19: 110,498
+[FUND] pool arena6: 68,525
+[FUND] ✅ arena13 WS OK bal=448,042 id=68859211
+[FUND] ✅ 1/335 abul8000 +3,000 via arena13 (funder~445,042) | OK
+[FUND] ✅ 2/335 abul8002 +3,000 via arena13 (funder~442,042) | OK
+[FUND] ✅ 3/335 abul8004 +3,000 via arena13 (funder~439,042) | OK
+[FUND] ❌ abul8017 via arena13: timeout
+[FUND] ✅ arena13 WS OK bal=430,042 id=68859211
+[FUND] ✅ 10/335 abul8030 +3,000 via arena13 (funder~418,042) | OK
+[FUND] ❌ abul8038 via arena13: timeout
+[FUND] ✅ arena13 WS OK bal=415,042 id=68859211
+[FUND] ❌ abul8052 via arena13: timeout
+[FUND] ✅ arena13 WS OK bal=397,042 id=68859211
+[FUND] ✅ 20/335 abul8058 +3,000 via arena13 (funder~388,042) | OK
+[FUND] ❌ abul8065 via arena13: timeout
+[FUND] ✅ arena13 WS OK bal=382,042 id=68859211
+[FUND] ❌ abul8083 via arena13: timeout
+[FUND] ✅ arena13 WS OK bal=367,042 id=68859211
+[FUND] ✅ 30/335 abul8085 +3,000 via arena13 (funder~358,042) | OK
+[FUND] ❌ abul8091 via arena13: timeout
+[FUND] ✅ arena13 WS OK bal=352,042 id=68859211
+[FUND] ❌ abul8114 via arena13: timeout
+[FUND] ✅ arena13 WS OK bal=340,042 id=68859211
+[FUND] ✅ 40/335 abul8120 +3,000 via arena13 (funder~328,042) | OK
+[FUND] ❌ abul8133 via arena13: timeout
+[FUND] ✅ arena13 WS OK bal=325,042 id=68859211
+[FUND] ❌ abul8141 via arena13: timeout
+[FUND] ✅ arena13 WS OK bal=310,042 id=68859211
+[FUND] ✅ 50/335 abul8151 +3,000 via arena13 (funder~298,042) | OK
+[FUND] ❌ abul8156 via arena13: timeout
+[FUND] ✅ arena13 WS OK bal=295,042 id=68859211
+[FUND] ❌ abul8164 via arena13: timeout
+[FUND] ✅ arena13 WS OK bal=283,042 id=68859211
+[FUND] ✅ 60/335 abul8181 +3,000 via arena13 (funder~268,042) | OK
+[FUND] ❌ abul8188 via arena13: timeout
+[FUND] ✅ arena13 WS OK bal=268,042 id=68859211
+[FUND] ❌ abul8193 via arena13: timeout
+[FUND] ✅ arena13 WS OK bal=256,042 id=68859211
+[FUND] ❌ abul8204 via arena13: timeout
+[FUND] ✅ arena13 WS OK bal=241,042 id=68859211
+[FUND] ✅ 70/335 abul8202 +3,000 via arena13 (funder~238,042) | OK
+[FUND] ❌ abul8216 via arena13: timeout
+[FUND] ✅ arena13 WS OK bal=226,042 id=68859211
+[FUND] ❌ abul8217 via arena13: timeout
+[FUND] ✅ arena13 WS OK bal=211,042 id=68859211
+[FUND] ✅ 80/335 abul8229 +3,000 via arena13 (funder~208,042) | OK
+[FUND] ❌ abul8240 via arena13: timeout
+[FUND] ✅ arena13 WS OK bal=196,042 id=68859211
+[FUND] ✅ 90/335 abul8269 +3,000 via arena13 (funder~178,042) | OK
+[FUND] ❌ abul8263 via arena13: timeout
+[FUND] ✅ arena13 WS OK bal=178,042 id=68859211
+[FUND] ❌ abul8274 via arena13: timeout
+[FUND] ✅ arena13 WS OK bal=163,042 id=68859211
+[FUND] ✅ 100/335 abul8292 +3,000 via arena13 (funder~148,042) | OK
+[FUND] ❌ abul8293 via arena13: timeout
+[FUND] ✅ arena13 WS OK bal=148,042 id=68859211
+[FUND] ❌ abul8308 via arena13: timeout
+[FUND] ✅ arena13 WS OK bal=133,042 id=68859211
+[FUND] ✅ 110/335 abul8319 +3,000 via arena13 (funder~118,042) | OK
+[FUND] ❌ abul8333 via arena13: timeout
+[FUND] ✅ arena13 WS OK bal=115,042 id=68859211
+[FUND] ❌ abul8337 via arena13: timeout
+[FUND] ✅ arena13 WS OK bal=103,042 id=68859211
+[FUND] ✅ 120/335 abul8352 +3,000 via arena13 (funder~88,042) | OK
+[FUND] ❌ abul8353 via arena13: timeout
+[FUND] ✅ arena13 WS OK bal=88,042 id=68859211
+[FUND] ❌ abul8370 via arena13: timeout
+[FUND] ✅ arena13 WS OK bal=73,042 id=68859211
+[FUND] ✅ 130/335 abul8384 +3,000 via arena13 (funder~58,042) | OK
+[FUND] ❌ abul8386 via arena13: timeout
+[FUND] ✅ arena13 WS OK bal=58,042 id=68859211
+[FUND] arena13 còn 52,042 < need -> next funder
+[FUND] ✅ arena11 WS OK bal=289,097 id=68859164
+[FUND] ✅ 140/335 abul8405 +3,000 via arena11 (funder~265,097) | OK
+[FUND] ✅ 150/335 abul8424 +3,000 via arena11 (funder~235,097) | OK
+[FUND] ✅ 160/335 abul8452 +3,000 via arena11 (funder~205,097) | OK
+[FUND] ✅ 170/335 abul8470 +3,000 via arena11 (funder~175,097) | OK
+[FUND] ✅ 180/335 abul8488 +3,000 via arena11 (funder~145,097) | OK
+[FUND] ✅ 190/335 abul8510 +3,000 via arena11 (funder~115,097) | OK
+[FUND] ✅ 200/335 abul8538 +3,000 via arena11 (funder~85,097) | OK
+[FUND] ✅ 210/335 abul8553 +3,000 via arena11 (funder~55,097) | OK
+[FUND] arena11 còn 52,097 < need -> next funder
+[FUND] ✅ arena12 WS OK bal=254,525 id=68859166
+[FUND] ❌ abul8564 via arena12: timeout
+[FUND] ✅ arena12 WS OK bal=248,525 id=68859166

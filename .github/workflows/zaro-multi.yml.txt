@@ -20,71 +20,22 @@ concurrency:
 
 jobs:
   # ==========================================================
-  # JOB 1: CẤP XU 2 TẦNG TRƯỚC KHI CHƠI (fund_all.py)
-  # - nguyenpy2 chỉ giữ 1 phiên server nên cấp xu ở job RIÊNG, xong mới tới bot
-  # - Tầng 1 (47 nick đầu, bàn 1000xu): thiếu < 3000 -> cấp 3000
-  # - Tầng 2 (từ dòng 48, bàn 1000xu) : thiếu < 1000 -> cấp 1000
-  # - Quét song song 8 luồng; luôn thoát mã 0 nên không bao giờ chặn bot
-  # ==========================================================
-  fund:
-    name: cap-xu-nguyenpy2
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install Python dependencies
-        run: pip install websocket-client requests --break-system-packages
-
-      - name: Cap xu cho nick thieu (2 tang)
-        env:
-          ACCOUNTS_FILE: acc_valid_2.txt
-          BOT_PASSWD: ${{ secrets.BOT_PASSWD || 'nhat123456' }}
-          FUND_ACCOUNT: 'nguyenpy2'
-          FUND_PASSWD: ${{ secrets.FUND_PASSWD || 'nhat434241' }}
-          SCAN_WORKERS: '8'
-          FUND_AMOUNT: '3000'
-          FUND_MIN_BALANCE: '3000'
-          TIER2_START: '47'
-          SCAN_LIMIT: '303'   # chỉ quét phạm vi 11 shard đang chạy (303 nick)
-          FUND_AMOUNT_2: '1000'
-          FUND_MIN_BALANCE_2: '1000'
-        run: python3 -u fund_all.py
-
-  # ==========================================================
-  # JOB 2+: CÁC SHARD BOT - mỗi shard 1 runner = 1 IP riêng
-  # - shard 1..3 : 47 nick đầu (Tầng 1) bàn 1000xu - quy mô đã kiểm chứng
-  # - shard 4..11: 8 x 32 nick tiếp theo (Tầng 2) bàn 1000xu
-  # - Tổng 12 job (1 fund + 11 bot) <= giới hạn 20 job đồng thời Free plan
-  # - Muốn thêm acc: thêm dòng include (shard, offset, count, bet) tiếp theo
-  #   ví dụ: - {shard: 12, offset: 303, count: 32, bet: 500}
-  # - GitHub Free tối đa 20 job đồng thời -> tối đa 19 shard (~600+ acc).
-  #   Lên 1000 acc cần Pro (40 job) hoặc chia nhiều tài khoản GitHub.
+  # KHÔNG cấp xu ngoài (nguyenpy2 lỗi / tắt hẳn).
+  # Nick đã chuẩn bị sẵn trong acc_zaro_200.txt (login OK).
+  # Bot CHỈ TẠO BÀN 1000xu — SCAN_TABLES=0, FUND_ACCOUNT rỗng.
+  # 200 nick = 5 shard × 40 (chạy thử trước khi scale 335).
   # ==========================================================
   bot:
-    name: bot-shard-${{ matrix.shard }}-${{ matrix.bet }}xu
-    needs: fund
+    name: bot-shard-${{ matrix.shard }}-1000xu
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { shard: 1,  offset: 0,   count: 16, bet: 1000 }
-          - { shard: 2,  offset: 16,  count: 16, bet: 1000 }
-          - { shard: 3,  offset: 32,  count: 15, bet: 1000 }
-          - { shard: 4,  offset: 47,  count: 32, bet: 1000 }
-          - { shard: 5,  offset: 79,  count: 32, bet: 1000 }
-          - { shard: 6,  offset: 111, count: 32, bet: 1000 }
-          - { shard: 7,  offset: 143, count: 32, bet: 1000 }
-          - { shard: 8,  offset: 175, count: 32, bet: 1000 }
-          - { shard: 9,  offset: 207, count: 32, bet: 1000 }
-          - { shard: 10, offset: 239, count: 32, bet: 1000 }
-          - { shard: 11, offset: 271, count: 32, bet: 1000 }
+          - { shard: 1, offset: 0,   count: 40 }
+          - { shard: 2, offset: 40,  count: 40 }
+          - { shard: 3, offset: 80,  count: 40 }
+          - { shard: 4, offset: 120, count: 40 }
+          - { shard: 5, offset: 160, count: 40 }
     runs-on: ubuntu-latest
     timeout-minutes: 359
     steps:
@@ -115,8 +66,6 @@ jobs:
           PK_URL: https://github.com/official-pikafish/Pikafish/releases/download/Pikafish-2026-01-02/Pikafish.2026-01-02.7z
         run: |
           set -e
-          # Dùng py7zr qua pip - nhanh, không đụng tới apt (apt từng treo >7 phút
-          # trên runner mới boot khiến bot không bao giờ chạy).
           python3 -m pip install --quiet py7zr
 
           curl -fL --retry 4 --retry-delay 5 --retry-all-errors --max-time 420 \
@@ -156,30 +105,40 @@ jobs:
           ls -lh "$HOME/pikafish" "$HOME/pikafish.nnue"
           echo -e "uci\nquit" | "$HOME/pikafish" | head -3
 
-      - name: Run Xiangqi Bot zaro-multi (shard ${{ matrix.shard }}, cuoc ${{ matrix.bet }}xu)
+      - name: Verify accounts file (200 nick)
+        run: |
+          test -f acc_zaro_200.txt
+          N=$(grep -cve '^\s*$' acc_zaro_200.txt || true)
+          echo "acc_zaro_200.txt lines=$N"
+          test "$N" -ge 200
+          head -3 acc_zaro_200.txt
+          sed -n "$(( ${{ matrix.offset }} + 1 )),$(( ${{ matrix.offset }} + ${{ matrix.count }} ))p" acc_zaro_200.txt | head -3
+          echo "shard ${{ matrix.shard }} offset=${{ matrix.offset }} count=${{ matrix.count }}"
+
+      - name: Run Xiangqi Bot zaro-multi (shard ${{ matrix.shard }}, 1000xu create-only)
         env:
-          ACCOUNTS_FILE: acc_valid_2.txt
-          MAX_ACCOUNTS: ${{ matrix.count }}      # số acc của shard này
-          ACCOUNT_OFFSET: ${{ matrix.offset }}   # bỏ qua N dòng đầu của file
+          ACCOUNTS_FILE: acc_zaro_200.txt
+          MAX_ACCOUNTS: ${{ matrix.count }}
+          ACCOUNT_OFFSET: ${{ matrix.offset }}
           BOT_PASSWD: ${{ secrets.BOT_PASSWD || 'nhat123456' }}
-          BOT_BET_XU: ${{ matrix.bet }}          # all shards: 1000xu create-only
+          BOT_BET_XU: '1000'
           MOVETIME_MS: '150'
           ENGINE_POOL: '4'
           ENGINE_THREADS: '1'
           ENGINE_HASH: '256'
           LOGIN_STAGGER: '5-15'
           SNIFF_MODE: '0'
-          # CHỈ TẠO BÀN 1000xu — không quét/vào bàn người khác
+          # CHỈ TẠO BÀN 1000xu — không quét/join bàn người khác
           SCAN_TABLES: '0'
           SCAN_INTERVAL: '25'
           SCAN_MAX_ROOMS: '4'
-          SCAN_ANY_BET: '0' 
-          # Xu đã cấp xong ở job fund -> tắt funder trong giai đoạn chơi
-          # (nguyenpy2 chỉ giữ 1 phiên, các shard cùng đăng nhập sẽ đá nhau)
+          SCAN_ANY_BET: '0'
+          # TẮT mọi nguồn cấp xu ngoài (nguyenpy2 lỗi; không fund trong process)
           FUND_ACCOUNT: ''
+          FUND_PASSWD: ''
           CARO_RUNTIME_HOURS: ${{ inputs.runtime_hours || '5.9' }}
         run: |
-          echo "Starting zaro_multi.py shard ${{ matrix.shard }} (offset ${{ matrix.offset }}, ${{ matrix.count }} acc, cuoc ${{ matrix.bet }}xu)"
+          echo "Starting zaro_multi.py shard ${{ matrix.shard }} (offset ${{ matrix.offset }}, ${{ matrix.count }} acc, create 1000xu, NO external fund)"
           while true; do
             echo "=== $(date -u +'%Y-%m-%dT%H:%M:%SZ') Starting zaro_multi.py (shard ${{ matrix.shard }}) ==="
             python3 -u zaro_multi.py || echo "zaro_multi.py exited with code $?"
