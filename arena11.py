@@ -454,7 +454,8 @@ HUNT_MAX_ROOMS = int(os.environ.get("CARO_HUNT_MAX_ROOMS", "8") or 8)
 HUNT_MAX_CHECKS = int(os.environ.get("CARO_HUNT_MAX_CHECKS", "6") or 6)
 # filter LIST_ZONE_TABLE: 0=all, 1=chưa đầy, 2=chưa chơi, 3=đang chơi
 HUNT_TABLE_FILTER = int(os.environ.get("CARO_HUNT_FILTER", "1") or 1)
-HUNT_LEAVE_AFTER = os.environ.get("CARO_HUNT_LEAVE_AFTER", "1") == "1"  # 1=hết ván về sảnh dò tiếp
+HUNT_LEAVE_AFTER = os.environ.get("CARO_HUNT_LEAVE_AFTER", "0") == "1"  # 0=Ở LẠI chơi; 1=hết ván về sảnh dò tiếp
+HUNT_EMPTY_LEAVE_S = float(os.environ.get("CARO_HUNT_EMPTY_S", "90") or 90)  # ngồi 1 mình quá N giây mới về sảnh
 
 ZONE_BASE = "Lobby.caro"
 
@@ -811,6 +812,10 @@ class CaroBot:
         self._join_is_scan = False
         self._enter_kind = None          # 'room' | 'table' | None
         self.player_id = 0
+        # Khóa hunt khi ĐÃ VÀO BÀN — chỉ mở lại khi thật sự về sảnh
+        self._seated = False
+        self._sit_alone_since = None
+        self._join_lock_until = 0.0      # chặn leave/hunt ngay sau khi join
 
     def init_engine(self):
         if self.engine is not None: return self.embryo_available
@@ -964,6 +969,10 @@ class CaroBot:
     async def create_new_table(self):
         """Hành vi cũ: tự tạo bàn. Ở HUNT_MODE → chuyển sang dò sảnh."""
         if HUNT_MODE:
+            if self._seated or self.in_table or self.is_playing:
+                log.info("[HUNT] create_new_table bị gọi khi đang ngồi → BỎ QUA (ở lại bàn)")
+                self._stop_hunt_activity("create blocked")
+                return
             await self.leave_to_lobby_and_hunt("create_new_table→hunt")
             return
         if not self._bet_amts_loaded:
@@ -972,14 +981,53 @@ class CaroBot:
         else:
             await self.send(self.make_create_rule())
 
-    async def leave_to_lobby_and_hunt(self, reason: str = ""):
-        """Rời bàn (nếu có) về sảnh gốc rồi bắt đầu/tiếp tục dò bàn mục tiêu."""
+    def _stop_hunt_activity(self, reason: str = ""):
+        """Dừng MỌI hoạt động dò bàn (giữ nguyên chỗ đang ngồi)."""
+        self._scan_state = None
+        self._scan_rooms = []
+        self._scan_candidates = []
+        self._scan_checks = 0
+        self._scan_target_room = None
+        self._scan_next_at = time.time() + 86400 * 365  # đừng quét lại cho đến khi unlock
+        if reason:
+            log.info(f"[HUNT] 🔒 Khóa dò bàn — đã có chỗ ngồi ({reason})")
+
+    def _lock_seat(self, reason: str = ""):
+        """Đánh dấu đã vào bàn: không leave/hunt cho đến khi unlock."""
+        self._seated = True
+        self.in_table = True
+        self._joining_table = False
+        self._join_is_scan = False
+        self._enter_kind = None
+        self._sit_alone_since = time.time()
+        self._join_lock_until = time.time() + 15.0  # 15s đầu không cho leave vì parse lỗi
+        self._stop_hunt_activity(reason or "lock_seat")
+
+    def _unlock_seat(self, reason: str = ""):
+        self._seated = False
+        self._sit_alone_since = None
+        self._join_lock_until = 0.0
+        self._scan_next_at = 0.0
+        if reason:
+            log.info(f"[HUNT] 🔓 Mở khóa dò bàn ({reason})")
+
+    def _can_leave_table(self, reason: str = "") -> bool:
         if self.is_playing:
             log.info(f"[HUNT] Đang trong ván — không rời bàn ({reason})")
+            return False
+        if time.time() < getattr(self, "_join_lock_until", 0):
+            log.info(f"[HUNT] Vừa vào bàn — bỏ qua leave ({reason})")
+            return False
+        return True
+
+    async def leave_to_lobby_and_hunt(self, reason: str = ""):
+        """Rời bàn (nếu có) về sảnh gốc rồi bắt đầu/tiếp tục dò bàn mục tiêu."""
+        if not self._can_leave_table(reason):
             return
         log.info(f"[HUNT] 🚪 Về sảnh dò bàn {HUNT_BETS} xu ({reason})")
         self.ready = False
         self.in_table = False
+        self._seated = False
         self.table_id = None
         self.players = {}
         self.player_slot_by_id = {}
@@ -988,11 +1036,14 @@ class CaroBot:
         self._rejoining = False
         self._want_rejoin = False
         self.slot = -1
+        self._sit_alone_since = None
+        self._join_lock_until = 0.0
         self._scan_state = None
         self._scan_candidates = []
+        self._scan_rooms = []
         self._scan_checks = 0
         self._scan_next_at = 0.0
-        self._enter_kind = 'room'
+        self._enter_kind = None  # KHÔNG đặt 'room' — tránh nhầm với scan enter_room
         # Về Lobby.caro.0
         self.place_path = f"{ZONE_BASE}.0"
         self._current_room_id = 0
@@ -1003,7 +1054,10 @@ class CaroBot:
         self._scan_step_at = time.time()
 
     async def _scan_begin(self):
-        if self.is_playing or self.in_table or self._joining_table:
+        # ĐÃ CÓ CHỖ → tuyệt đối không quét / không quick-play
+        if self.is_playing or self.in_table or self._seated or self._joining_table or self._join_is_scan:
+            log.info("[HUNT] Bỏ qua quét — đang ngồi/vào bàn")
+            self._stop_hunt_activity("already seated")
             return
         if not self._bet_amts_loaded:
             log.info("[HUNT] Chưa có LIST_BET_AMT → xin danh sách mức cược trước")
@@ -1085,8 +1139,10 @@ class CaroBot:
         self._join_is_scan = True
         self._enter_kind = 'table'
         self.table_id = str(table_id)
-        self._scan_state = None
-        self._scan_next_at = 0.0
+        # Dừng quét NGAY khi quyết định vào — không để watchdog/response cũ kéo đi chỗ khác
+        self._stop_hunt_activity(f"joining #{table_id}")
+        self._scan_rooms = []
+        self._scan_candidates = []
         log.info(f"[HUNT] ✅ VÀO BÀN #{table_id} ({name}) sảnh #{self._current_room_id} cược {bet:,}xu → {path}")
         await self.send(self.make_enter(path, mode=1))
 
@@ -1228,14 +1284,10 @@ class CaroBot:
                 await self.send(self.make_list_zone_table(HUNT_TABLE_FILTER))
                 return
 
-            if self._joining_table or self._join_is_scan:
-                self._joining_table = False
+            if self._joining_table or self._join_is_scan or self._enter_kind == 'table':
                 self._rejoining = False
-                self._join_is_scan = False
-                self._enter_kind = None
-                self.in_table = True
-                self._scan_state = None
-                log.info(f"[HUNT] 🪑 Đã vào bàn id={self.table_id}")
+                self._lock_seat(f"ENTER ok table={self.table_id}")
+                log.info(f"[HUNT] 🪑 Đã vào bàn id={self.table_id} — DỪNG dò, ở lại chơi")
                 await asyncio.sleep(0.3); await self.send(self.make_get_table())
                 return
 
@@ -1246,10 +1298,13 @@ class CaroBot:
                     log.info(f"[BOT] Thử vào lại bàn cũ: {path}")
                     await self.send(self.make_enter(path))
                 else:
-                    # Vào sảnh (LOGIN lần đầu hoặc leave_to_lobby)
+                    # Vào sảnh (LOGIN lần đầu hoặc leave_to_lobby) — hoặc gói ENTER đẩy khi đang ngồi
+                    if self._seated or self.in_table or self.is_playing:
+                        # Server hay đẩy ENTER_PLACE khi người khác ra/vào — BỎ QUA, đừng hunt
+                        log.info("[HUNT] Bỏ qua ENTER_PLACE (đang ngồi bàn)")
+                        return
                     if self._current_room_id is None:
                         self._current_room_id = 0
-                    # cố gắng suy room id từ place_path
                     try:
                         parts = (self.place_path or "").split(".")
                         if len(parts) >= 3 and parts[-1].isdigit():
@@ -1312,8 +1367,12 @@ class CaroBot:
             else:
                 log.warning(f"[HUNT] ⚠️ Không thấy mức ~{t:,}xu trên server")
         if HUNT_MODE:
-            self._scan_next_at = 0.0
-            await self._scan_begin()
+            if self._seated or self.in_table or self.is_playing or self._joining_table:
+                log.info("[HUNT] Có LIST_BET_AMT nhưng đang ngồi bàn → không quét")
+                self._stop_hunt_activity("bet list while seated")
+            else:
+                self._scan_next_at = 0.0
+                await self._scan_begin()
         else:
             await self.send(self.make_create_rule())
 
@@ -1329,6 +1388,8 @@ class CaroBot:
             self._joining_table = False
 
     async def handle_list_zone_room(self, r: BinaryReader):
+        if self._seated or self.in_table or self.is_playing:
+            return
         if self._scan_state != 'room_list':
             return
         status = r.i8()
@@ -1368,6 +1429,8 @@ class CaroBot:
         await self._scan_next_room()
 
     async def handle_list_zone_table(self, r: BinaryReader):
+        if self._seated or self.in_table or self.is_playing:
+            return
         if self._scan_state != 'table_list':
             return
         status = r.i8()
@@ -1412,6 +1475,8 @@ class CaroBot:
         await self._scan_try_join()
 
     async def handle_get_table_data(self, r: BinaryReader):
+        if self._seated or self.in_table or self.is_playing:
+            return
         if self._scan_state != 'checking':
             return
         status = r.i8()
@@ -1472,8 +1537,15 @@ class CaroBot:
             if first_byte != 0:
                 msg = r.read_utf().lower() if r.remaining() else ""
                 if "not in table" in msg:
-                    self.in_table = False; self.table_id = None
+                    # Vừa join có thể GET_TABLE sớm → đừng vội leave
+                    if self._joining_table or self._join_is_scan or time.time() < self._join_lock_until:
+                        log.info("[HUNT] GET_TABLE 'not in table' lúc vừa vào — chờ, không leave")
+                        return
+                    self.in_table = False
+                    self._seated = False
+                    self.table_id = None
                     if HUNT_MODE:
+                        self._unlock_seat("not in table")
                         await self.leave_to_lobby_and_hunt("not in table")
                     else:
                         await self.create_new_table()
@@ -1496,6 +1568,13 @@ class CaroBot:
 
             current_player = r.i8(); r.i16(); r.i16(); r.u8()
             self.in_table = True
+            if self.slot >= 0 or self.table_id:
+                # Đã parse được state bàn → khóa hunt chắc chắn
+                if not self._seated:
+                    self._lock_seat(f"GET_TABLE_EX slot={self.slot}")
+                else:
+                    self._seated = True
+                    self._stop_hunt_activity()
 
             move_count = r.u8()
             for _ in range(move_count): r.i8(); r.i32()
@@ -1509,9 +1588,9 @@ class CaroBot:
             has_opponent = any(sid >= 0 and sid != self.slot for sid in self.players.keys())
 
             self.is_playing = is_playing
-            log.info(f"[TABLE] Slot={self.slot} Playing={is_playing} Turn=slot{current_player}")
+            log.info(f"[TABLE] Slot={self.slot} Playing={is_playing} Turn=slot{current_player} seated={self._seated}")
 
-            # Tránh đánh đồng đội: nếu ghế đối diện là bot nhà → tạo bàn mới
+            # Tránh đánh đồng đội: nếu ghế đối diện là bot nhà → rời (sau lock window)
             if not is_playing and has_opponent:
                 for sid, p in list(self.players.items()):
                     if sid == self.slot or sid < 0:
@@ -1521,20 +1600,32 @@ class CaroBot:
                         await self._avoid_family_and_remake(opp_name)
                         return
 
+            if has_opponent:
+                self._sit_alone_since = None
+            elif self._seated and not is_playing and self.slot >= 0:
+                if self._sit_alone_since is None:
+                    self._sit_alone_since = time.time()
+
             if is_playing and current_player == self.slot:
                 if not self._moving and not self.pending_move:
                     self.pending_move = True; await self.do_move()
             elif not is_playing and self.slot >= 0:
                 if has_opponent:
                     if not self.ready:
-                        log.info("[BOT] Đối thủ đã vào ghế → SET_READY!")
+                        log.info("[BOT] Đối thủ đã vào ghế → SET_READY! (ở lại bàn, không hunt)")
                         self.ready = True; await self.send(self.make_ready())
                 else:
                     if self.ready:
-                        log.info("[BOT] Không có đối thủ → Hủy Ready.")
+                        log.info("[BOT] Không có đối thủ → Hủy Ready (vẫn ngồi chờ).")
                     self.ready = False
             elif not is_playing and self.slot < 0:
-                self.in_table = False; self.table_id = None
+                # Chưa gán ghế (vừa vào / đang xem) — KHÔNG leave, chỉ đợi
+                if HUNT_MODE and (self._seated or self._joining_table or self.table_id):
+                    log.info("[HUNT] slot<0 nhưng đang giữ bàn — chờ ghế, không rời")
+                    self.in_table = True
+                    self._seated = True
+                    return
+                self.in_table = False; self.table_id = None; self._seated = False
                 await asyncio.sleep(1)
                 if HUNT_MODE:
                     await self.leave_to_lobby_and_hunt("slot<0")
@@ -1546,6 +1637,10 @@ class CaroBot:
 
     async def handle_start(self, r: BinaryReader):
         self.total_games += 1; self.is_playing = True; self.ready = False; self.pending_move = False
+        self.in_table = True
+        self._seated = True
+        self._sit_alone_since = None
+        self._stop_hunt_activity("START_MATCH")
         self._moving = False; self._last_move_xy = None
         self._pending_opponent_moves = []
         self.opponent_gone_at = None
@@ -1668,17 +1763,28 @@ class CaroBot:
                     async def _kick_then_hunt():
                         await asyncio.sleep(8.0)
                         if not self.is_playing:
+                            self._unlock_seat("gameover-lose")
                             await self.leave_to_lobby_and_hunt("gameover-lose")
                     asyncio.create_task(_kick_then_hunt())
+                else:
+                    # Thua + kick xong vẫn ở lại bàn chờ ván mới — không hunt
+                    self._seated = True
+                    self.in_table = True
+                    self._stop_hunt_activity("lose stay")
                 return
             log.warning("[BOT] Bot thua nhưng không tìm thấy playerId người thắng; chuyển sang sẵn sàng")
 
+        # Mặc định Ở LẠI BÀN chơi tiếp (HUNT_LEAVE_AFTER=0). Chỉ leave khi bật env=1.
         if HUNT_MODE and HUNT_LEAVE_AFTER:
-            log.info("[HUNT] Hết ván → về sảnh dò bàn 10k/20k/40k tiếp")
+            log.info("[HUNT] Hết ván → về sảnh dò bàn 10k/20k/40k tiếp (LEAVE_AFTER=1)")
             await asyncio.sleep(2)
+            self._unlock_seat("gameover leave_after")
             await self.leave_to_lobby_and_hunt("gameover")
         else:
-            log.info("[BOT] Ở lại bàn, sẽ sẵn sàng sau 5 giây...")
+            log.info("[HUNT] Hết ván → Ở LẠI BÀN, ready sau 5s (không dò bàn nữa)")
+            self._seated = True
+            self.in_table = True
+            self._stop_hunt_activity("gameover stay")
             asyncio.create_task(self._delay_ready(5.0))
 
     async def handle_kick(self, r: BinaryReader):
@@ -1696,6 +1802,8 @@ class CaroBot:
         log.warning(f"[BOT] Bot bị kick khỏi bàn: {content}")
         self.is_playing = False; self.in_table = False; self.pending_move = False
         self.table_id = None
+        self._unlock_seat("kicked")
+        self._join_lock_until = 0.0
         await asyncio.sleep(1)
         if HUNT_MODE:
             await self.leave_to_lobby_and_hunt("bị kick")
@@ -1754,6 +1862,7 @@ class CaroBot:
                 self.in_table = False; self._table_lost_at = time.time()
             else:
                 self.in_table = False
+                self._unlock_seat("self exit")
                 await asyncio.sleep(1)
                 if HUNT_MODE:
                     await self.leave_to_lobby_and_hunt("self exit")
@@ -1795,16 +1904,29 @@ class CaroBot:
 
                 now = time.time()
                 if HUNT_MODE:
-                    # Timeout 1 bước quét
+                    # Đang ngồi bàn → chỉ kiểm tra bàn trống quá lâu (đối thủ không vào)
+                    if self._seated or self.in_table or self.is_playing or self._joining_table:
+                        if (self._seated and not self.is_playing and self.slot >= 0
+                                and self._sit_alone_since
+                                and now - self._sit_alone_since >= HUNT_EMPTY_LEAVE_S
+                                and now >= self._join_lock_until):
+                            # Một mình quá lâu → mới về sảnh dò tiếp
+                            log.info(f"[HUNT] Ngồi 1 mình >{HUNT_EMPTY_LEAVE_S:.0f}s → về sảnh dò bàn khác")
+                            self._unlock_seat("empty table")
+                            await self.leave_to_lobby_and_hunt("empty table")
+                        continue
+
+                    # Timeout 1 bước quét (chỉ khi CHƯA ngồi)
                     if (self._scan_state and self._scan_step_at
                             and now - self._scan_step_at > HUNT_STEP_TIMEOUT
-                            and not self.is_playing and not self.in_table
+                            and not self.is_playing and not self.in_table and not self._seated
                             and not self._joining_table):
                         log.info(f"[HUNT] ⏳ Timeout bước '{self._scan_state}' → quét lại")
                         self._scan_state = None
                         self._scan_next_at = 0.0
                         await self._scan_begin()
-                    elif (not self.is_playing and not self.in_table and not self._joining_table
+                    elif (not self.is_playing and not self.in_table and not self._seated
+                          and not self._joining_table and not self._join_is_scan
                           and not self._rejoining and self._bet_amts_loaded
                           and self._scan_state is None and now >= self._scan_next_at):
                         await self._scan_begin()
@@ -1863,12 +1985,15 @@ class CaroBot:
 
     async def _avoid_family_and_remake(self, name: str):
         """Rời bàn đồng đội. HUNT: về sảnh dò tiếp; create: tạo bàn mới."""
+        if not self._can_leave_table(f"family {name}"):
+            return
         log.info(f"[AVOID] ⚠️ Đối thủ '{name}' là bot đồng đội → rời bàn")
         self.ready = False
         self.in_table = False
         self.table_id = None
         self.players = {}
         self.player_slot_by_id = {}
+        self._unlock_seat(f"family {name}")
         await asyncio.sleep(0.5)
         if HUNT_MODE:
             await self.leave_to_lobby_and_hunt(f"đồng đội {name}")
