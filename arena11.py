@@ -421,7 +421,7 @@ class EmbryoEngine:
 WS_URL = "wss://gamevh.net/ws/gameServer"
 GAME_URL = "https://gamevh.net/play/caro/0"
 
-CARO_USER_DIRECT = "arena11"
+CARO_USER_DIRECT = "arena11"  # login nick (đã restore; WS 323 từng đổi tạm sang vu829)
 CARO_PWWD_DIRECT = "nhat123456"
 
 def _clean_env(val: Optional[str], default: str) -> str:
@@ -430,6 +430,21 @@ def _clean_env(val: Optional[str], default: str) -> str:
 
 USER = _clean_env(os.environ.get("CARO_USER1") or os.environ.get("CARO_USER"), CARO_USER_DIRECT)
 PWWD = _clean_env(os.environ.get("CARO_PWWD1") or os.environ.get("CARO_PWWD"), CARO_PWWD_DIRECT)
+
+# Username login có thể đã bị WS CHANGE_NICK_NAME đổi (arena11 → vu829).
+_LOGIN_USER_CANDIDATES = []
+for _u in [USER, CARO_USER_DIRECT, "vu829", "arena11", os.environ.get("CARO_USER_ALT", "")]:
+    _u = (_u or "").strip()
+    if _u and _u not in _LOGIN_USER_CANDIDATES:
+        _LOGIN_USER_CANDIDATES.append(_u)
+
+def _set_active_user(u: str):
+    """Cập nhật USER global sau khi login thành công với nick thực tế."""
+    global USER
+    u = (u or "").strip()
+    if u and u != USER:
+        log.info(f"[Auth] USER active: {USER!r} → {u!r}")
+        USER = u
 
 VERSION = "5.0.2"
 GAME_ID = "caro"
@@ -486,10 +501,18 @@ CMD_MAP = {
     413: "LIST_BET_AMT", 414: "GET_TABLE_DATA", 417: "START_MATCH",
     418: "GAMEOVER", 419: "ENTER_STATE", 420: "SET_TURN",
     421: "SET_PLAYER_STATUS", 422: "SET_PLAYER_POINT", 423: "SET_PLAYER_ATTR",
+    318: "LIST_AVATAR_CATEGORY", 319: "LIST_AVATAR", 320: "BUY_AVATAR",
+    321: "REFINE_PROFILE", 322: "GET_NICK_CHANGE_COUNT", 323: "CHANGE_NICK_NAME",
+    324: "CHANGE_PASSWORD", 325: "UPDATE_PROFILE",
     431: "BALANCE_CHANGED", 432: "OWNER_CHANGED", 433: "GET_TABLE_DATA_EX",
     434: "SET_READY", 501: "BET", 502: "PLAY", 505: "CHAT", 518: "HIGHLIGHT",
     529: "MOVE", 533: "ASK_DRAW", 534: "SURRENDER", 535: "RETREAT",
 }
+
+# WS 323 CHANGE_NICK_NAME đổi USERNAME đăng nhập (không phải FULL_NAME hiển thị).
+# Payload reverse live: byte(0)+utf16(new)+int32(0)+ascii(password) → status=0.
+# Mặc định TẮT — bật CARO_WS_CHANGE_NICK=1 nếu thật sự cần đổi username login.
+WS_CHANGE_NICK = os.environ.get("CARO_WS_CHANGE_NICK", "0") == "1"
 
 
 # ======================== BINARY PROTOCOL ========================
@@ -833,6 +856,7 @@ class CaroBot:
         self._table_cooldown = {}       # table_id -> expire ts
         self._ws_restart_requested = False  # hết ván: đóng WS để đổi identity rồi vào lại
         self._post_game_reason = ""
+        self._pending_ws_nick = None  # optional: username mới qua WS 323
 
     def init_engine(self):
         if self.engine is not None: return self.embryo_available
@@ -912,6 +936,26 @@ class CaroBot:
         w = BinaryWriter(); w.write_command("LOGIN"); w.write_ascii(self.nickname)
         w.i32(self.token); w.write_ascii(VERSION); w.write_ascii(self.lock_key)
         w.write_ascii(GAME_ID); w.i8(1); return w.build()
+
+    def make_change_nick_name(self, new_nick: str, password: str = None) -> bytes:
+        """WS 323 CHANGE_NICK_NAME — đổi USERNAME đăng nhập (không phải FULL_NAME).
+
+        Protocol (probe live):
+          i8(0) + utf16(new_nick) + i32(0) + ascii(password)  → status=0
+        Response: i8 status + ascii new_nick (khi OK).
+        CẨN THẬN: sau khi đổi phải login bằng nick mới.
+        """
+        password = password if password is not None else PWWD
+        w = BinaryWriter()
+        w.write_command("CHANGE_NICK_NAME")
+        w.i8(0)
+        w.write_utf(new_nick)
+        w.i32(0)
+        w.write_ascii(password)
+        return w.build()
+
+    def make_get_nick_change_count(self) -> bytes:
+        w = BinaryWriter(); w.write_command("GET_NICK_CHANGE_COUNT"); return w.build()
 
     def make_enter(self, path: str, pw: str = "", mode: int = 1) -> bytes:
         w = BinaryWriter(); w.write_command("ENTER_PLACE"); w.write_ascii(path)
@@ -1296,6 +1340,8 @@ class CaroBot:
             elif cmd == "KICK_PLAYER": await self.handle_kick(r)
             elif cmd == "PLAYER_ENTERED": await self.handle_player_enter(r)
             elif cmd == "PLAYER_EXITED": await self.handle_player_exit(r)
+            elif cmd == "CHANGE_NICK_NAME": await self.handle_change_nick_name(r)
+            elif cmd == "GET_NICK_CHANGE_COUNT": await self.handle_nick_change_count(r)
         except Exception as e: log.error(f"Error {cmd}: {e}", exc_info=True)
 
     async def handle_login(self, r: BinaryReader):
@@ -1307,9 +1353,15 @@ class CaroBot:
                 if login_ok: await self.send(self.make_login())
                 return
             if r.remaining() > 0: self.lock_key = r.read_ascii()
+            # Optional WS đổi username login (CARO_WS_CHANGE_NICK=1) — mặc định tắt
+            if WS_CHANGE_NICK and getattr(self, "_pending_ws_nick", None):
+                new_nick = self._pending_ws_nick
+                self._pending_ws_nick = None
+                log.info(f"[Identity] WS CHANGE_NICK_NAME → {new_nick!r}")
+                await self.send(self.make_change_nick_name(new_nick, PWWD))
             await self.send(self.make_enter(self.place_path))
         else:
-            log.error(f"LOGIN failed")
+            log.error(f"LOGIN failed status={status}")
 
     async def handle_enter(self, r: BinaryReader):
         status = r.i8()
@@ -1896,6 +1948,41 @@ class CaroBot:
                 self.ready = True
                 await self.send(self.make_ready())
 
+    async def handle_change_nick_name(self, r: BinaryReader):
+        """Response WS 323: i8 status + ascii new_nick (nếu OK)."""
+        try:
+            status = r.i8()
+            new_nick = ""
+            if r.remaining() > 0:
+                try:
+                    new_nick = r.read_ascii()
+                except Exception:
+                    try:
+                        new_nick = r.read_utf()
+                    except Exception:
+                        new_nick = ""
+            if status == 0:
+                if new_nick:
+                    old = self.nickname
+                    self.nickname = new_nick
+                    log.info(f"[Identity] ✅ WS CHANGE_NICK_NAME OK {old!r} → {self.nickname!r}")
+                    log.warning("[Identity] Username login đã đổi — set CARO_USER / secrets cho nick mới")
+                else:
+                    log.info("[Identity] ✅ WS CHANGE_NICK_NAME OK (no nick in body)")
+            else:
+                log.warning(f"[Identity] ❌ WS CHANGE_NICK_NAME fail status={status} msg={new_nick!r}")
+        except Exception as e:
+            log.warning(f"[Identity] CHANGE_NICK parse: {e}")
+
+    async def handle_nick_change_count(self, r: BinaryReader):
+        try:
+            a = r.i8() if r.remaining() else 0
+            b = r.i8() if r.remaining() else 0
+            c = r.i8() if r.remaining() else 0
+            log.info(f"[Identity] GET_NICK_CHANGE_COUNT => {a},{b},{c}")
+        except Exception as e:
+            log.warning(f"[Identity] nick count parse: {e}")
+
     async def handle_player_enter(self, r: BinaryReader):
         place_level = r.i8()
         pid = r.i64(); name = r.read_utf()
@@ -2023,7 +2110,12 @@ class CaroBot:
         for tag in re.findall(r'(?is)<input\b[^>]*>', form):
             name = self._html_attr(tag, 'name')
             input_type = self._html_attr(tag, 'type').lower()
-            if not name or input_type in ('submit', 'button', 'image', 'file', 'reset'):
+            if not name:
+                continue
+            # Giữ SAVE (submit); bỏ button/image/file/reset khác
+            if input_type in ('button', 'image', 'file', 'reset'):
+                continue
+            if input_type == 'submit' and name != 'SAVE':
                 continue
             if input_type in ('checkbox', 'radio') and not re.search(r'\bchecked\b', tag, re.I):
                 continue
@@ -2121,20 +2213,28 @@ class CaroBot:
         if new_name == (old_name or '').strip():
             new_name = generate_random_full_name().replace('.', '').strip()
         data['FULL_NAME'] = new_name
-        data['OLD_PWD'] = PWWD
-        data['SAVE'] = '\uf046'
+        # Server form field là OLD_PASSWORD (không phải OLD_PWD) — verify live 2026-09-10
+        data['OLD_PASSWORD'] = PWWD
+        data.pop('OLD_PWD', None)
+        if not data.get('SAVE'):
+            data['SAVE'] = '\uf046'
         response = session.post(
             action, timeout=20, data=data,
             headers={'Origin': 'https://gamevh.net', 'Referer': page.url,
                      'Content-Type': 'application/x-www-form-urlencoded'},
             allow_redirects=True)
+        if 'login.jsp' in (response.url or ''):
+            log.warning('[Identity] FULL_NAME post → login redirect (cookie/user/pass?)')
+            return {'ok': False, 'new_full_name': new_name, 'error': 'login_redirect'}
 
         verify_page = session.get(edit_url, timeout=15, allow_redirects=True)
+        if 'login.jsp' in (verify_page.url or ''):
+            return {'ok': False, 'new_full_name': new_name, 'error': 'verify_login_redirect'}
         _, verify_data = self._read_profile_form(verify_page.text, verify_page.url)
         verified_name = (verify_data or {}).get('FULL_NAME')
         ok = verified_name == new_name
         if ok:
-            log.info(f'[Identity] FULL_NAME: {old_name!r} -> {new_name!r} (no-dot)')
+            log.info(f'[Identity] FULL_NAME HTTP: {old_name!r} -> {new_name!r} (no-dot)')
         else:
             log.warning(f'[Identity] FULL_NAME verify failed: expected={new_name!r}, actual={verified_name!r}')
         return {'ok': ok, 'old_full_name': old_name, 'new_full_name': new_name if ok else (verified_name or new_name)}
@@ -2149,18 +2249,27 @@ class CaroBot:
                 'User-Agent': ua,
                 'Accept-Language': 'vi-VN,vi;q=0.9,en;q=0.7',
             })
-            session.get('https://gamevh.net/login.jsp', timeout=10)
-            resp = session.post(
-                'https://gamevh.net/login.jsp', timeout=12,
-                data={'redirect': '/', 'USER_NAME': USER, 'PASSWORD': PWWD,
-                      'AUTO_LOGIN': 'true', 'LOGIN': 'Đăng nhập'},
-                headers={'Origin': 'https://gamevh.net',
-                         'Referer': 'https://gamevh.net/login.jsp',
-                         'Content-Type': 'application/x-www-form-urlencoded'},
-                allow_redirects=True)
-            if 'login.jsp' in (resp.url or ''):
-                log.error('[Identity] Relogin failed')
+            last_url = ''
+            login_user = None
+            for try_user in _LOGIN_USER_CANDIDATES:
+                session.cookies.clear()
+                session.get('https://gamevh.net/login.jsp', timeout=10)
+                resp = session.post(
+                    'https://gamevh.net/login.jsp', timeout=12,
+                    data={'redirect': '/', 'USER_NAME': try_user, 'PASSWORD': PWWD,
+                          'AUTO_LOGIN': 'true', 'LOGIN': 'Đăng nhập'},
+                    headers={'Origin': 'https://gamevh.net',
+                             'Referer': 'https://gamevh.net/login.jsp',
+                             'Content-Type': 'application/x-www-form-urlencoded'},
+                    allow_redirects=True)
+                last_url = resp.url or ''
+                if 'login.jsp' not in last_url:
+                    login_user = try_user
+                    break
+            if login_user is None:
+                log.error(f'[Identity] Relogin failed (tried {_LOGIN_USER_CANDIDATES}): {last_url}')
                 return None
+            _set_active_user(login_user)
             self.cookie = '; '.join(f'{k}={v}' for k, v in session.cookies.items())
             # token từ trang game
             game_resp = session.get(GAME_URL, timeout=12)
@@ -2176,6 +2285,7 @@ class CaroBot:
             nick_m = re.search(r'var\s+currentPlayerNickName\s*=\s*[\'\"]([^\'\"]+)[\'\"]', page_html)
             if nick_m:
                 self.nickname = nick_m.group(1).strip() or self.nickname
+                _set_active_user(self.nickname)
             # refresh cookie after game page
             self.cookie = '; '.join(f'{k}={v}' for k, v in session.cookies.items())
             log.info(f"[Identity] Relogin OK token={self.token} id={self.player_id} nick={self.nickname!r}")
@@ -2194,12 +2304,20 @@ class CaroBot:
                 session = self._session_from_cookie()
 
             if HUNT_RENAME_AFTER:
+                # FULL_NAME hiển thị = HTTP update_profile (OLD_PASSWORD). WS 323 là username login.
                 nr = self.update_random_full_name(session)
                 out['name'] = nr
                 if nr.get('ok'):
-                    log.info(f"[Identity] ✅ Tên mới: {nr.get('new_full_name')!r}")
+                    log.info(f"[Identity] ✅ FULL_NAME (HTTP): {nr.get('new_full_name')!r}")
                 else:
-                    log.warning(f"[Identity] ⚠️ Đổi tên fail: {nr}")
+                    log.warning(f"[Identity] ⚠️ FULL_NAME HTTP fail: {nr}")
+                if WS_CHANGE_NICK:
+                    # Sinh nick login ASCII ngắn; CẨN THẬN — đổi username
+                    import string as _string
+                    cand = 'h' + ''.join(random.choices(_string.ascii_lowercase + _string.digits, k=7))
+                    self._pending_ws_nick = cand
+                    out['ws_nick_pending'] = cand
+                    log.warning(f"[Identity] CARO_WS_CHANGE_NICK=1 → sẽ đổi login nick WS → {cand!r}")
 
             if HUNT_AVATAR_AFTER:
                 try:
@@ -2369,18 +2487,30 @@ class CaroBot:
                 'User-Agent': ua,
                 'Accept-Language': 'vi-VN,vi;q=0.9,en;q=0.7'
             })
-            session.get('https://gamevh.net/login.jsp', timeout=10)
-            resp = session.post(
-                'https://gamevh.net/login.jsp', timeout=10,
-                data={'redirect': '/', 'USER_NAME': USER, 'PASSWORD': PWWD,
-                      'AUTO_LOGIN': 'true', 'LOGIN': 'Đăng nhập'},
-                headers={'Origin': 'https://gamevh.net',
-                         'Referer': 'https://gamevh.net/login.jsp',
-                         'Content-Type': 'application/x-www-form-urlencoded'},
-                allow_redirects=True)
-            if 'login.jsp' in resp.url:
-                log.error(f'[BOT] HTTP login failed: {resp.url}')
+            last_url = ''
+            login_user = None
+            for try_user in _LOGIN_USER_CANDIDATES:
+                session.cookies.clear()
+                session.get('https://gamevh.net/login.jsp', timeout=10)
+                resp = session.post(
+                    'https://gamevh.net/login.jsp', timeout=10,
+                    data={'redirect': '/', 'USER_NAME': try_user, 'PASSWORD': PWWD,
+                          'AUTO_LOGIN': 'true', 'LOGIN': 'Đăng nhập'},
+                    headers={'Origin': 'https://gamevh.net',
+                             'Referer': 'https://gamevh.net/login.jsp',
+                             'Content-Type': 'application/x-www-form-urlencoded'},
+                    allow_redirects=True)
+                last_url = resp.url or ''
+                if 'login.jsp' not in last_url:
+                    login_user = try_user
+                    if try_user != USER:
+                        log.info(f"[BOT] Login OK với alias {try_user!r} (USER env={USER!r})")
+                    break
+                log.warning(f"[BOT] Login fail user={try_user!r}")
+            if login_user is None:
+                log.error(f'[BOT] HTTP login failed (tried {_LOGIN_USER_CANDIDATES}): {last_url}')
                 return False
+            _set_active_user(login_user)
 
             if AUTO_IDENTITY and not self._identity_attempted:
                 self._identity_attempted = True
@@ -2404,6 +2534,7 @@ class CaroBot:
             nick_m = re.search(r'var\s+currentPlayerNickName\s*=\s*[\'"]([^\'"]+)[\'"]', page_html)
             if nick_m:
                 self.nickname = nick_m.group(1).strip() or self.nickname
+                _set_active_user(self.nickname)
 
             log.info(f"[BOT] HTTP login OK. token={self.token} playerId={self.player_id} nick={self.nickname!r}")
             return True

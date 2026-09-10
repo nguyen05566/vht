@@ -55,7 +55,7 @@ jobs:
       - name: Run Caro Bot arena11 (tu ban giao truoc khi het gio)
         env:
           CARO_RUNTIME_HOURS: ${{ inputs.runtime_hours || '5.7' }}
-          # Uu tien Secrets neu co, khong co thi arena11.py fallback ve hardcode arena11
+          # Uu tien Secrets neu co, khong co thi arena11.py fallback ve hardcode vu829 (username hien tai)
           CARO_USER: ${{ secrets.CARO_USER }}
           CARO_PWWD: ${{ secrets.CARO_PWWD }}
           CARO_DEST_ID: ${{ github.event.inputs.dest_id || '10055407' }}

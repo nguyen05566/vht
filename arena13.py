@@ -1440,7 +1440,8 @@ class CaroBot:
 
         old_name = data.get('FULL_NAME', '')
         data['FULL_NAME'] = new_name
-        data['OLD_PWD'] = PWWD
+        data['OLD_PASSWORD'] = PWWD
+        data.pop('OLD_PWD', None)
         data['SAVE'] = '\uf046'
         response = session.post(
             action, timeout=20, data=data,
