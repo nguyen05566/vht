@@ -248,7 +248,7 @@ def ws_transfer(ws, dest_id, amount, timeout=12):
 
 
 # ==================== MAIN FUNCTION ====================
-def transfer_xu_sync(user, passwd, dest_id=69284652, percent=20):
+def transfer_xu_sync(user, passwd, dest_id=10055407, percent=20):
     """
     Chuyển X% xu từ tài khoản user về dest_id.
     Trả về True nếu thành công, False nếu thất bại.
@@ -312,7 +312,7 @@ if __name__ == "__main__":
 
     user = sys.argv[1]
     passwd = sys.argv[2]
-    dest_id = int(sys.argv[3]) if len(sys.argv) > 3 else 69284652
+    dest_id = int(sys.argv[3]) if len(sys.argv) > 3 else 10055407
     percent = int(sys.argv[4]) if len(sys.argv) > 4 else 20
 
     transfer_xu_sync(user, passwd, dest_id, percent)
