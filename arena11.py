@@ -5,7 +5,7 @@
 ║  Engine: Embryo Caro6 v1.2.3 (Linux Native)                        ║
 ║  Mục đích:                                                       ║
 ║  - Chơi Caro tự động trên gamevh.net                             ║
-║  - THÍ NGHIỆM HUNT: ngồi sảnh, dò bàn 10k/20k/40k rồi vào chơi  ║
+║  - THÍ NGHIỆM HUNT: ngồi sảnh, dò bàn 10k→100k rồi vào chơi  ║
 ║  - Monitor SET_TURN packets, phát hiện timer reset bug           ║
 ║  - SET_READY handling chính xác                                   ║
 ╚══════════════════════════════════════════════════════════════════════╝
@@ -450,8 +450,8 @@ def _parse_bet_list(raw, default):
         return vals or list(default)
     except Exception:
         return list(default)
-HUNT_BETS = _parse_bet_list(os.environ.get("CARO_HUNT_BETS", "10000,20000,40000"),
-                            (10000, 20000, 40000))
+HUNT_BETS = _parse_bet_list(os.environ.get("CARO_HUNT_BETS", "10000,20000,40000,50000,100000"),
+                            (10000, 20000, 40000, 50000, 100000))
 HUNT_BET_TOLERANCE = int(os.environ.get("CARO_HUNT_TOL", "500") or 500)
 HUNT_INTERVAL = float(os.environ.get("CARO_HUNT_INTERVAL", "12") or 12)      # nghỉ giữa 2 vòng quét
 HUNT_PAUSE = float(os.environ.get("CARO_HUNT_PAUSE", "25") or 25)            # quét hết sảnh không thấy
@@ -808,7 +808,7 @@ class CaroBot:
         # === SET_TURN TIMER TRACKER ===
         self.timer_tracker = SetTurnTracker()
 
-        # === HUNT (dò bàn 10k/20k/40k) ===
+        # === HUNT (dò bàn 10k → 100k) ===
         self._current_room_id = 0
         self._scan_state = None          # None|'room_list'|'enter_room'|'table_list'|'checking'
         self._scan_step_at = 0.0
@@ -1123,10 +1123,10 @@ class CaroBot:
             self._enter_kind = 'room'
             await self.send(self.make_enter(f"{ZONE_BASE}.{rid}", mode=1))
             return
-        self._scan_pause("đã quét hết sảnh, không có bàn 10k/20k/40k phù hợp")
+        self._scan_pause("đã quét hết sảnh, không có bàn mục tiêu (tới 100k) phù hợp")
 
     def _pick_scan_tables(self, tables):
-        """Lọc bàn: chưa chơi, còn ghế, không pwd, mức cược ∈ {10k,20k,40k}."""
+        """Lọc bàn: chưa chơi, còn ghế, không pwd, mức cược ∈ HUNT_BETS (tới 100k)."""
         cands = []
         for t in tables:
             if self._is_table_blacklisted(t.get("id")):
@@ -1501,7 +1501,7 @@ class CaroBot:
                 if len(sample) >= 8:
                     break
             log.info(f"[HUNT] 👁 Sảnh #{self._current_room_id}: {count} bàn "
-                     f"({waiting} chờ) — không có 10k/20k/40k. Mẫu: {', '.join(sample) or '—'}")
+                     f"({waiting} chờ) — không khớp HUNT_BETS (tới 100k). Mẫu: {', '.join(sample) or '—'}")
             await self._scan_next_room()
             return
         pretty = ", ".join(f"#{tid}({bet:,}xu)" for _, tid, bet, _ in self._scan_candidates)
@@ -1820,7 +1820,7 @@ class CaroBot:
 
         # Mặc định Ở LẠI BÀN chơi tiếp (HUNT_LEAVE_AFTER=0). Chỉ leave khi bật env=1.
         if HUNT_MODE and HUNT_LEAVE_AFTER:
-            log.info("[HUNT] Hết ván → về sảnh dò bàn 10k/20k/40k tiếp (LEAVE_AFTER=1)")
+            log.info("[HUNT] Hết ván → về sảnh dò bàn tới 100k tiếp (LEAVE_AFTER=1)")
             await asyncio.sleep(2)
             self._unlock_seat("gameover leave_after")
             await self.leave_to_lobby_and_hunt("gameover")
