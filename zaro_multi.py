@@ -130,6 +130,24 @@ GAME_ID   = 'xiangqi'
 ZONE_BASE = 'Lobby.' + GAME_ID          # đường dẫn gốc các sảnh: Lobby.xiangqi.<roomId>
 _DEFAULT_PLACE = 'Lobby.xiangqi.0'
 
+# 9 sảnh xiangqi (LIST_ZONE_ROOM live): id 0..8
+# Bot tạo bàn TRONG sảnh đang đứng (CREATE_RULE) → phải ENTER_PLACE vào sảnh trước.
+XIANGQI_ROOMS = [
+    (0, "Nam Quan"),
+    (1, "Chi Lăng"),
+    (2, "Bạch Đằng"),
+    (3, "Hàm Tử"),
+    (4, "Chương Dương"),
+    (5, "Bình Lệ Nguyên"),
+    (6, "Đông Bộ Đầu"),
+    (7, "Xương Giang"),
+    (8, "Bình Than"),
+]
+ROOM_IDS = [r[0] for r in XIANGQI_ROOMS]
+ROOM_NAME = {r[0]: r[1] for r in XIANGQI_ROOMS}
+# Phân tán: "hash" | "index" (theo thứ tự file) | "0".."8" cố định
+ROOM_SPREAD = _env_str("ROOM_SPREAD", "index").strip().lower()
+
 # MultiPV luôn = 1 trong bản multi: TrendAnalyzer theo PV chỉ có ý nghĩa với
 # engine riêng từng bot; ở pool dùng chung, worker chỉ dùng TrendAnalyzer tạm
 # thời (MultiPV=3) khi cần né "chốt cố định" trên bàn đặc biệt.
@@ -1153,9 +1171,10 @@ class AccountSession:
     CURRENT_PLAYER_ID/PLACE_PATH...) đều chuyển thành thuộc tính của phiên để
     20 tài khoản chạy song song không ghi đè nhau. Engine thay bằng EnginePool."""
 
-    def __init__(self, user, passwd):
+    def __init__(self, user, passwd, account_index=0):
         self.user = user
         self.passwd = passwd
+        self.account_index = int(account_index)  # vị trí trong lô (offset+i) để chia sảnh
         self.display_name = generate_dotted_full_name()   # tên hiển thị riêng, marker đồng đội
         add_family_name(self.display_name)
         add_family_name(self.user)                        # server có thể hiển thị username
@@ -1175,7 +1194,9 @@ class AccountSession:
         self.token = 0
         self.nickname = user
         self.player_id = 0
-        self.place_path = _DEFAULT_PLACE
+        # Chia đều 9 sảnh — mỗi nick 1 home room, tạo bàn trong sảnh đó
+        self.home_room_id = self._assign_home_room()
+        self.place_path = f"{ZONE_BASE}.{self.home_room_id}"
         self._identity_synced = False
 
         # Trạng thái kết nối / game
@@ -1218,7 +1239,8 @@ class AccountSession:
         self._scan_next_at = 0.0         # thời điểm được phép quét tiếp
         self._scan_rooms = []            # hàng đợi room id còn phải thử trong vòng này
         self._scan_target_room = None
-        self._current_room_id = 0        # room bot đang đứng (đăng nhập là 0)
+        self._current_room_id = self.home_room_id  # room bot sẽ đứng / tạo bàn
+        self._room_entered = False       # đã ENTER_PLACE vào home room chưa
         self._scan_candidates = []       # [(|bet-BOT_BET_XU|, table_id, bet, name), ...]
         self._scan_checks = 0            # số GET_TABLE_DATA đã dùng trong vòng quét
 
@@ -1473,11 +1495,33 @@ class AccountSession:
             return False
         return is_known_family(n)
 
+    def _assign_home_room(self) -> int:
+        """Chia nick đều 9 phòng (0..8).
+
+        ROOM_SPREAD:
+          index — theo account_index % 9 (ổn định theo vị trí file/shard)
+          hash  — hash(username) % 9
+          0..8  — gán cố định 1 phòng
+        """
+        mode = ROOM_SPREAD
+        if mode.isdigit():
+            rid = int(mode) % 9
+        elif mode in ("hash", "name"):
+            rid = sum(ord(c) for c in (self.user or "")) % 9
+        else:
+            # index (default): shard offset + vị trí trong process
+            rid = int(self.account_index) % 9
+        return rid
+
+    def room_label(self, rid=None) -> str:
+        rid = self.home_room_id if rid is None else rid
+        return f"#{rid} {ROOM_NAME.get(rid, '?')}"
+
     def leave_table(self):
         if self.board.is_playing:
             self._log("TABLE", "⚠️ Đang trong ván đấu -> không rời bàn cho đến khi GAMEOVER!")
             return
-        self._log("TABLE", "🚪 Rời bàn chơi, quay lại sảnh tạo bàn mới...")
+        self._log("TABLE", f"🚪 Rời bàn, về sảnh {self.room_label()} tạo bàn mới...")
         if getattr(self, '_table_path', None):
             unregister_bot_table(self._table_path)
         self.in_game = False
@@ -1489,12 +1533,31 @@ class AccountSession:
         self.slot_players.clear()
         self.board.reset()
         self._enter_fail_at = 0.0
-        self._current_room_id = 0      # ENTER_PLACE về Lobby.xiangqi.0 như cũ
+        # Về đúng home room (không dồn hết Nam Quan #0)
+        self._current_room_id = self.home_room_id
+        self.place_path = f"{ZONE_BASE}.{self.home_room_id}"
+        self._room_entered = False
         self.send_enter_place(self.place_path)
+        self._enter_kind = 'room'
+
+    def ensure_home_room(self):
+        """ENTER_PLACE vào sảnh được gán (chia đều 9 phòng) trước khi tạo bàn."""
+        want = f"{ZONE_BASE}.{self.home_room_id}"
+        if self._room_entered and self._current_room_id == self.home_room_id and self.place_path == want:
+            return
+        self.place_path = want
+        self._enter_kind = 'room'
+        self._scan_target_room = self.home_room_id
+        self._log("ROOM", f"🏠 Vào sảnh {self.room_label()} để tạo bàn (spread={ROOM_SPREAD})")
+        self.send_enter_place(path=want, mode=1)
 
     def send_create_table(self):
         now = time.time()
         if now - self._last_create_time < self._CREATE_INTERVAL: return
+        # Phải đứng trong home room — CREATE_RULE tạo bàn tại sảnh hiện tại
+        if (not self._room_entered) or self._current_room_id != self.home_room_id:
+            self.ensure_home_room()
+            return  # đợi ENTER_PLACE OK rồi vòng sau mới CREATE
         self._last_create_time = now
         bet_amt_id = 0
         for ba in self.bet_amts:
@@ -1520,7 +1583,7 @@ class AccountSession:
         for arg_name, arg_value in args:
             data.extend(self.conn.pack_ascii(arg_name))
             data.extend(self.conn.pack_string(arg_value))
-        self._log("CREATE", f"🎯 Tạo bàn {BOT_BET_XU}xu, bet_id={bet_amt_id}, "
+        self._log("CREATE", f"🎯 Tạo bàn {BOT_BET_XU}xu @ {self.room_label()}, bet_id={bet_amt_id}, "
                             f"ván={BOT_MATCH_DURATION}' / nước={BOT_TURN_DURATION}s")
         if WS_SNIFF_MODE:
             self._log("WS-SNIFF", f"CREATE_RULE send: data_hex={bytes(data).hex()}")
@@ -1590,6 +1653,7 @@ class AccountSession:
         except Exception as e:
             self._log("RECV", f"Lỗi xử lý gói: {e}")
 
+
     def _handle_login_response(self, msg):
         status = msg.read_byte()
         if status == 0:
@@ -1599,7 +1663,10 @@ class AccountSession:
                 self.fetch_session_info()
                 self._send_login()
                 return
-            self.send_enter_place()
+            # Vào đúng sảnh home (chia đều 9 phòng), không dồn Nam Quan #0
+            self.ensure_home_room()
+        else:
+            self._log("LOGIN", f"❌ WS LOGIN fail status={status}")
 
     def _handle_enter_place_response(self, msg):
         status = msg.read_byte()
@@ -1612,16 +1679,26 @@ class AccountSession:
         kind = self._enter_kind or 'room'
         self._enter_kind = None
 
-        # ---- Quét sảnh: response của bước VÀO SẢNH ----
-        if kind == 'room' and self._scan_state == 'enter_room':
+        # ---- Vào sảnh (home room để tạo bàn, hoặc quét) ----
+        if kind == 'room':
             if status == 0:
-                self._current_room_id = self._scan_target_room
-                self._log("SCAN", f"🏠 Đã vào sảnh #{self._current_room_id} -> lấy danh sách bàn")
-                self._scan_step('table_list')
-                self.send_list_zone_table(1)
+                rid = self._scan_target_room if self._scan_target_room is not None else self.home_room_id
+                self._current_room_id = rid if rid is not None else self.home_room_id
+                self.place_path = f"{ZONE_BASE}.{self._current_room_id}"
+                self._room_entered = True
+                if self._scan_state == 'enter_room':
+                    self._log("SCAN", f"🏠 Đã vào sảnh {self.room_label(self._current_room_id)} -> lấy danh sách bàn")
+                    self._scan_step('table_list')
+                    self.send_list_zone_table(1)
+                else:
+                    self._log("ROOM", f"✅ Đang ở sảnh {self.room_label(self._current_room_id)} — sẵn sàng tạo bàn")
             else:
-                self._log("SCAN", f"⚠️ Vào sảnh #{self._scan_target_room} bị từ chối (status={status}) -> thử sảnh khác")
-                self._scan_next_room()
+                self._room_entered = False
+                if self._scan_state == 'enter_room':
+                    self._log("SCAN", f"⚠️ Vào sảnh #{self._scan_target_room} bị từ chối (status={status}) -> thử sảnh khác")
+                    self._scan_next_room()
+                else:
+                    self._log("ROOM", f"⚠️ Vào sảnh {self.room_label()} fail status={status} — thử lại sau")
             return
 
         if status != 0:
@@ -2412,7 +2489,7 @@ def acquire_account_lock(user):
 
 # ==================== LUỒNG CỦA MỖI TÀI KHOẢN ====================
 
-def session_worker(user):
+def session_worker(user, account_index=0):
     """Vòng đời của 1 tài khoản: giữ lock -> tạo phiên -> chạy cho đến khi hết giờ.
     Nếu phiên gặp lỗi chưa xử lý được, tạo lại phiên mới (với jitter tránh dồn cụm)."""
     lock_file = acquire_account_lock(user)
@@ -2424,7 +2501,7 @@ def session_worker(user):
         attempt = 0
         while not deadline_reached():
             attempt += 1
-            sess = AccountSession(user, BOT_PASSWD)
+            sess = AccountSession(user, BOT_PASSWD, account_index=account_index)
             try:
                 sess.run()
             except Exception as e:
@@ -2488,17 +2565,29 @@ def main():
     if FUNDER.enabled:
         FUNDER.start()
 
+    from collections import Counter
+    _spread = Counter(((ACCOUNT_OFFSET + i) % 9) for i in range(len(accounts)))
+    print("  Phân sảnh     : " + ", ".join(
+        f"#{rid} {ROOM_NAME.get(rid, '?')}×{_spread.get(rid, 0)}" for rid in range(9)
+    ), flush=True)
+
     threads = []
     for i, user in enumerate(accounts):
         if deadline_reached():
             break
-        t = threading.Thread(target=session_worker, args=(user,),
-                             daemon=True, name=f"account-{user}")
+        acc_idx = ACCOUNT_OFFSET + i
+        home = acc_idx % 9
+        t = threading.Thread(
+            target=session_worker, args=(user, acc_idx),
+            daemon=True, name=f"account-{user}",
+        )
         threads.append(t)
         t.start()
+        log("SYS", "LOGIN",
+            f"Khởi động {user} ({i+1}/{len(accounts)}) -> sảnh #{home} {ROOM_NAME.get(home, '?')}")
         if i < len(accounts) - 1:
             gap = random.uniform(LOGIN_STAGGER_MIN, LOGIN_STAGGER_MAX)
-            log("SYS", "LOGIN", f"Đã khởi động {user} ({i+1}/{len(accounts)}) -> acc kế sau {gap:.0f}s")
+            log("SYS", "LOGIN", f"  acc kế sau {gap:.0f}s")
             if STOP_EVENT.wait(gap):
                 break
 
