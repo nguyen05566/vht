@@ -394,6 +394,38 @@ def ws_spin(ws, log, timeout=10):
     return None
 
 
+def ws_spin_video(ws, log, timeout=10):
+    """Quay bằng lượt XEM VIDEO (như nút ▶QUAY trong bản Facebook Instant Games).
+    Gửi SPIN_LUCKY_WHEEL kèm byte type=1 — server KHÔNG yêu cầu bằng chứng xem video.
+    Trả (result, slot, prize, reward) như ws_spin; result=255/-1 khi hết lượt video
+    (server trả chuỗi lỗi "NoSpinAvailable" thay vì kết quả thường).
+    """
+    try: ws.send_binary(pack_str("SPIN_LUCKY_WHEEL", i8(1)))
+    except Exception: return None
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try: raw = ws.recv()
+        except Exception: break
+        if not raw: continue
+        name, rd = parse_frame(raw)
+        if name in (CMD_PING, "PING"):
+            try: ws.send_binary(pack_num(CMD_PONG))
+            except Exception: pass
+            continue
+        if name == "SPIN_LUCKY_WHEEL":
+            b = rd.d
+            if len(b) >= 3 and b[0] >= 0x80:
+                # khung lỗi: byte 0xff + utf16 "NoSpinAvailable" ...
+                rd.i8()
+                return -1, 0, rd.utf16(), 0
+            result = rd.i8()
+            slot = rd.u8()
+            prize = rd.utf16()
+            reward = rd.i32() if rd.rem() >= 4 else 0
+            return result, slot, prize, reward
+    return None
+
+
 def ws_transfer(ws, log, dest_id, amount, timeout=12):
     try: ws.send_binary(pack_num(CMD_TRANSFER, i64(dest_id) + i64(amount)))
     except Exception: return False, -1, "send_error"
@@ -465,6 +497,22 @@ def _acc_once(user, pwd, dest, ua, log):
                     log(f"  [{user}] 🎰 quay {turn}/{remain}: {prize or reward} (+{reward} x)")
             else:
                 log(f"  [{user}] ⏭️ hết lượt quay hôm nay")
+            # ---- lượt quay XEM VIDEO (bản FB Instant Games) — thêm ~4-5 lượt/ngày
+            vturn = 0
+            while vturn < 6:
+                time.sleep(random.uniform(0.5, 1.6))
+                sp = ws_spin_video(ws, log)
+                if not sp:
+                    log(f"  [{user}] ⚠️ video-spin {vturn+1}: không phản hồi")
+                    break
+                rc, slot, prize, reward = sp
+                if rc < 0 or reward <= 0:
+                    log(f"  [{user}] 🎬 hết lượt video-spin ({prize or 'NoSpinAvailable'})")
+                    break
+                vturn += 1
+                r["spun"] += 1
+                r["reward"] += reward
+                log(f"  [{user}] 🎬 video-spin {vturn}: {prize} (+{reward} x)")
         # Số dư mới nhất sau khi quay (đọc lại profile bằng phiên cũ)
         bal = get_balance_op(ld["op"])
         if not bal or bal <= 0:
