@@ -603,7 +603,7 @@ class PikafishBot:
         self._joining_table = False
         self._last_quick_play_time = 0
         self._QUICK_PLAY_INTERVAL = 3.0
-        self.ROOM_LIST = ["0", "1", "2", "3"]
+        self.ROOM_LIST = ["0", "1", "2", "3", "4", "5", "6", "7", "8"]
         self.player_names = {}
         # Lệch phòng khởi đầu theo index của bot để phân tán các bot ra các phòng khác nhau
         _bot_num = re.search(r"\d+", USER)
@@ -1069,10 +1069,10 @@ class PikafishBot:
 
     
     def get_1k_to_5k_bet_objs(self):
-        """Trả về danh sách cược trong khoảng 500-10000xu, xáo trộn ngẫu nhiên."""
+        """Trả về danh sách cược trong khoảng 500-100000xu, xáo trộn ngẫu nhiên."""
         if not self.bet_amts:
             return []
-        valid = [ba for ba in self.bet_amts if 500 <= ba["value"] <= 1000]
+        valid = [ba for ba in self.bet_amts if 500 <= ba["value"] <= 10000]
         if valid:
             random.shuffle(valid)
             return valid
@@ -1085,11 +1085,11 @@ class PikafishBot:
         return "." in name
 
     def leave_table(self):
-        """Rời bàn hiện tại và quay về sảnh để tiếp tục dò bàn 500-1000 xu."""
+        """Rời bàn hiện tại và quay về sảnh để tiếp tục dò bàn 500-10000 xu."""
         if self.board.is_playing:
             print("[TABLE] ⚠️ Đang trong ván đấu -> Khóa không rời bàn cho đến khi GAMEOVER!")
             return
-        print("[TABLE] 🚪 Rời bàn chơi, quay lại sảnh tiếp tục dò tìm bàn 500-1000 xu...")
+        print("[TABLE] 🚪 Rời bàn chơi, quay lại sảnh tiếp tục dò tìm bàn 500-10000 xu...")
         if getattr(self, '_table_path', None):
             unregister_bot_table(self._table_path)
         self.in_game = False
@@ -1129,7 +1129,7 @@ class PikafishBot:
 
     def resolve_bet_amt_id(self):
         if not self.bet_amts: return None
-        in_range = [ba for ba in self.bet_amts if 500 <= ba["value"] <= 1000]
+        in_range = [ba for ba in self.bet_amts if 500 <= ba["value"] <= 10000]
         if in_range:
             return random.choice(in_range)['id']
         return 0
@@ -1757,7 +1757,7 @@ class PikafishBot:
                             else:
                                 elapsed = time.time() - self._sit_alone_since
                                 if elapsed >= 30.0:
-                                    print(f"[TABLE] ⏱️ Đã chờ {int(elapsed)}s không có người chơi -> Rời bàn tiếp tục tìm bàn 500-1000 xu")
+                                    print(f"[TABLE] ⏱️ Đã chờ {int(elapsed)}s không có người chơi -> Rời bàn tiếp tục tìm bàn 500-10000 xu")
                                     self.leave_table()
                         else:
                             self._sit_alone_since = None
@@ -1785,7 +1785,7 @@ class PikafishBot:
                                 self.send_quick_play(room_id=room, bet_amt_id=bet_obj['id'])
                                 self._quick_play_attempts += 1
                             else:
-                                print(f"[SEARCH] ❌ Không tìm thấy mức cược 500-10k -> TẠO BÀN MỚI")
+                                print(f"[SEARCH] ❌ Không tìm thấy mức cược 500-10000 -> TẠO BÀN MỚI")
                                 self.send_create_table()
                                 self._quick_play_attempts = 0
                 time.sleep(1)
