@@ -467,11 +467,11 @@ def _parse_bet_list(raw, default):
         return vals or list(default)
     except Exception:
         return list(default)
-HUNT_BETS = _parse_bet_list(os.environ.get("CARO_HUNT_BETS", "10000,20000,40000,50000,100000"),
-                            (10000, 20000, 40000, 50000, 100000))
+HUNT_BETS = _parse_bet_list(os.environ.get("CARO_HUNT_BETS", "40000"),
+                            (4000, 10000))
 HUNT_BET_TOLERANCE = int(os.environ.get("CARO_HUNT_TOL", "500") or 500)
-HUNT_INTERVAL = float(os.environ.get("CARO_HUNT_INTERVAL", "12") or 12)      # nghỉ giữa 2 vòng quét
-HUNT_PAUSE = float(os.environ.get("CARO_HUNT_PAUSE", "25") or 25)            # quét hết sảnh không thấy
+HUNT_INTERVAL = float(os.environ.get("CARO_HUNT_INTERVAL", "2") or 2)      # nghỉ giữa 2 vòng quét
+HUNT_PAUSE = float(os.environ.get("CARO_HUNT_PAUSE", "2") or 2)            # quét hết sảnh không thấy
 HUNT_STEP_TIMEOUT = float(os.environ.get("CARO_HUNT_STEP_TIMEOUT", "12") or 12)
 HUNT_MAX_ROOMS = int(os.environ.get("CARO_HUNT_MAX_ROOMS", "8") or 8)
 HUNT_MAX_CHECKS = int(os.environ.get("CARO_HUNT_MAX_CHECKS", "6") or 6)
