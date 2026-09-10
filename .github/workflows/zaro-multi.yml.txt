@@ -23,7 +23,7 @@ jobs:
   # JOB 1: CẤP XU 2 TẦNG TRƯỚC KHI CHƠI (fund_all.py)
   # - nguyenpy2 chỉ giữ 1 phiên server nên cấp xu ở job RIÊNG, xong mới tới bot
   # - Tầng 1 (47 nick đầu, bàn 1000xu): thiếu < 3000 -> cấp 3000
-  # - Tầng 2 (từ dòng 48, bàn 500xu) : thiếu < 1000 -> cấp 1000
+  # - Tầng 2 (từ dòng 48, bàn 1000xu) : thiếu < 1000 -> cấp 1000
   # - Quét song song 8 luồng; luôn thoát mã 0 nên không bao giờ chặn bot
   # ==========================================================
   fund:
@@ -60,7 +60,7 @@ jobs:
   # ==========================================================
   # JOB 2+: CÁC SHARD BOT - mỗi shard 1 runner = 1 IP riêng
   # - shard 1..3 : 47 nick đầu (Tầng 1) bàn 1000xu - quy mô đã kiểm chứng
-  # - shard 4..11: 8 x 32 nick tiếp theo (Tầng 2) bàn 500xu
+  # - shard 4..11: 8 x 32 nick tiếp theo (Tầng 2) bàn 1000xu
   # - Tổng 12 job (1 fund + 11 bot) <= giới hạn 20 job đồng thời Free plan
   # - Muốn thêm acc: thêm dòng include (shard, offset, count, bet) tiếp theo
   #   ví dụ: - {shard: 12, offset: 303, count: 32, bet: 500}
@@ -77,14 +77,14 @@ jobs:
           - { shard: 1,  offset: 0,   count: 16, bet: 1000 }
           - { shard: 2,  offset: 16,  count: 16, bet: 1000 }
           - { shard: 3,  offset: 32,  count: 15, bet: 1000 }
-          - { shard: 4,  offset: 47,  count: 32, bet: 500 }
-          - { shard: 5,  offset: 79,  count: 32, bet: 500 }
-          - { shard: 6,  offset: 111, count: 32, bet: 500 }
-          - { shard: 7,  offset: 143, count: 32, bet: 500 }
-          - { shard: 8,  offset: 175, count: 32, bet: 500 }
-          - { shard: 9,  offset: 207, count: 32, bet: 500 }
-          - { shard: 10, offset: 239, count: 32, bet: 500 }
-          - { shard: 11, offset: 271, count: 32, bet: 500 }
+          - { shard: 4,  offset: 47,  count: 32, bet: 1000 }
+          - { shard: 5,  offset: 79,  count: 32, bet: 1000 }
+          - { shard: 6,  offset: 111, count: 32, bet: 1000 }
+          - { shard: 7,  offset: 143, count: 32, bet: 1000 }
+          - { shard: 8,  offset: 175, count: 32, bet: 1000 }
+          - { shard: 9,  offset: 207, count: 32, bet: 1000 }
+          - { shard: 10, offset: 239, count: 32, bet: 1000 }
+          - { shard: 11, offset: 271, count: 32, bet: 1000 }
     runs-on: ubuntu-latest
     timeout-minutes: 359
     steps:
@@ -162,19 +162,18 @@ jobs:
           MAX_ACCOUNTS: ${{ matrix.count }}      # số acc của shard này
           ACCOUNT_OFFSET: ${{ matrix.offset }}   # bỏ qua N dòng đầu của file
           BOT_PASSWD: ${{ secrets.BOT_PASSWD || 'nhat123456' }}
-          BOT_BET_XU: ${{ matrix.bet }}          # shard 1-3: 1000xu | shard 4+: 500xu
+          BOT_BET_XU: ${{ matrix.bet }}          # all shards: 1000xu create-only
           MOVETIME_MS: '150'
           ENGINE_POOL: '4'
           ENGINE_THREADS: '1'
           ENGINE_HASH: '256'
           LOGIN_STAGGER: '5-15'
           SNIFF_MODE: '0'
-          # QUÉT CÁC SẢNH: đi từng sảnh có người, VÀO bàn sẵn (1 người đang chờ)
-          # thay vì chỉ tạo bàn chờ; không thấy bàn nào mới quay lại tạo bàn
-          SCAN_TABLES: '1'
-          SCAN_INTERVAL: '25'     # nghỉ 25s giữa các vòng quét
-          SCAN_MAX_ROOMS: '4'     # tối đa 4 sảnh mỗi vòng
-          SCAN_ANY_BET: '0'       # chỉ vào bàn cược <= mức của mình
+          # CHỈ TẠO BÀN 1000xu — không quét/vào bàn người khác
+          SCAN_TABLES: '0'
+          SCAN_INTERVAL: '25'
+          SCAN_MAX_ROOMS: '4'
+          SCAN_ANY_BET: '0' 
           # Xu đã cấp xong ở job fund -> tắt funder trong giai đoạn chơi
           # (nguyenpy2 chỉ giữ 1 phiên, các shard cùng đăng nhập sẽ đá nhau)
           FUND_ACCOUNT: ''

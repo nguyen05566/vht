@@ -102,14 +102,14 @@ BOT_TURN_DURATION   = '60'
 BOT_ACC_DURATION    = '0'
 BOT_BLOCK_SOFTWARE  = '0'
 BOT_TABLE_PASSWORD  = ''
-BOT_BET_XU          = _env_int("BOT_BET_XU", 1000)   # mức cược bàn bot tạo: 1000xu (trước đây 5000xu)
+BOT_BET_XU          = _env_int("BOT_BET_XU", 1000)   # mức cược bàn bot tạo: 1000xu (create-only)
 
 # ---- TÌM BÀN CÓ SẴN Ở CÁC SẢNH (JOIN người chơi thay vì chỉ tạo bàn chờ) ----
 # Dựa trên giao thức client web gamevh: LIST_ZONE_ROOM (412) -> LIST_ZONE_TABLE (411)
 # -> GET_TABLE_DATA (414) -> ENTER_PLACE vào bàn. Bot sẽ đi từng sảnh có người,
 # tìm bàn chưa chơi/còn 1 ghế trống/đúng mức cược rồi VÀO CHƠI; nếu hết sảnh
 # không thấy bàn nào thì quay về tạo bàn chờ như cũ.
-SCAN_TABLES       = _env_str("SCAN_TABLES", "1") == "1"   # 1 = bật quét sảnh tìm bàn
+SCAN_TABLES       = _env_str("SCAN_TABLES", "0") == "1"   # 0 = CHỈ TẠO BÀN (mặc định); 1 = quét sảnh tìm bàn
 SCAN_INTERVAL     = _env_int("SCAN_INTERVAL", 25)         # giây nghỉ giữa 2 vòng quét
 SCAN_PAUSE        = _env_int("SCAN_PAUSE", 150)           # quét hết sảnh không thấy bàn -> nghỉ lâu
 SCAN_STEP_TIMEOUT = _env_int("SCAN_STEP_TIMEOUT", 12)     # 1 bước quét quá N giây coi như hỏng
