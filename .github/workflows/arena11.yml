@@ -55,6 +55,8 @@ jobs:
           CARO_HUNT_INTERVAL: '12'
           CARO_HUNT_PAUSE: '25'
           CARO_HUNT_LEAVE_AFTER: '0'
+          CARO_HUNT_AVOID_FAMILY: '0'
+          CARO_HUNT_COOLDOWN: '180'
         run: |
           START=$(date +%s)
           LIMIT=$((HANDOFF_MINUTES * 60))

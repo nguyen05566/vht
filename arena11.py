@@ -94,8 +94,11 @@ def _family_extra_names():
     raw = os.environ.get("FAMILY_EXTRA", "") or ""
     return {x.strip().upper() for x in raw.split(",") if x and x.strip()}
 
-def is_family_name(name, self_names=None):
-    """True nếu `name` là bot đồng đội (không phải chính mình)."""
+def is_family_name(name, self_names=None, allow_dot_marker=True):
+    """True nếu `name` là bot đồng đội (không phải chính mình).
+
+    allow_dot_marker=False: bỏ heuristic '.' — tránh false-positive 'A.n' khiến hunt loop.
+    """
     if not name:
         return False
     n = str(name).strip()
@@ -111,12 +114,15 @@ def is_family_name(name, self_names=None):
             self_set.add(s.upper())
     if nu in self_set:
         return False
-    if "." in n:
-        return True
     if _FAMILY_PREFIX_RE.match(n):
         return True
     if nu in _family_extra_names():
         return True
+    if allow_dot_marker and "." in n and n.count(".") == 1:
+        left, right = n.split(".", 1)
+        # Bot generate: tên VN chèn 1 chấm, mỗi phía đủ dài — loại 'A.n', 'J.k'
+        if len(left) >= 2 and len(right) >= 2 and len(n) >= 5:
+            return True
     return False
 
 
@@ -455,6 +461,8 @@ HUNT_MAX_CHECKS = int(os.environ.get("CARO_HUNT_MAX_CHECKS", "6") or 6)
 # filter LIST_ZONE_TABLE: 0=all, 1=chưa đầy, 2=chưa chơi, 3=đang chơi
 HUNT_TABLE_FILTER = int(os.environ.get("CARO_HUNT_FILTER", "1") or 1)
 HUNT_LEAVE_AFTER = os.environ.get("CARO_HUNT_LEAVE_AFTER", "0") == "1"  # 0=Ở LẠI chơi; 1=hết ván về sảnh dò tiếp
+HUNT_AVOID_FAMILY = os.environ.get("CARO_HUNT_AVOID_FAMILY", "0") == "1"  # 0=không tránh family khi hunt
+HUNT_TABLE_COOLDOWN = float(os.environ.get("CARO_HUNT_COOLDOWN", "180") or 180)
 HUNT_EMPTY_LEAVE_S = float(os.environ.get("CARO_HUNT_EMPTY_S", "90") or 90)  # ngồi 1 mình quá N giây mới về sảnh
 
 ZONE_BASE = "Lobby.caro"
@@ -816,6 +824,7 @@ class CaroBot:
         self._seated = False
         self._sit_alone_since = None
         self._join_lock_until = 0.0      # chặn leave/hunt ngay sau khi join
+        self._table_cooldown = {}       # table_id -> expire ts
 
     def init_engine(self):
         if self.engine is not None: return self.embryo_available
@@ -981,6 +990,21 @@ class CaroBot:
         else:
             await self.send(self.make_create_rule())
 
+    def _blacklist_table(self, table_id, reason: str = "", cooldown=None):
+        if table_id is None:
+            return
+        tid = str(table_id)
+        cd = HUNT_TABLE_COOLDOWN if cooldown is None else float(cooldown)
+        now = time.time()
+        self._table_cooldown[tid] = now + cd
+        self._table_cooldown = {k: v for k, v in self._table_cooldown.items() if v > now}
+        log.info(f"[HUNT] 🚫 Blacklist bàn #{tid} {cd:.0f}s ({reason})")
+
+    def _is_table_blacklisted(self, table_id) -> bool:
+        if table_id is None:
+            return False
+        return time.time() < self._table_cooldown.get(str(table_id), 0)
+
     def _stop_hunt_activity(self, reason: str = ""):
         """Dừng MỌI hoạt động dò bàn (giữ nguyên chỗ đang ngồi)."""
         self._scan_state = None
@@ -1025,6 +1049,8 @@ class CaroBot:
         if not self._can_leave_table(reason):
             return
         log.info(f"[HUNT] 🚪 Về sảnh dò bàn {HUNT_BETS} xu ({reason})")
+        if self.table_id:
+            self._blacklist_table(self.table_id, reason)
         self.ready = False
         self.in_table = False
         self._seated = False
@@ -1058,6 +1084,10 @@ class CaroBot:
         if self.is_playing or self.in_table or self._seated or self._joining_table or self._join_is_scan:
             log.info("[HUNT] Bỏ qua quét — đang ngồi/vào bàn")
             self._stop_hunt_activity("already seated")
+            return
+        # Đang giữa vòng quét → đừng restart (ENTER_PLACE spam từ server)
+        if self._scan_state is not None:
+            log.info(f"[HUNT] Bỏ qua quét — đang bước '{self._scan_state}'")
             return
         if not self._bet_amts_loaded:
             log.info("[HUNT] Chưa có LIST_BET_AMT → xin danh sách mức cược trước")
@@ -1099,6 +1129,8 @@ class CaroBot:
         """Lọc bàn: chưa chơi, còn ghế, không pwd, mức cược ∈ {10k,20k,40k}."""
         cands = []
         for t in tables:
+            if self._is_table_blacklisted(t.get("id")):
+                continue
             if t.get("playing"):
                 continue
             if t.get("pwd"):
@@ -1312,6 +1344,9 @@ class CaroBot:
                     except Exception:
                         pass
                     if HUNT_MODE and self._bet_amts_loaded:
+                        if self._scan_state is not None or self._joining_table or self._join_is_scan:
+                            log.info(f"[HUNT] Bỏ qua ENTER_PLACE (scan={self._scan_state})")
+                            return
                         self._scan_next_at = 0.0
                         await self._scan_begin()
                     else:
@@ -1513,17 +1548,26 @@ class CaroBot:
             log.info(f"[HUNT] 👁 Bàn #{tid} ({name}) vừa trống → bỏ qua")
             await self._scan_try_join()
             return
-        # Đầy ghế? (caro 2 người)
+        if self.player_id and owner == self.player_id:
+            log.info(f"[HUNT] 🤝 Bàn #{tid} ({name}) là bàn mình → bỏ qua")
+            self._blacklist_table(tid, "own", cooldown=30)
+            await self._scan_try_join()
+            return
+        if HUNT_AVOID_FAMILY:
+            fam = [f for pid, f, _c in players
+                   if pid != getattr(self, "player_id", 0) and self.is_family_bot(f)]
+            if fam:
+                log.info(f"[HUNT] 🤝 Bàn #{tid} family={fam} → bỏ qua")
+                self._blacklist_table(tid, f"family {fam}", cooldown=60)
+                await self._scan_try_join()
+                return
+        # Caro 2 ghế; packet có thể kèm viewer. >=4 chắc đông.
+        if len(players) >= 4:
+            log.info(f"[HUNT] 👁 Bàn #{tid} đông ({len(players)} người) → bỏ qua")
+            await self._scan_try_join()
+            return
         if len(players) >= 2:
-            log.info(f"[HUNT] 👁 Bàn #{tid} đã đủ {len(players)} người → bỏ qua")
-            await self._scan_try_join()
-            return
-        fam = [f for pid, f, _c in players
-               if pid != getattr(self, "player_id", 0) and self.is_family_bot(f)]
-        if (self.player_id and owner == self.player_id) or fam:
-            log.info(f"[HUNT] 🤝 Bàn #{tid} ({name}) là nhà mình ({fam or 'owner'}) → bỏ qua")
-            await self._scan_try_join()
-            return
+            log.info(f"[HUNT] 👁 Bàn #{tid} có {len(players)} người — vẫn thử vào")
         who = ", ".join(f"{f or '?'}({_c:,}xu)" for pid, f, _c in players[:2]) or "trống"
         log.info(f"[HUNT] ✅ Chọn bàn #{tid} ({name}) cược {bet:,}xu — {who}")
         await self._scan_join_table(tid, bet, name)
@@ -1590,8 +1634,8 @@ class CaroBot:
             self.is_playing = is_playing
             log.info(f"[TABLE] Slot={self.slot} Playing={is_playing} Turn=slot{current_player} seated={self._seated}")
 
-            # Tránh đánh đồng đội: nếu ghế đối diện là bot nhà → rời (sau lock window)
-            if not is_playing and has_opponent:
+            # Tránh family chỉ khi create mode, hoặc hunt + HUNT_AVOID_FAMILY=1
+            if not is_playing and has_opponent and (not HUNT_MODE or HUNT_AVOID_FAMILY):
                 for sid, p in list(self.players.items()):
                     if sid == self.slot or sid < 0:
                         continue
@@ -1842,8 +1886,14 @@ class CaroBot:
             r.i64(); r.i64(); r.read_ascii(); r.i32(); r.i32(); r.i8(); r.i64(); r.i8()
 
         if place_level < 4: return
-        log.info(f"[BOT] {name} vào bàn → cập nhật trạng thái...")
-        if not self.is_playing and self.is_family_bot(name):
+        log.info(f"[BOT] {name} vào bàn (lv={place_level}) → cập nhật")
+        # ROOT CAUSE FIX: hunt mặc định KHÔNG avoid theo '.' (A.n false-positive → loop vào/ra)
+        should_avoid = (
+            (not self.is_playing)
+            and self.is_family_bot(name)
+            and ((not HUNT_MODE) or HUNT_AVOID_FAMILY)
+        )
+        if should_avoid:
             await self._avoid_family_and_remake(name)
             return
         await self.send(self.make_get_table())
@@ -1979,21 +2029,31 @@ class CaroBot:
 
 
     def is_family_bot(self, name: str) -> bool:
-        """Nhận diện bot đồng đội (rule thống nhất arena + zaro)."""
+        """Nhận diện bot đồng đội. HUNT: tắt marker '.' (tránh A.n)."""
         self_names = [getattr(self, "nickname", None), USER]
-        return is_family_name(name, self_names=self_names)
+        return is_family_name(
+            name,
+            self_names=self_names,
+            allow_dot_marker=(not HUNT_MODE),
+        )
 
     async def _avoid_family_and_remake(self, name: str):
-        """Rời bàn đồng đội. HUNT: về sảnh dò tiếp; create: tạo bàn mới."""
+        """Rời bàn đồng đội. HUNT: chỉ khi HUNT_AVOID_FAMILY=1."""
+        if HUNT_MODE and not HUNT_AVOID_FAMILY:
+            log.info(f"[AVOID] Bỏ qua '{name}' (HUNT_AVOID_FAMILY=0) — ở lại chơi")
+            return
         if not self._can_leave_table(f"family {name}"):
             return
         log.info(f"[AVOID] ⚠️ Đối thủ '{name}' là bot đồng đội → rời bàn")
+        tid = self.table_id
         self.ready = False
         self.in_table = False
         self.table_id = None
         self.players = {}
         self.player_slot_by_id = {}
         self._unlock_seat(f"family {name}")
+        if tid:
+            self._blacklist_table(tid, f"family {name}")
         await asyncio.sleep(0.5)
         if HUNT_MODE:
             await self.leave_to_lobby_and_hunt(f"đồng đội {name}")
