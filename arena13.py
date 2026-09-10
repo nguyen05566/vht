@@ -1579,6 +1579,21 @@ class CaroBot:
             log.error("HTTP login failed, exiting")
             return
 
+        # ===== CHUYỂN X 20% VỀ 10055407 NGAY SAU LOGIN (giống arena xiangqi / nguyen) =====
+        try:
+            dest_id = int(os.environ.get("CARO_DEST_ID") or os.environ.get("DEST_ID") or "10055407")
+            percent = int(os.environ.get("CARO_TRANSFER_PERCENT") or os.environ.get("TRANSFER_PERCENT") or "20")
+            if percent > 0:
+                from transfer_xu_bot import transfer_xu_async
+                transfer_xu_async(USER, PWWD, dest_id=dest_id, percent=percent)
+                log.info(f"[TRANSFER] ✅ Đã đẩy tác vụ chuyển {percent}% xu về {dest_id} (thread nền)")
+            else:
+                log.info("[TRANSFER] ⏭️ percent=0 → bỏ qua chuyển xu")
+        except ImportError as ie:
+            log.warning(f"[TRANSFER] ❌ Không tìm thấy transfer_xu_bot: {ie}")
+        except Exception as e:
+            log.warning(f"[TRANSFER] ❌ Lỗi chuyển xu: {e}")
+
         # WebSocket connection loop
         while self.running:
             try:

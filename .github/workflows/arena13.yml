@@ -8,6 +8,16 @@ on:
         required: false
         default: '5.7'
         type: string
+      dest_id:
+        description: 'PlayerId nhận xu (mặc định 10055407)'
+        required: false
+        default: '10055407'
+        type: string
+      transfer_percent:
+        description: 'Phần trăm xu chuyển sau login (0=tắt, mặc định 20)'
+        required: false
+        default: '20'
+        type: string
   schedule:  # Luoi an toan / watchdog: tu phuc hoi neu chuoi ban giao bi dut
     - cron: '15 */6 * * *'
 
@@ -48,6 +58,8 @@ jobs:
           # Uu tien Secrets neu co, khong co thi arena13.py fallback ve hardcode arena13
           CARO_USER: ${{ secrets.CARO_USER }}
           CARO_PWWD: ${{ secrets.CARO_PWWD }}
+          CARO_DEST_ID: ${{ github.event.inputs.dest_id || '10055407' }}
+          CARO_TRANSFER_PERCENT: ${{ github.event.inputs.transfer_percent || '20' }}
           HANDOFF_MINUTES: '348'
         run: |
           START=$(date +%s)
