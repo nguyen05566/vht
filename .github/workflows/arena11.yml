@@ -49,6 +49,12 @@ jobs:
           CARO_USER: ${{ secrets.CARO_USER }}
           CARO_PWWD: ${{ secrets.CARO_PWWD }}
           HANDOFF_MINUTES: '348'
+          # THÍ NGHIỆM: ngồi sảnh dò bàn đối phương 10k/20k/40k (không tự tạo bàn)
+          CARO_MODE: hunt
+          CARO_HUNT_BETS: '10000,20000,40000'
+          CARO_HUNT_INTERVAL: '12'
+          CARO_HUNT_PAUSE: '25'
+          CARO_HUNT_LEAVE_AFTER: '1'
         run: |
           START=$(date +%s)
           LIMIT=$((HANDOFF_MINUTES * 60))

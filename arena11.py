@@ -5,8 +5,8 @@
 ║  Engine: Embryo Caro6 v1.2.3 (Linux Native)                        ║
 ║  Mục đích:                                                       ║
 ║  - Chơi Caro tự động trên gamevh.net                             ║
+║  - THÍ NGHIỆM HUNT: ngồi sảnh, dò bàn 10k/20k/40k rồi vào chơi  ║
 ║  - Monitor SET_TURN packets, phát hiện timer reset bug           ║
-║  - Ghi nhận chi tiết timer countdown khi gameover, người vào/ra  ║
 ║  - SET_READY handling chính xác                                   ║
 ╚══════════════════════════════════════════════════════════════════════╝
 """
@@ -432,6 +432,32 @@ IDENTITY_TEST_ONLY = os.environ.get("CARO_IDENTITY_TEST_ONLY", "0") == "1"
 BOT_BET_XU = 1000
 BOT_MATCH_DURATION = '1800'
 BOT_TURN_DURATION = '60'
+
+# ---- CHẾ ĐỘ THÍ NGHIỆM: HUNT (chỉ dò bàn, KHÔNG tự tạo) ----
+# CARO_MODE=hunt (mặc định thí nghiệm) | create (hành vi cũ tự tạo bàn)
+CARO_MODE = os.environ.get("CARO_MODE", "hunt").strip().lower()
+HUNT_MODE = CARO_MODE in ("hunt", "scan", "join", "1", "true", "yes")
+# Mức cược mục tiêu: 10k / 20k / 40k (csv). Cho phép sai số nhỏ do làm tròn id.
+def _parse_bet_list(raw, default):
+    try:
+        vals = [int(x.strip()) for x in str(raw).split(",") if x.strip()]
+        return vals or list(default)
+    except Exception:
+        return list(default)
+HUNT_BETS = _parse_bet_list(os.environ.get("CARO_HUNT_BETS", "10000,20000,40000"),
+                            (10000, 20000, 40000))
+HUNT_BET_TOLERANCE = int(os.environ.get("CARO_HUNT_TOL", "500") or 500)
+HUNT_INTERVAL = float(os.environ.get("CARO_HUNT_INTERVAL", "12") or 12)      # nghỉ giữa 2 vòng quét
+HUNT_PAUSE = float(os.environ.get("CARO_HUNT_PAUSE", "25") or 25)            # quét hết sảnh không thấy
+HUNT_STEP_TIMEOUT = float(os.environ.get("CARO_HUNT_STEP_TIMEOUT", "12") or 12)
+HUNT_MAX_ROOMS = int(os.environ.get("CARO_HUNT_MAX_ROOMS", "8") or 8)
+HUNT_MAX_CHECKS = int(os.environ.get("CARO_HUNT_MAX_CHECKS", "6") or 6)
+# filter LIST_ZONE_TABLE: 0=all, 1=chưa đầy, 2=chưa chơi, 3=đang chơi
+HUNT_TABLE_FILTER = int(os.environ.get("CARO_HUNT_FILTER", "1") or 1)
+HUNT_LEAVE_AFTER = os.environ.get("CARO_HUNT_LEAVE_AFTER", "1") == "1"  # 1=hết ván về sảnh dò tiếp
+
+ZONE_BASE = "Lobby.caro"
+
 EMPTY = -1
 CIRCLE = 0
 CROSS = 1
@@ -440,7 +466,8 @@ CMD_MAP = {
     300: "PONG", 301: "PING", 302: "LOGIN", 303: "ALERT", 304: "RIBBON_MESSAGE",
     311: "BROADCAST", 312: "INVITE", 314: "SET_CLIENT_MODE", 315: "CONFIG",
     401: "ENTER_PLACE", 402: "ENTER_CHILD_PLACE", 405: "CREATE_RULE",
-    406: "PLAYER_ENTERED", 407: "PLAYER_EXITED", 410: "KICK_PLAYER",
+    406: "PLAYER_ENTERED", 407: "PLAYER_EXITED", 408: "QUICK_PLAY",
+    410: "KICK_PLAYER", 411: "LIST_ZONE_TABLE", 412: "LIST_ZONE_ROOM",
     413: "LIST_BET_AMT", 414: "GET_TABLE_DATA", 417: "START_MATCH",
     418: "GAMEOVER", 419: "ENTER_STATE", 420: "SET_TURN",
     421: "SET_PLAYER_STATUS", 422: "SET_PLAYER_POINT", 423: "SET_PLAYER_ATTR",
@@ -772,6 +799,19 @@ class CaroBot:
         # === SET_TURN TIMER TRACKER ===
         self.timer_tracker = SetTurnTracker()
 
+        # === HUNT (dò bàn 10k/20k/40k) ===
+        self._current_room_id = 0
+        self._scan_state = None          # None|'room_list'|'enter_room'|'table_list'|'checking'
+        self._scan_step_at = 0.0
+        self._scan_next_at = 0.0
+        self._scan_rooms = []
+        self._scan_target_room = None
+        self._scan_candidates = []       # [(priority, tid, bet, name), ...]
+        self._scan_checks = 0
+        self._join_is_scan = False
+        self._enter_kind = None          # 'room' | 'table' | None
+        self.player_id = 0
+
     def init_engine(self):
         if self.engine is not None: return self.embryo_available
         binary = detect_embryo_binary()
@@ -878,6 +918,30 @@ class CaroBot:
     def make_get_table(self) -> bytes:
         w = BinaryWriter(); w.write_command("GET_TABLE_DATA_EX"); w.write_ascii(""); return w.build()
 
+    def make_list_zone_room(self) -> bytes:
+        w = BinaryWriter(); w.write_command("LIST_ZONE_ROOM"); return w.build()
+
+    def make_list_zone_table(self, room_filter: int = 1) -> bytes:
+        w = BinaryWriter(); w.write_command("LIST_ZONE_TABLE"); w.i8(room_filter); return w.build()
+
+    def make_get_table_data(self, room_id: int, table_id: int) -> bytes:
+        w = BinaryWriter(); w.write_command("GET_TABLE_DATA")
+        w.write_ascii(f"{ZONE_BASE}.{room_id}.{table_id}"); return w.build()
+
+    def _bet_value_of(self, bet_id: int):
+        for ba in self.bet_amts:
+            if ba["id"] == bet_id:
+                return ba["value"]
+        return None
+
+    def _bet_matches_hunt(self, bet) -> bool:
+        if bet is None or bet <= 0:
+            return False
+        for target in HUNT_BETS:
+            if abs(int(bet) - int(target)) <= HUNT_BET_TOLERANCE:
+                return True
+        return False
+
     def make_play(self, pos: int) -> bytes:
         w = BinaryWriter(); w.write_command("PLAY"); w.i16(pos); return w.build()
 
@@ -898,11 +962,133 @@ class CaroBot:
             except Exception: pass
 
     async def create_new_table(self):
+        """Hành vi cũ: tự tạo bàn. Ở HUNT_MODE → chuyển sang dò sảnh."""
+        if HUNT_MODE:
+            await self.leave_to_lobby_and_hunt("create_new_table→hunt")
+            return
         if not self._bet_amts_loaded:
             self._bet_amts_loaded = False
             await self.send(self.make_list_bet_amt())
         else:
             await self.send(self.make_create_rule())
+
+    async def leave_to_lobby_and_hunt(self, reason: str = ""):
+        """Rời bàn (nếu có) về sảnh gốc rồi bắt đầu/tiếp tục dò bàn mục tiêu."""
+        if self.is_playing:
+            log.info(f"[HUNT] Đang trong ván — không rời bàn ({reason})")
+            return
+        log.info(f"[HUNT] 🚪 Về sảnh dò bàn {HUNT_BETS} xu ({reason})")
+        self.ready = False
+        self.in_table = False
+        self.table_id = None
+        self.players = {}
+        self.player_slot_by_id = {}
+        self._joining_table = False
+        self._join_is_scan = False
+        self._rejoining = False
+        self._want_rejoin = False
+        self.slot = -1
+        self._scan_state = None
+        self._scan_candidates = []
+        self._scan_checks = 0
+        self._scan_next_at = 0.0
+        self._enter_kind = 'room'
+        # Về Lobby.caro.0
+        self.place_path = f"{ZONE_BASE}.0"
+        self._current_room_id = 0
+        await self.send(self.make_enter(self.place_path, mode=1))
+
+    def _scan_step(self, state: str):
+        self._scan_state = state
+        self._scan_step_at = time.time()
+
+    async def _scan_begin(self):
+        if self.is_playing or self.in_table or self._joining_table:
+            return
+        if not self._bet_amts_loaded:
+            log.info("[HUNT] Chưa có LIST_BET_AMT → xin danh sách mức cược trước")
+            await self.send(self.make_list_bet_amt())
+            return
+        log.info(f"[HUNT] 🔎 Bắt đầu quét sảnh tìm bàn {HUNT_BETS} xu...")
+        self._scan_checks = 0
+        self._scan_candidates = []
+        self._scan_step('room_list')
+        await self.send(self.make_list_zone_room())
+
+    def _scan_pause(self, reason: str, pause=None):
+        wait = HUNT_PAUSE if pause is None else pause
+        self._scan_state = None
+        self._scan_next_at = time.time() + wait
+        log.info(f"[HUNT] ⏹ {reason} → nghỉ {wait:.0f}s rồi quét lại")
+
+    def _scan_abort_step(self, reason: str):
+        self._scan_state = None
+        self._scan_next_at = time.time() + HUNT_INTERVAL
+        log.info(f"[HUNT] ⚠️ Vòng quét dừng: {reason}")
+
+    async def _scan_next_room(self):
+        self._scan_candidates = []
+        while self._scan_rooms:
+            rid = self._scan_rooms.pop(0)
+            if rid == self._current_room_id:
+                self._scan_step('table_list')
+                await self.send(self.make_list_zone_table(HUNT_TABLE_FILTER))
+                return
+            self._scan_target_room = rid
+            self._scan_step('enter_room')
+            self._enter_kind = 'room'
+            await self.send(self.make_enter(f"{ZONE_BASE}.{rid}", mode=1))
+            return
+        self._scan_pause("đã quét hết sảnh, không có bàn 10k/20k/40k phù hợp")
+
+    def _pick_scan_tables(self, tables):
+        """Lọc bàn: chưa chơi, còn ghế, không pwd, mức cược ∈ {10k,20k,40k}."""
+        cands = []
+        for t in tables:
+            if t.get("playing"):
+                continue
+            if t.get("pwd"):
+                continue
+            if t.get("type", 0) not in (0,):
+                # type 0 = bàn thường
+                continue
+            # slots: số ghế CÒN TRỐNG (theo client). Cần >=1 trống + có người chờ.
+            # LIST_ZONE_TABLE: slots==1 thường = 1 ghế trống (bàn 2 người có 1 người).
+            slots = t.get("slots", 0)
+            if slots < 1:
+                continue
+            bet = self._bet_value_of(t["bet_id"])
+            if not self._bet_matches_hunt(bet):
+                continue
+            # ưu tiên đúng mức cao hơn (40k > 20k > 10k), rồi gần target
+            prio = -int(bet or 0)
+            cands.append((prio, t["id"], int(bet or 0), t.get("name") or ""))
+        cands.sort(key=lambda c: (c[0], c[1]))
+        return cands[:HUNT_MAX_CHECKS]
+
+    async def _scan_try_join(self):
+        if not self._scan_candidates:
+            await self._scan_next_room()
+            return
+        if self._scan_checks >= HUNT_MAX_CHECKS:
+            self._scan_pause("đã check đủ ứng viên trong vòng này")
+            return
+        _, tid, bet, name = self._scan_candidates[0]
+        self._scan_checks += 1
+        self._scan_step('checking')
+        log.info(f"[HUNT] 👁 Check bàn #{tid} ({name}) cược {bet:,}xu sảnh #{self._current_room_id}")
+        await self.send(self.make_get_table_data(self._current_room_id, tid))
+
+    async def _scan_join_table(self, table_id: int, bet: int, name: str):
+        path = f"{ZONE_BASE}.{self._current_room_id}.{table_id}"
+        self._joining_table = True
+        self._join_is_scan = True
+        self._enter_kind = 'table'
+        self.table_id = str(table_id)
+        self._scan_state = None
+        self._scan_next_at = 0.0
+        log.info(f"[HUNT] ✅ VÀO BÀN #{table_id} ({name}) sảnh #{self._current_room_id} cược {bet:,}xu → {path}")
+        await self.send(self.make_enter(path, mode=1))
 
     async def do_move(self):
         if not self.is_playing or not self.running or self.slot < 0: return
@@ -1002,6 +1188,9 @@ class CaroBot:
             elif cmd == "ENTER_PLACE": await self.handle_enter(r)
             elif cmd == "LIST_BET_AMT": await self.handle_list_bet_amt(r)
             elif cmd == "CREATE_RULE": await self.handle_create_rule(r)
+            elif cmd == "LIST_ZONE_ROOM": await self.handle_list_zone_room(r)
+            elif cmd == "LIST_ZONE_TABLE": await self.handle_list_zone_table(r)
+            elif cmd == "GET_TABLE_DATA": await self.handle_get_table_data(r)
             elif cmd == "GET_TABLE_DATA_EX": await self.handle_table(r)
             elif cmd == "START_MATCH": await self.handle_start(r)
             elif cmd == "SET_TURN": await self.handle_turn(r)
@@ -1029,27 +1218,82 @@ class CaroBot:
     async def handle_enter(self, r: BinaryReader):
         status = r.i8()
         if status == 0:
-            if self._joining_table:
-                self._joining_table = False; self._rejoining = False
+            # Thành công vào place (sảnh hoặc bàn)
+            if self._enter_kind == 'room' and self._scan_state == 'enter_room':
+                self._current_room_id = self._scan_target_room if self._scan_target_room is not None else self._current_room_id
+                self.place_path = f"{ZONE_BASE}.{self._current_room_id}"
+                self._enter_kind = None
+                log.info(f"[HUNT] 🏘️ Vào sảnh #{self._current_room_id}")
+                self._scan_step('table_list')
+                await self.send(self.make_list_zone_table(HUNT_TABLE_FILTER))
+                return
+
+            if self._joining_table or self._join_is_scan:
+                self._joining_table = False
+                self._rejoining = False
+                self._join_is_scan = False
+                self._enter_kind = None
                 self.in_table = True
+                self._scan_state = None
+                log.info(f"[HUNT] 🪑 Đã vào bàn id={self.table_id}")
                 await asyncio.sleep(0.3); await self.send(self.make_get_table())
-            elif not self.in_table:
-                if self._want_rejoin and self.table_id:
+                return
+
+            if not self.in_table:
+                if self._want_rejoin and self.table_id and not HUNT_MODE:
                     self._want_rejoin = False; self._rejoining = True; self._joining_table = True
                     path = f"{self.place_path}.{self.table_id}"
                     log.info(f"[BOT] Thử vào lại bàn cũ: {path}")
                     await self.send(self.make_enter(path))
                 else:
-                    self._bet_amts_loaded = False; self._resolved_bet_id = None
-                    await self.send(self.make_list_bet_amt())
+                    # Vào sảnh (LOGIN lần đầu hoặc leave_to_lobby)
+                    if self._current_room_id is None:
+                        self._current_room_id = 0
+                    # cố gắng suy room id từ place_path
+                    try:
+                        parts = (self.place_path or "").split(".")
+                        if len(parts) >= 3 and parts[-1].isdigit():
+                            self._current_room_id = int(parts[-1])
+                    except Exception:
+                        pass
+                    if HUNT_MODE and self._bet_amts_loaded:
+                        self._scan_next_at = 0.0
+                        await self._scan_begin()
+                    else:
+                        self._bet_amts_loaded = False; self._resolved_bet_id = None
+                        await self.send(self.make_list_bet_amt())
         else:
-            if self._joining_table:
+            # ENTER fail
+            if self._enter_kind == 'room' and self._scan_state == 'enter_room':
+                log.info(f"[HUNT] ⚠️ Vào sảnh #{self._scan_target_room} bị từ chối (status={status})")
+                self._enter_kind = None
+                await self._scan_next_room()
+                return
+            if self._joining_table or self._join_is_scan:
+                was_scan = self._join_is_scan
                 self._joining_table = False
+                self._join_is_scan = False
+                self._enter_kind = None
                 if self._rejoining:
                     self._rejoining = False; self._rejoin_attempts += 1; self.table_id = None
-                    await asyncio.sleep(1); await self.send(self.make_list_bet_amt())
+                    await asyncio.sleep(1)
+                    if HUNT_MODE:
+                        await self.leave_to_lobby_and_hunt("rejoin fail")
+                    else:
+                        await self.send(self.make_list_bet_amt())
+                elif was_scan:
+                    log.info(f"[HUNT] ❌ Vào bàn thất bại status={status} → thử bàn khác")
+                    self.table_id = None
+                    if self._scan_candidates:
+                        await self._scan_try_join()
+                    else:
+                        await self._scan_next_room()
                 else:
-                    await asyncio.sleep(1); await self.send(self.make_create_rule())
+                    await asyncio.sleep(1)
+                    if HUNT_MODE:
+                        await self.leave_to_lobby_and_hunt("enter fail")
+                    else:
+                        await self.send(self.make_create_rule())
 
     async def handle_list_bet_amt(self, r: BinaryReader):
         status = r.i8()
@@ -1058,7 +1302,20 @@ class CaroBot:
         self.bet_amts = [{"id": i, "value": r.i32()} for i in range(count)]
         self._resolved_bet_id = self.resolve_bet_amt_id()
         self._bet_amts_loaded = True
-        await self.send(self.make_create_rule())
+        pretty = ", ".join(f"{ba['value']:,}xu(id={ba['id']})" for ba in self.bet_amts[:16])
+        log.info(f"[BET] {count} mức cược: {pretty}")
+        # Map hunt targets → id
+        for t in HUNT_BETS:
+            hit = next((ba for ba in self.bet_amts if abs(ba["value"] - t) <= HUNT_BET_TOLERANCE), None)
+            if hit:
+                log.info(f"[HUNT] Mục tiêu {t:,}xu ↔ bet_id={hit['id']} (value={hit['value']:,})")
+            else:
+                log.warning(f"[HUNT] ⚠️ Không thấy mức ~{t:,}xu trên server")
+        if HUNT_MODE:
+            self._scan_next_at = 0.0
+            await self._scan_begin()
+        else:
+            await self.send(self.make_create_rule())
 
     async def handle_create_rule(self, r: BinaryReader):
         status = r.i8()
@@ -1071,6 +1328,141 @@ class CaroBot:
         else:
             self._joining_table = False
 
+    async def handle_list_zone_room(self, r: BinaryReader):
+        if self._scan_state != 'room_list':
+            return
+        status = r.i8()
+        if status != 0:
+            self._scan_abort_step(f"LIST_ZONE_ROOM status={status}")
+            return
+        try:
+            count = r.u8()
+            rooms = []
+            for _ in range(count):
+                rid = r.u8()
+                name = r.read_utf()
+                clients = r.i16()
+                tables = r.i16()
+                max_tables = r.i16()
+                rooms.append({"id": rid, "name": name, "clients": clients,
+                              "tables": tables, "max": max_tables})
+        except Exception as e:
+            self._scan_abort_step(f"parse sảnh lỗi: {e}")
+            return
+        if not rooms:
+            self._scan_pause("server không trả sảnh nào")
+            return
+        info = ", ".join(f"#{rm['id']}{rm['name']}({rm['clients']}ng/{rm['tables']}b)"
+                         for rm in rooms[:12])
+        log.info(f"[HUNT] 🏘️ {len(rooms)} sảnh: {info}")
+        rooms.sort(key=lambda rm: (0 if rm["id"] == self._current_room_id else 1, -rm["clients"]))
+        picked = [rm["id"] for rm in rooms if rm["clients"] > 0 and rm["tables"] > 0]
+        if not picked:
+            picked = [rm["id"] for rm in rooms if rm["tables"] > 0]
+        if not picked:
+            picked = [rm["id"] for rm in rooms]
+        if not picked:
+            self._scan_pause("không có sảnh nào")
+            return
+        self._scan_rooms = picked[:max(1, HUNT_MAX_ROOMS)]
+        await self._scan_next_room()
+
+    async def handle_list_zone_table(self, r: BinaryReader):
+        if self._scan_state != 'table_list':
+            return
+        status = r.i8()
+        if status != 0:
+            self._scan_abort_step(f"LIST_ZONE_TABLE status={status}")
+            return
+        try:
+            count = r.i32()
+            tables = []
+            for _ in range(count):
+                tid = r.i16()
+                name = r.read_utf()
+                ttype = r.u8()
+                bet_id = r.u8()
+                slots = r.u8()
+                playing = (r.u8() == 0)   # 0 = đang chơi (client web)
+                pwd = (r.u8() == 1)
+                tables.append({"id": tid, "name": name, "type": ttype, "bet_id": bet_id,
+                               "slots": slots, "playing": playing, "pwd": pwd})
+        except Exception as e:
+            self._scan_abort_step(f"parse bàn lỗi: {e}")
+            return
+        self._scan_candidates = self._pick_scan_tables(tables)
+        waiting = sum(1 for t in tables if (not t["playing"]) and t["slots"] >= 1)
+        if not self._scan_candidates:
+            # debug: show bet distribution of waiting tables
+            sample = []
+            for t in tables:
+                if t["playing"] or t["pwd"]:
+                    continue
+                b = self._bet_value_of(t["bet_id"])
+                sample.append(f"#{t['id']}({b}xu,slot={t['slots']})")
+                if len(sample) >= 8:
+                    break
+            log.info(f"[HUNT] 👁 Sảnh #{self._current_room_id}: {count} bàn "
+                     f"({waiting} chờ) — không có 10k/20k/40k. Mẫu: {', '.join(sample) or '—'}")
+            await self._scan_next_room()
+            return
+        pretty = ", ".join(f"#{tid}({bet:,}xu)" for _, tid, bet, _ in self._scan_candidates)
+        log.info(f"[HUNT] 🎯 Sảnh #{self._current_room_id}: {len(self._scan_candidates)}/{count} "
+                 f"bàn khớp {HUNT_BETS}: {pretty}")
+        await self._scan_try_join()
+
+    async def handle_get_table_data(self, r: BinaryReader):
+        if self._scan_state != 'checking':
+            return
+        status = r.i8()
+        if status != 0 or not self._scan_candidates:
+            if self._scan_candidates:
+                self._scan_candidates.pop(0)
+                await self._scan_try_join()
+            else:
+                await self._scan_next_room()
+            return
+        try:
+            owner = r.i64()
+            count = r.u8()
+            players = []
+            for _ in range(count):
+                pid = r.i64()
+                fname = r.read_utf()
+                _avatar = r.read_ascii()
+                _avatar_id = r.i16()
+                _tag = r.u8()
+                chip = r.i64()
+                _star = r.i64()
+                _score = r.i64()
+                _level = r.u8()
+                players.append((pid, fname, chip))
+        except Exception as e:
+            self._scan_abort_step(f"parse người trong bàn lỗi: {e}")
+            return
+        if not self._scan_candidates:
+            await self._scan_next_room()
+            return
+        _, tid, bet, name = self._scan_candidates.pop(0)
+        if not players:
+            log.info(f"[HUNT] 👁 Bàn #{tid} ({name}) vừa trống → bỏ qua")
+            await self._scan_try_join()
+            return
+        # Đầy ghế? (caro 2 người)
+        if len(players) >= 2:
+            log.info(f"[HUNT] 👁 Bàn #{tid} đã đủ {len(players)} người → bỏ qua")
+            await self._scan_try_join()
+            return
+        fam = [f for pid, f, _c in players
+               if pid != getattr(self, "player_id", 0) and self.is_family_bot(f)]
+        if (self.player_id and owner == self.player_id) or fam:
+            log.info(f"[HUNT] 🤝 Bàn #{tid} ({name}) là nhà mình ({fam or 'owner'}) → bỏ qua")
+            await self._scan_try_join()
+            return
+        who = ", ".join(f"{f or '?'}({_c:,}xu)" for pid, f, _c in players[:2]) or "trống"
+        log.info(f"[HUNT] ✅ Chọn bàn #{tid} ({name}) cược {bet:,}xu — {who}")
+        await self._scan_join_table(tid, bet, name)
+
     async def handle_table(self, r: BinaryReader):
         if self._moving:
             log.info("[TABLE] Engine đang tính, bỏ qua board reload")
@@ -1078,9 +1470,13 @@ class CaroBot:
         try:
             first_byte = r.i8()
             if first_byte != 0:
-                if "not in table" in r.read_utf().lower():
+                msg = r.read_utf().lower() if r.remaining() else ""
+                if "not in table" in msg:
                     self.in_table = False; self.table_id = None
-                    await self.create_new_table()
+                    if HUNT_MODE:
+                        await self.leave_to_lobby_and_hunt("not in table")
+                    else:
+                        await self.create_new_table()
                 return
 
             seat_count = r.u8()
@@ -1139,7 +1535,11 @@ class CaroBot:
                     self.ready = False
             elif not is_playing and self.slot < 0:
                 self.in_table = False; self.table_id = None
-                await asyncio.sleep(1); await self.send(self.make_list_bet_amt())
+                await asyncio.sleep(1)
+                if HUNT_MODE:
+                    await self.leave_to_lobby_and_hunt("slot<0")
+                else:
+                    await self.send(self.make_list_bet_amt())
 
             self._rejoining = False
         except Exception as e: log.error(f"Table error: {e}")
@@ -1246,7 +1646,11 @@ class CaroBot:
 
         if self._table_lost_at is not None:
             self._table_lost_at = None
-            await asyncio.sleep(2); await self.create_new_table()
+            await asyncio.sleep(2)
+            if HUNT_MODE:
+                await self.leave_to_lobby_and_hunt("table lost @gameover")
+            else:
+                await self.create_new_table()
             return
 
         if bot_lost:
@@ -1260,11 +1664,22 @@ class CaroBot:
             if winner_id is not None:
                 log.info(f"[BOT] Bot thua; kick người thắng {winner.get('name', winner_id)} sau 5 giây...")
                 asyncio.create_task(self._delay_kick(winner_id, 5.0))
+                if HUNT_MODE and HUNT_LEAVE_AFTER:
+                    async def _kick_then_hunt():
+                        await asyncio.sleep(8.0)
+                        if not self.is_playing:
+                            await self.leave_to_lobby_and_hunt("gameover-lose")
+                    asyncio.create_task(_kick_then_hunt())
                 return
             log.warning("[BOT] Bot thua nhưng không tìm thấy playerId người thắng; chuyển sang sẵn sàng")
 
-        log.info("[BOT] Ở lại bàn, sẽ sẵn sàng sau 5 giây...")
-        asyncio.create_task(self._delay_ready(5.0))
+        if HUNT_MODE and HUNT_LEAVE_AFTER:
+            log.info("[HUNT] Hết ván → về sảnh dò bàn 10k/20k/40k tiếp")
+            await asyncio.sleep(2)
+            await self.leave_to_lobby_and_hunt("gameover")
+        else:
+            log.info("[BOT] Ở lại bàn, sẽ sẵn sàng sau 5 giây...")
+            asyncio.create_task(self._delay_ready(5.0))
 
     async def handle_kick(self, r: BinaryReader):
         status = r.i8(); content = r.read_utf()
@@ -1281,7 +1696,11 @@ class CaroBot:
         log.warning(f"[BOT] Bot bị kick khỏi bàn: {content}")
         self.is_playing = False; self.in_table = False; self.pending_move = False
         self.table_id = None
-        await asyncio.sleep(1); await self.create_new_table()
+        await asyncio.sleep(1)
+        if HUNT_MODE:
+            await self.leave_to_lobby_and_hunt("bị kick")
+        else:
+            await self.create_new_table()
 
     async def _delay_kick(self, player_id: int, delay: float):
         await asyncio.sleep(delay)
@@ -1334,7 +1753,12 @@ class CaroBot:
             if self.is_playing:
                 self.in_table = False; self._table_lost_at = time.time()
             else:
-                self.in_table = False; await asyncio.sleep(1); await self.create_new_table()
+                self.in_table = False
+                await asyncio.sleep(1)
+                if HUNT_MODE:
+                    await self.leave_to_lobby_and_hunt("self exit")
+                else:
+                    await self.create_new_table()
         elif self.is_playing:
             if self.opponent_gone_at is None:
                 self.opponent_gone_at = time.time()
@@ -1364,11 +1788,30 @@ class CaroBot:
                 if (self._table_lost_at is not None
                     and time.time() - self._table_lost_at > 8):
                     self._table_lost_at = None; self.table_id = None
-                    await self.create_new_table()
+                    if HUNT_MODE:
+                        await self.leave_to_lobby_and_hunt("table_lost timeout")
+                    else:
+                        await self.create_new_table()
 
-                if (not self.is_playing and not self.in_table and not self._joining_table
-                    and not self._rejoining and self._bet_amts_loaded):
-                    await self.send(self.make_create_rule())
+                now = time.time()
+                if HUNT_MODE:
+                    # Timeout 1 bước quét
+                    if (self._scan_state and self._scan_step_at
+                            and now - self._scan_step_at > HUNT_STEP_TIMEOUT
+                            and not self.is_playing and not self.in_table
+                            and not self._joining_table):
+                        log.info(f"[HUNT] ⏳ Timeout bước '{self._scan_state}' → quét lại")
+                        self._scan_state = None
+                        self._scan_next_at = 0.0
+                        await self._scan_begin()
+                    elif (not self.is_playing and not self.in_table and not self._joining_table
+                          and not self._rejoining and self._bet_amts_loaded
+                          and self._scan_state is None and now >= self._scan_next_at):
+                        await self._scan_begin()
+                else:
+                    if (not self.is_playing and not self.in_table and not self._joining_table
+                        and not self._rejoining and self._bet_amts_loaded):
+                        await self.send(self.make_create_rule())
             except Exception: pass
 
     # ======================== HTTP LOGIN & IDENTITY ========================
@@ -1419,15 +1862,18 @@ class CaroBot:
         return is_family_name(name, self_names=self_names)
 
     async def _avoid_family_and_remake(self, name: str):
-        """Rời bàn đồng đội và tạo bàn mới (caro tự tạo bàn)."""
-        log.info(f"[AVOID] ⚠️ Đối thủ '{name}' là bot đồng đội → tạo bàn mới")
+        """Rời bàn đồng đội. HUNT: về sảnh dò tiếp; create: tạo bàn mới."""
+        log.info(f"[AVOID] ⚠️ Đối thủ '{name}' là bot đồng đội → rời bàn")
         self.ready = False
         self.in_table = False
         self.table_id = None
         self.players = {}
         self.player_slot_by_id = {}
         await asyncio.sleep(0.5)
-        await self.create_new_table()
+        if HUNT_MODE:
+            await self.leave_to_lobby_and_hunt(f"đồng đội {name}")
+        else:
+            await self.create_new_table()
 
     def update_random_full_name(self, session: requests.Session) -> Dict:
         edit_url = 'https://gamevh.net/com/ftl/game/profile/update_profile.jsp'
@@ -1556,7 +2002,14 @@ class CaroBot:
                 log.warning("[BOT] Token not found in page!")
                 return False
 
-            log.info(f"[BOT] HTTP login OK. token={self.token}")
+            pid_m = re.search(r'var\s+currentPlayerId\s*=\s*(\d+)', page_html)
+            if pid_m:
+                self.player_id = int(pid_m.group(1))
+            nick_m = re.search(r'var\s+currentPlayerNickName\s*=\s*[\'"]([^\'"]+)[\'"]', page_html)
+            if nick_m:
+                self.nickname = nick_m.group(1).strip() or self.nickname
+
+            log.info(f"[BOT] HTTP login OK. token={self.token} playerId={self.player_id} nick={self.nickname!r}")
             return True
         except Exception as e:
             log.error(f"[BOT] HTTP login error: {e}")
@@ -1568,8 +2021,10 @@ class CaroBot:
         self.nickname = USER
 
         log.info("=" * 60)
-        log.info(f"BOT CARO v4.0 - SET_TURN Timer Monitor")
-        log.info(f"User: {USER} | Runtime: {RUNTIME}s")
+        log.info(f"BOT CARO v4.1 - HUNT thí nghiệm" if HUNT_MODE else "BOT CARO v4.0 - create table")
+        log.info(f"User: {USER} | Runtime: {RUNTIME}s | Mode: {CARO_MODE}")
+        if HUNT_MODE:
+            log.info(f"HUNT bets={HUNT_BETS} interval={HUNT_INTERVAL}s pause={HUNT_PAUSE}s")
         log.info(f"Engine: Embryo v{EMBRYO_VERSION}")
         log.info("=" * 60)
 
