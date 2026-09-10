@@ -796,6 +796,9 @@ IDENTITY_TEST_ONLY = os.environ.get("CARO_IDENTITY_TEST_ONLY", "0") == "1"
 BOT_BET_XU = 1000
 BOT_MATCH_DURATION = '1800'  # 1800s trên server GameVH
 BOT_TURN_DURATION = '60'     # 60s/nước trên server
+# Đếm ngược server khi đối phương VÀO BÀN (accDuration):
+#   "0" = mặc định server = 10s  →  đổi sang "2" để countdown 2s, bot vào trận ngay
+BOT_ACC_DURATION = '2'
 EMPTY = -1
 CIRCLE = 0
 CROSS = 1
@@ -1209,7 +1212,7 @@ class CaroBot:
         bet_amt_id = self._resolved_bet_id if self._resolved_bet_id is not None else self.resolve_bet_amt_id()
         if bet_amt_id is None: bet_amt_id = 0
         args = [("matchDuration", BOT_MATCH_DURATION), ("turnDuration", BOT_TURN_DURATION),
-                ("accDuration", "0"), ("blockSoftware", "0")]
+                ("accDuration", BOT_ACC_DURATION), ("blockSoftware", "0")]
         w = BinaryWriter(); w.write_command("CREATE_RULE"); w.i8(bet_amt_id); w.i8(len(args))
         for name, val in args: w.write_ascii(name); w.write_utf(val)
         return w.build()
@@ -1507,11 +1510,21 @@ class CaroBot:
             await asyncio.sleep(0.5); await self.send(self.make_get_table())
 
     async def handle_turn(self, r: BinaryReader):
-        sid = r.i8(); r.i16(); r.i16()
+        sid = r.i8(); turn_timeout = r.i16(); r.i16()
+        context = "game" if self.is_playing else "lobby"
         if self.slot < 0: return
         if sid == self.slot and self.is_playing and self.running:
             if not self.pending_move and not self._moving:
                 self.pending_move = True; await asyncio.sleep(2); await self.do_move()
+
+        # === FIX COUNTDOWN 2s: SET_TURN lobby = server đang đếm ngược
+        # (đối phương vừa vào bàn). Chưa READY thì READY ngay để countdown
+        # hết (accDuration=2s) là vào trận, không phải chờ 10s như trước.
+        if (context == "lobby" and self.in_table and self.slot >= 0
+                and not self.is_playing and not self.ready):
+            log.info(f"[BOT] SET_TURN lobby countdown={turn_timeout}s → SET_READY ngay!")
+            self.ready = True
+            await self.send(self.make_ready())
 
     async def handle_move(self, r: BinaryReader):
         pos = r.i16(); symbol = r.i8()
@@ -1633,6 +1646,13 @@ class CaroBot:
         if place_level < 4: return
         log.info(f"[BOT] Phát hiện {name} vào bàn cờ. Đang cập nhật trạng thái bàn...")
         await self.send(self.make_get_table())
+        # === FIX COUNTDOWN 2s: đối phương vào bàn → SET_READY NGAY ===
+        # Server đang đếm ngược accDuration (BOT_ACC_DURATION=2s) từ lúc này;
+        # bot phải READY trước khi countdown hết để vào trận ngay lập tức.
+        if self.slot >= 0 and not self.is_playing and not self.ready:
+            log.info(f"[BOT] SET_READY ngay (countdown {BOT_ACC_DURATION}s) → vào trận ngay!")
+            self.ready = True
+            await self.send(self.make_ready())
 
     async def handle_player_exit(self, r: BinaryReader):
         place_level = r.i8()
