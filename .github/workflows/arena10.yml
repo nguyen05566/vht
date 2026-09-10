@@ -8,12 +8,11 @@ on:
         required: false
         default: '5.7'
         type: string
-  schedule:  # Luoi an toan / watchdog: tu phuc hoi neu chuoi ban giao bi dut
-    - cron: '15 */6 * * *'
+  schedule:
+    - cron: '0 */6 * * *'
 
 permissions:
   contents: read
-  actions: write  # can de tu kich phien ke tiep qua API
 
 concurrency:
   group: ${{ github.workflow }}-gamevh-account
@@ -33,58 +32,76 @@ jobs:
           python-version: '3.11'
 
       - name: Install Python dependencies
-        run: pip install websockets requests --break-system-packages
+        run: pip install websocket-client requests --break-system-packages
 
-      - name: Cache Embryo engine
-        id: cache-embryo
+      - name: Cache Pikafish engine
+        id: cache-pikafish
         uses: actions/cache@v4
         with:
-          path: embryo-engine
-          key: embryo-caro6-linux-1.2.0-c6
+          path: |
+            ~/pikafish
+            ~/pikafish.nnue
+          key: pikafish-2026-01-02-linux
 
-      - name: Run Caro Bot arena10 (tu ban giao truoc khi het gio)
+      - name: Download Pikafish engine + NNUE
+        if: steps.cache-pikafish.outputs.cache-hit != 'true'
+        timeout-minutes: 10
         env:
-          CARO_RUNTIME_HOURS: ${{ inputs.runtime_hours || '5.7' }}
-          # Uu tien Secrets neu co, khong co thi arena10.py fallback ve hardcode arena10
-          CARO_USER: ${{ secrets.CARO_USER }}
-          CARO_PWWD: ${{ secrets.CARO_PWWD }}
-          HANDOFF_MINUTES: '348'
+          PK_URL: https://github.com/official-pikafish/Pikafish/releases/download/Pikafish-2026-01-02/Pikafish.2026-01-02.7z
         run: |
-          START=$(date +%s)
-          LIMIT=$((HANDOFF_MINUTES * 60))
-          echo "Bot chay toi da ${HANDOFF_MINUTES} phut roi tu ban giao sang phien moi (job timeout 355p)"
+          set -e
+          # KHÔNG dùng apt nữa: "apt-get update/install p7zip-full" từng treo >7 phút
+          # trên runner mới boot (chờ lock dpkg) khiến bot không bao giờ chạy.
+          # Dùng py7zr qua pip - nhanh, không đụng tới apt.
+          python3 -m pip install --quiet py7zr
+
+          curl -fL --retry 4 --retry-delay 5 --retry-all-errors --max-time 420 \
+               -o /tmp/pikafish.7z "$PK_URL"
+          ls -lh /tmp/pikafish.7z
+
+          if grep -q avx512vnni /proc/cpuinfo; then BIN=pikafish-vnni512
+          elif grep -q avx512f /proc/cpuinfo;  then BIN=pikafish-avx512
+          elif grep -q bmi2 /proc/cpuinfo;     then BIN=pikafish-bmi2
+          elif grep -q avx2 /proc/cpuinfo;     then BIN=pikafish-avx2
+          else BIN=pikafish-sse41-popcnt; fi
+          echo "[ENGINE] CPU hợp với $BIN"
+
+          python3 - "$BIN" <<'PY'
+          import os, shutil, sys, py7zr
+          binname = sys.argv[1]
+          targets = {f"Linux/{binname}", "Linux/pikafish-sse41-popcnt", "pikafish.nnue"}
+          with py7zr.SevenZipFile("/tmp/pikafish.7z") as z:
+              z.extract(path="/tmp/pikafish", targets=sorted(targets))
+          home = os.path.expanduser("~")
+          shutil.copy(f"/tmp/pikafish/Linux/{binname}", f"{home}/pikafish")
+          shutil.copy("/tmp/pikafish/pikafish.nnue", f"{home}/pikafish.nnue")
+          os.chmod(f"{home}/pikafish", 0o755)
+          print(f"[ENGINE] Đã cài {binname} + NNUE vào {home}")
+          PY
+
+          if ! echo -e "uci\nquit" | "$HOME/pikafish" > /dev/null 2>&1; then
+            echo "[ENGINE] $BIN không chạy được -> fallback sse41-popcnt"
+            cp /tmp/pikafish/Linux/pikafish-sse41-popcnt "$HOME/pikafish"
+            chmod +x "$HOME/pikafish"
+          fi
+
+      - name: Verify engine
+        timeout-minutes: 3
+        run: |
+          chmod +x "$HOME/pikafish"
+          ls -lh "$HOME/pikafish" "$HOME/pikafish.nnue"
+          echo -e "uci\nquit" | "$HOME/pikafish" | head -3
+
+      - name: Run Xiangqi Bot arena10 (tài khoản nguyen19)
+        env:
+          CARO_USER19: ${{ secrets.CARO_USER10 }}
+          CARO_PASSWD19: ${{ secrets.CARO_PASSWD10 }}
+          CARO_RUNTIME_HOURS: ${{ inputs.runtime_hours || '5.7' }}
+        run: |
+          echo "Starting arena10.py; it will auto-restart until job timeout (~6h)"
           while true; do
-            NOW=$(date +%s)
-            ELAPSED=$((NOW - START))
-            REMAINING=$((LIMIT - ELAPSED))
-            if [ "$REMAINING" -le 60 ]; then
-              echo "Con ${REMAINING}s < 60s: den gio ban giao, dung bot de kich phien moi"
-              break
-            fi
-            echo "=== $(date -u +'%Y-%m-%dT%H:%M:%SZ') Starting arena10.py (phut $((ELAPSED / 60))/${HANDOFF_MINUTES}) ==="
-            # Gioi han moi luot bot khong vuot qua gio ban giao (bot tu thoat som hon neu crash/het RUNTIME)
-            timeout "${REMAINING}s" python3 -u arena10.py || echo "arena10.py exited with code $?"
+            echo "=== $(date -u +'%Y-%m-%dT%H:%M:%SZ') Starting arena10.py ==="
+            python3 -u arena10.py || echo "arena10.py exited with code $?"
             echo "Restarting arena10.py in 10 seconds"
             sleep 10
           done
-
-      - name: Kich phien ke tiep (ban giao lien tuc)
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          for i in 1 2 3; do
-            CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
-              -H "Accept: application/vnd.github+json" \
-              -H "Authorization: Bearer $GH_TOKEN" \
-              -H "X-GitHub-Api-Version: 2022-11-28" \
-              https://api.github.com/repos/${{ github.repository }}/actions/workflows/arena10.yml/dispatches \
-              -d '{"ref":"main"}')
-            echo "Lan $i: dispatch HTTP $CODE"
-            if [ "$CODE" = "204" ]; then
-              echo "Da kich phien moi thanh cong"
-              exit 0
-            fi
-            sleep 15
-          done
-          echo "Khong kich duoc phien moi sau 3 lan thu (cron 6h se tu phuc hoi)"
-          exit 1
