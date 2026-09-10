@@ -22,7 +22,7 @@ import random
 # Đăng nhập trực tiếp bằng username/password giống các bot nguyen1..nguyen6
 CARO_USER_DIRECT = "nguyen17"
 CARO_PASSWD_DIRECT = "******"
-BOT_DISPLAY_NAME = "hùng"  # Tên hiển thị của bot trên game
+BOT_DISPLAY_NAME = "hùng."  # Tên hiển thị của bot trên game
 
 def _clean_env(val, default):
     if val and str(val).strip():
