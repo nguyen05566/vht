@@ -3,7 +3,7 @@
 ╔══════════════════════════════════════════════════════════════════════╗
 ║  BOT CHẴN — gamevh.net — ALL-IN-ONE FILE                           ║
 ║  Engine luật + AI + WebSocket bot gộp 1 file                      ║
-║  Tốc độ: bốc/ăn/đánh trong 0.5s, không chờ hết giờ               ║
+║  Nhịp đi: chờ 5s trước khi đi/ăn để server phản ứng kịp          ║
 ╚══════════════════════════════════════════════════════════════════════╝
 """
 import subprocess, sys, os, importlib, json, time, struct
@@ -596,8 +596,9 @@ GAME_URL = "https://gamevh.net/play/chan/0"
 USER = os.environ.get("CHAN_USER") or "ngan100"; PWWD = os.environ.get("CHAN_PWWD") or "nhat123456"
 VERSION = "5.0.2"; GAME_ID = "chan"
 RUNTIME = int(float(os.environ.get("CHAN_RUNTIME_HOURS") or 5) * 3600); BOT_BET_XU = 50
-# CHAN_FAST=1 → chờ 0.8s/lượt thay vì 3s (chỉ dùng khi test trên workspace)
-_STEP = 0.8 if os.environ.get("CHAN_FAST") else 3.0
+# Nhịp đi: chờ 5s trước khi đi/ăn để server phản ứng kịp (CHAN_STEP đổi được;
+# CHAN_FAST=1 → 0.8s chỉ dùng khi test trên workspace)
+_STEP = 0.8 if os.environ.get("CHAN_FAST") else float(os.environ.get("CHAN_STEP") or 5.0)
 BOT_MATCH_DURATION = '1800'; BOT_TURN_DURATION = '60'
 
 # ======================== BOT ========================
@@ -613,6 +614,7 @@ class ChanBot:
         self.pending_move = False; self.bet_amts = []; self._bet_amts_loaded = False
         self._joining_table = False; self.table_id = None; self.player_slot_by_id = {}
         self._pending_kick_player_id = None; self.opponent_gone_at = None
+        self._fired_card = None; self._eat_tasks = set()
         self._table_lost_at = None; self._want_rejoin = False; self._rejoining = False
         self._rejoin_attempts = 0; self.last_fired_card = None; self.waiting_for_action = False
         self._last_played = None
@@ -722,10 +724,26 @@ class ChanBot:
         self._last_played = card
         await self.send(self.make_play(card))
 
+    def _schedule_eat_decision(self, quan_chieu: int):
+        """Chạy quyết định ăn trong task riêng — không chặn vòng đọc packet,
+        để nhận được MOVE của người khác chíu/ăn mất lá trong lúc chờ."""
+        async def _runner():
+            try:
+                await self.do_eat_decision(quan_chieu)
+            except Exception as e:
+                log.error(f"[AI] Lỗi quyết định ăn: {e}")
+        self._eat_tasks = {t for t in self._eat_tasks if not t.done()}
+        self._eat_tasks.add(asyncio.create_task(_runner()))
+
     async def do_eat_decision(self, quan_chieu: int):
-        """AI quyết định ăn bài — NHANH."""
+        """AI quyết định ăn bài — chờ _STEP giây cho server phản ứng kịp."""
         if self.ai.bi_bao():
             log.info(f"[AI] Đang bị báo, không ăn"); return
+        await asyncio.sleep(_STEP)  # đi sau _STEP giây (5s) — không ăn vội
+        # Sau lúc chờ, lá trên cửa có thể đã bị người khác chíu/ăn mất → kiểm tra lại
+        if self._fired_card != quan_chieu:
+            log.info(f"[AI] Bỏ quyết định ăn {card_name(quan_chieu)} — lá đã rời cửa chưới")
+            return
 
         # Chíu ưu tiên
         if self.ai.hand.count(quan_chieu) >= 3:
@@ -734,6 +752,7 @@ class ChanBot:
                 log.info(f"[AI] CHÍU {card_name(quan_chieu)}!")
                 self.ai.thuc_hien_an(quan_chieu, quan_chieu, "chieu")
                 await self.send(self.make_chiu())
+                await asyncio.sleep(_STEP)  # đợi server kịp xử lý chíu rồi mới trả cửa
                 qd = self.ai.chon_quan_danh()
                 if qd:
                     self.ai.thuc_hien_danh(qd)
@@ -942,7 +961,7 @@ class ChanBot:
     async def handle_start(self, r: BinaryReader):
         self.total_games += 1; self.is_playing = True; self.ready = False
         self.pending_move = False; self.opponent_gone_at = None; self.last_fired_card = None
-        self._last_played = None
+        self._last_played = None; self._fired_card = None
         self.ai = ChanAI("Bot")
 
         # Parse player info
@@ -1005,17 +1024,20 @@ class ChanBot:
             for cid in card_ids:
                 if source_slot != self.slot:
                     self.last_fired_card = cid
+                    self._fired_card = cid  # lá còn mở trên cửa chưới (chưa ai ăn)
                     self.ai.tang_lo(cid)  # đếm ĐÚNG 1 LẦN lúc lá xuống cửa
                     log.info(f"[AI] Quân cửa trên: {card_name(cid)} (slot {source_slot}) còn {self.ai._con_lai(cid)} lá bốc được")
-                    await self.do_eat_decision(cid)
+                    self._schedule_eat_decision(cid)
         elif source_line == 2 and target_slot == self.slot:
             # Xác nhận ăn của MÌNH: lá từ cửa về mỏ — đã đếm lúc bị đánh + đã
             # giam_lo lúc quyết định ăn → KHÔNG đếm lại (nguyên nhân "0 lá ảo").
+            self._fired_card = None  # lá đã rời cửa chưới về mỏ mình
             for cid in card_ids:
                 log.info(f"[AI] Xác nhận nhận quân ăn: {card_name(cid)} (đã đếm đúng 1 lần ở cửa)")
         elif source_slot != self.slot and source_slot >= 0:
             if source_line == 2:
                 # Đối thủ KHÁC ăn lá chưới → lá vẫn nằm ngoài bốc, đã đếm rồi
+                self._fired_card = None  # lá đã rời cửa chưới
                 for cid in card_ids:
                     log.info(f"[AI] Slot {target_slot} ăn lá chưới {card_name(cid)} (không đếm lại)")
             else:
