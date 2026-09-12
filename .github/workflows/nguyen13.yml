@@ -1,0 +1,47 @@
+name: nguyen13
+
+on:
+  workflow_dispatch:
+    inputs:
+      runtime_hours:
+        description: 'Runtime (hours)'
+        required: false
+        default: '5.7'
+        type: string
+  # schedule:  # TẮT - nguyen13 dùng cho bot Othello (chạy thủ công)
+  #- cron: '15 */6 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-gamevh-account
+  cancel-in-progress: true
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: pip install websockets requests --break-system-packages
+
+      - name: Run Caro Bot (Linux native engine, no wine)
+        env:
+          CARO_RUNTIME_HOURS: ${{ inputs.runtime_hours || '5.7' }}
+        run: |
+          echo "Starting nguyen13.py; it will auto-restart until job timeout (6h)"
+          while true; do
+            echo "=== $(date -u +'%Y-%m-%dT%H:%M:%SZ') Starting nguyen13.py ==="
+            python3 nguyen13.py || echo "nguyen13.py exited with code $?"
+            echo "Restarting nguyen13.py in 10 seconds"
+            sleep 10
+          done
