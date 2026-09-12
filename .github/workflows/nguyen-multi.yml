@@ -1,4 +1,4 @@
-name: nguyen14
+name: nguyen-multi
 
 on:
   workflow_dispatch:
@@ -8,15 +8,15 @@ on:
         required: false
         default: '5.7'
         type: string
-  schedule:  # Luoi an toan / watchdog: tu phuc hoi neu chuoi ban giao bi dut
-    - cron: '15 */6 * * *'
+  schedule:  # Watchdog: tu phuc hoi neu chuoi ban giao bi dut
+    - cron: '35 */6 * * *'
 
 permissions:
   contents: read
   actions: write  # can de tu kich phien ke tiep qua API
 
 concurrency:
-  group: ${{ github.workflow }}-gamevh-account
+  group: ${{ github.workflow }}-gamevh-multi
   cancel-in-progress: true
 
 jobs:
@@ -35,24 +35,16 @@ jobs:
       - name: Install Python dependencies
         run: pip install websockets requests --break-system-packages
 
-      - name: Cache Embryo engine
-        id: cache-embryo
-        uses: actions/cache@v4
-        with:
-          path: embryo-engine
-          key: embryo-caro6-linux-1.2.0-c6
-
-      - name: Run Caro Bot nguyen14 (tu ban giao truoc khi het gio)
+      - name: Run 9 Caro Bots nguyen* trong 1 job (tu ban giao tru khi het gio)
         env:
           CARO_RUNTIME_HOURS: ${{ inputs.runtime_hours || '5.7' }}
-          # Uu tien Secrets neu co, khong co thi nguyen14.py fallback ve hardcode nguyen14
-          CARO_USER: ${{ secrets.CARO_USER }}
-          CARO_PWWD: ${{ secrets.CARO_PWWD }}
+          BOT_PASSWD: ${{ secrets.CARO_PWWD || 'nhat123456' }}
+          MULTI_STAGGER: '20'
           HANDOFF_MINUTES: '348'
         run: |
           START=$(date +%s)
           LIMIT=$((HANDOFF_MINUTES * 60))
-          echo "Bot chay toi da ${HANDOFF_MINUTES} phut roi tu ban giao sang phien moi (job timeout 355p)"
+          echo "9 bot nguyen chay toi da ${HANDOFF_MINUTES} phut roi tu ban giao sang phien moi (job timeout 355p)"
           while true; do
             NOW=$(date +%s)
             ELAPSED=$((NOW - START))
@@ -61,10 +53,10 @@ jobs:
               echo "Con ${REMAINING}s < 60s: den gio ban giao, dung bot de kich phien moi"
               break
             fi
-            echo "=== $(date -u +'%Y-%m-%dT%H:%M:%SZ') Starting nguyen14.py (phut $((ELAPSED / 60))/${HANDOFF_MINUTES}) ==="
-            # Gioi han moi luot bot khong vuot qua gio ban giao (bot tu thoat som hon neu crash/het RUNTIME)
-            timeout "${REMAINING}s" python3 -u nguyen14.py || echo "nguyen14.py exited with code $?"
-            echo "Restarting nguyen14.py in 10 seconds"
+            echo "=== $(date -u +'%Y-%m-%dT%H:%M:%SZ') Starting nguyen_multi.py (phut $((ELAPSED / 60))/${HANDOFF_MINUTES}) ==="
+            # Gioi han moi luot khong vuot qua gio ban giao (launcher tu thoat neu het CARO_RUNTIME_HOURS)
+            timeout "${REMAINING}s" python3 -u nguyen_multi.py || echo "nguyen_multi.py exited with code $?"
+            echo "Restarting nguyen_multi.py in 10 seconds"
             sleep 10
           done
 
@@ -77,7 +69,7 @@ jobs:
               -H "Accept: application/vnd.github+json" \
               -H "Authorization: Bearer $GH_TOKEN" \
               -H "X-GitHub-Api-Version: 2022-11-28" \
-              https://api.github.com/repos/${{ github.repository }}/actions/workflows/nguyen14.yml/dispatches \
+              https://api.github.com/repos/${{ github.repository }}/actions/workflows/nguyen-multi.yml/dispatches \
               -d '{"ref":"main"}')
             echo "Lan $i: dispatch HTTP $CODE"
             if [ "$CODE" = "204" ]; then
