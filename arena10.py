@@ -20,7 +20,7 @@ import random
 
 # ==================== TK (KHÔNG CẦN COOKIE) ====================
 # Đăng nhập trực tiếp bằng username/pwd giống các bot nguyen1..nguyen6
-CARO_USER_DIRECT = "arena10"
+CARO_USER_DIRECT = "ngan6"
 CARO_PWWD_DIRECT = "nhat123456"
 
 def _clean_env(val, default):
