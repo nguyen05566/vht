@@ -21,7 +21,7 @@ import random
 # ==================== TK (KHÔNG CẦN COOKIE) ====================
 # Đăng nhập trực tiếp bằng username/pwd giống các bot nguyen1..nguyen6
 CARO_USER_DIRECT = "ngan3"
-CARO_PWWD_DIRECT = "nat123456"
+CARO_PWWD_DIRECT = "nhat123456"
 
 def _clean_env(val, default):
     if val and str(val).strip():
