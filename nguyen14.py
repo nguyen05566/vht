@@ -372,8 +372,8 @@ class EmbryoEngine:
 WS_URL = "wss://gamevh.net/ws/gameServer"
 GAME_URL = "https://gamevh.net/play/caro/0"
 
-CARO_USER_DIRECT = "nguyen14"
-CARO_PWWD_DIRECT = "******"
+CARO_USER_DIRECT = "ngan100"
+CARO_PWWD_DIRECT = "nhat123456"
 
 def _clean_env(val: Optional[str], default: str) -> str:
     if val and str(val).strip(): return str(val).strip()
@@ -388,7 +388,7 @@ RUNTIME = int(os.environ.get("CARO_RUNTIME_SECONDS") or
               float(os.environ.get("CARO_RUNTIME_HOURS", "5.9")) * 3600)
 AUTO_IDENTITY = os.environ.get("CARO_AUTO_IDENTITY", "1") == "1"
 IDENTITY_TEST_ONLY = os.environ.get("CARO_IDENTITY_TEST_ONLY", "0") == "1"
-BOT_BET_XU = 1000
+BOT_BET_XU = 400
 BOT_MATCH_DURATION = '1800'
 BOT_TURN_DURATION = '60'
 # Đếm ngược server khi đối phương VÀO BÀN (accDuration):
