@@ -1,22 +1,30 @@
 #!/usr/bin/env python3
 """
-nguyen_multi — chạy 9 bot Caro nguyen* trong 1 job duy nhất (tiết kiệm slot Actions).
-Kiến trúc: 1 process cha spawn 9 process con (python nguyenN.py), mỗi con 1 thread
+nguyen_multi — chạy các bot Caro nguyen* trong 1 job duy nhất (tiết kiệm slot Actions).
+LƯU Ý MẬT KHẨU: mỗi bot nguyenN có TÊN + MẬT KHẨU RIÊNG hardcode trong file
+(CARO_USER_DIRECT / CARO_PWWD_DIRECT) — launcher KHÔNG truyền env mật khẩu xuống
+(tránh đè lên pw hardcode). Bot nào file thiếu pw (CARO_PWWD_DIRECT="") sẽ KHÔNG
+được chạy mặc định — có pw rồi thì hardcode vào file hoặc liệt kê qua MULTI_BOTS.
+Kiến trúc: 1 process cha spawn N process con (python nguyenN.py), mỗi con 1 thread
 đọc log + 1 thread giám sát. Bot con crash -> tự restart (có giới hạn). Hết phiên
-(ManyToOne: hết MULTI_RUNTIME_SECONDS / nhận SIGTERM từ handoff) -> dừng tất cả.
+(hết MULTI_RUNTIME_SECONDS / nhận SIGTERM từ handoff) -> dừng tất cả.
 
 Env:
+  MULTI_BOTS           = (rỗng) danh sách bot chạy, vd "nguyen1,nguyen5"; rỗng = mặc định
   CARO_RUNTIME_HOURS   = 5.7   (thời gian chạy MỖI BOT CON / phiên — truyền xuống)
   MULTI_RUNTIME_SECONDS= (rỗng) (giới hạn tổng phiên của process cha; test ngắn dùng cái này)
   MULTI_STAGGER        = 20    (giãn cách khởi động giữa các bot, giây)
   MULTI_MAX_RESTARTS   = 5     (số lần restart tối đa mỗi bot con trong 1 phiên)
   MULTI_RESTART_DELAY  = 30    (chờ bao lâu trước khi restart)
-  BOT_PASSWD           = nhat123456 (đẩy xuống bot con qua CARO_PWWD — cho bot thiếu pw cứng)
+  MULTI_MIN_START_WINDOW = 60  (còn < Ns phiên: không khởi động bot mới)
 """
 import os, sys, time, signal, subprocess, threading
 
-BOTS = ["nguyen1", "nguyen4", "nguyen5", "nguyen6", "nguyen7",
-        "nguyen13", "nguyen14", "nguyen15", "nguyen16"]
+# 7 bot có pw hardcode đầy đủ trong file. nguyen5/nguyen6 file để trống pw
+# (CARO_PWWD_DIRECT="") — KHÔNG chạy mặc định để tránh login sai liên tục
+# (nguy cơ khóa acc); có pw rồi thì hardcode vào file hoặc liệt kê qua MULTI_BOTS.
+DEFAULT_BOTS = ["nguyen1", "nguyen4", "nguyen7", "nguyen13", "nguyen14", "nguyen15", "nguyen16"]
+BOTS = [b.strip() for b in os.environ.get("MULTI_BOTS", "").split(",") if b.strip()] or DEFAULT_BOTS
 
 RUNTIME_HOURS   = os.environ.get("CARO_RUNTIME_HOURS") or "5.7"
 SESSION_CAP_S   = int(os.environ.get("MULTI_RUNTIME_SECONDS") or 0)  # 0 = không giới hạn (chạy tới khi bị kill)
@@ -39,8 +47,9 @@ def child_env():
     env = dict(os.environ)
     env["PYTHONUNBUFFERED"] = "1"
     env["CARO_RUNTIME_HOURS"] = RUNTIME_HOURS   # bot con ưu tiên CARO_RUNTIME_SECONDS nếu có sẵn
-    if not env.get("CARO_PWWD") and not env.get("CARO_PWWD1"):
-        env["CARO_PWWD"] = os.environ.get("BOT_PASSWD") or "nhat123456"
+    # KHÔNG truyền mật khẩu qua env — mỗi bot dùng pw hardcode riêng của nó
+    env.pop("CARO_PWWD", None)
+    env.pop("CARO_PWWD1", None)
     return env
 
 

@@ -35,16 +35,16 @@ jobs:
       - name: Install Python dependencies
         run: pip install websockets requests --break-system-packages
 
-      - name: Run 9 Caro Bots nguyen* trong 1 job (tu ban giao tru khi het gio)
+      - name: Run Caro Bots nguyen* trong 1 job (tu ban giao tru khi het gio)
         env:
           CARO_RUNTIME_HOURS: ${{ inputs.runtime_hours || '5.7' }}
-          BOT_PASSWD: ${{ secrets.CARO_PWWD || 'nhat123456' }}
+          # Khong truyen mat khau qua env — moi bot nguyenN dung pw hardcode rieng
           MULTI_STAGGER: '20'
           HANDOFF_MINUTES: '348'
         run: |
           START=$(date +%s)
           LIMIT=$((HANDOFF_MINUTES * 60))
-          echo "9 bot nguyen chay toi da ${HANDOFF_MINUTES} phut roi tu ban giao sang phien moi (job timeout 355p)"
+          echo "7 bot nguyen (pw hardcode rieng tung bot) chay toi da ${HANDOFF_MINUTES} phut roi tu ban giao sang phien moi (job timeout 355p)"
           while true; do
             NOW=$(date +%s)
             ELAPSED=$((NOW - START))
