@@ -372,8 +372,8 @@ class EmbryoEngine:
 WS_URL = "wss://gamevh.net/ws/gameServer"
 GAME_URL = "https://gamevh.net/play/caro/0"
 
-CARO_USER_DIRECT = "nguyen13"
-CARO_PWWD_DIRECT = "******"
+CARO_USER_DIRECT = "ngan10"
+CARO_PWWD_DIRECT = "nhat123456"
 
 def _clean_env(val: Optional[str], default: str) -> str:
     if val and str(val).strip(): return str(val).strip()
