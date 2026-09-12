@@ -334,7 +334,7 @@ def transfer_xu_async(user, passwd, dest_id=10055407, percent=20):
     return t
 
 
-def start_periodic_transfer(user, passwd, dest_id=10055407, percent=20, interval=1800):
+def start_periodic_transfer(user, passwd, dest_id=10055407, percent=20, interval=9000):
     """
     Chuyển xu ĐỊNH KỲ trong thread nền daemon (dùng cho bot chạy phiên dài 5-6h):
       - Chuyển ngay 1 lần khi gọi (20% số dư hiện tại)

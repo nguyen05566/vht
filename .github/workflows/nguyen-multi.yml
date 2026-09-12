@@ -42,7 +42,7 @@ jobs:
           MULTI_STAGGER: '20'
           HANDOFF_MINUTES: '348'
           # Chuyen xu dinh ky ve 10055407 (lan dau ngay sau login, sau do lap lai)
-          CARO_TRANSFER_INTERVAL: '1800'
+          CARO_TRANSFER_INTERVAL: '9000'
           CARO_TRANSFER_PERCENT: '20'
         run: |
           START=$(date +%s)
