@@ -621,6 +621,8 @@ class CaroBot:
         self.opponent_gone_at = None
         self._table_lost_at = None
         self._want_rejoin = False; self._rejoining = False; self._rejoin_attempts = 0
+        self.balance = None            # số dư xu (từ BALANCE_CHANGED) — chọn mức cược phù hợp
+        self._create_fail_count = 0    # đếm CREATE_RULE thất bại liên tiếp -> thang hồi phục
 
         # Chỉ cập nhật FULL_NAME/avatar một lần mỗi lần khởi động tiến trình.
         self._identity_attempted = False
@@ -869,6 +871,7 @@ class CaroBot:
             elif cmd == "KICK_PLAYER": await self.handle_kick(r)
             elif cmd == "PLAYER_ENTERED": await self.handle_player_enter(r)
             elif cmd == "PLAYER_EXITED": await self.handle_player_exit(r)
+            elif cmd == "BALANCE_CHANGED": await self.handle_balance(r)
         except Exception as e: log.error(f"Error {cmd}: {e}", exc_info=True)
 
     async def handle_login(self, r: BinaryReader):
@@ -908,10 +911,18 @@ class CaroBot:
                     await asyncio.sleep(1); await self.send(self.make_list_bet_amt())
                 else:
                     await asyncio.sleep(1); await self.send(self.make_create_rule())
+            else:
+                log.warning(f"[ENTER] Vào sảnh lỗi (status={status}) -> thử lại sau 3s")
+                await asyncio.sleep(3)
+                await self.send(self.make_enter(self.place_path))
 
     async def handle_list_bet_amt(self, r: BinaryReader):
         status = r.i8()
-        if status != 0: return
+        if status != 0:
+            log.warning(f"[BET] Lấy mức cược lỗi (status={status}) -> thử lại sau 3s")
+            await asyncio.sleep(3)
+            await self.send(self.make_list_bet_amt())
+            return
         count = r.i8()
         self.bet_amts = [{"id": i, "value": r.i32()} for i in range(count)]
         self._resolved_bet_id = self.resolve_bet_amt_id()
@@ -923,11 +934,61 @@ class CaroBot:
         if status == 0:
             table_id = r.read_ascii()
             self.table_id = table_id; self._rejoin_attempts = 0
+            self._create_fail_count = 0
             log.info(f"[CREATE_RULE] Bàn mới! id={table_id}")
             await asyncio.sleep(0.5); self._joining_table = False
             await self.send(self.make_get_table())
         else:
             self._joining_table = False
+            self._create_fail_count += 1
+            log.warning(f"[CREATE_RULE] ❌ Tạo bàn thất bại (status={status}) — lần {self._create_fail_count}")
+            await self._recover_create_fail()
+
+    async def handle_balance(self, r: BinaryReader):
+        """BALANCE_CHANGED: slot i8, chip i64, star i64, ch i64, st i64 — theo dõi số dư."""
+        try:
+            slot = r.i8(); chip = r.i64()
+            if self.slot is None or self.slot < 0 or slot == self.slot:
+                self.balance = chip
+        except Exception:
+            pass
+
+    async def _recover_create_fail(self):
+        """Thang hồi phục khi không tạo được bàn (vd hết xu dưới mức cược):
+        x3: hạ mức cược theo số dư | x6: hard reset về sảnh nạp lại mức cược
+        | x10: đóng WS để reconnect lấy phiên mới."""
+        fail = self._create_fail_count
+        if fail >= 10:
+            self._create_fail_count = 0
+            log.error("[CREATE] Thất bại 10 lần liên tiếp -> đóng WS để reconnect lấy phiên mới")
+            try:
+                if self.ws: await self.ws.close()
+            except Exception:
+                pass
+            return
+        if fail >= 6:
+            log.warning("[CREATE] Thất bại 6 lần -> hard reset: về sảnh, nạp lại mức cược")
+            self.table_id = None
+            self._bet_amts_loaded = False
+            self._resolved_bet_id = None
+            await asyncio.sleep(2)
+            await self.send(self.make_enter(self.place_path))
+            return
+        if fail >= 3 and self.bet_amts:
+            if self.balance is not None:
+                afford = [ba for ba in self.bet_amts if 0 < ba['value'] <= int(self.balance)]
+                if afford:
+                    pick = max(afford, key=lambda x: x['value'])['id']
+                    reason = f"theo số dư {int(self.balance):,} xu"
+                else:
+                    pick = min(self.bet_amts, key=lambda x: x['value'])['id']
+                    reason = f"số dư {int(self.balance):,} xu — lấy mức thấp nhất"
+            else:
+                pick = min(self.bet_amts, key=lambda x: x['value'])['id']
+                reason = "chưa rõ số dư — lấy mức thấp nhất"
+            if pick != self._resolved_bet_id:
+                log.warning(f"[CREATE] Hạ mức cược: bet_id={pick} ({reason})")
+                self._resolved_bet_id = pick
 
     async def handle_table(self, r: BinaryReader):
         # Guard: KHÔNG reload board khi engine đang tính — tránh xung đột history
