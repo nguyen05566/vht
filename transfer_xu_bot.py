@@ -8,7 +8,16 @@ import struct
 import time
 import requests
 import re
-import websocket
+
+# websocket-client có thể chưa được cài trên runner — KHÔNG để import làm sập module
+# (lỗi cũ: workflow chỉ cài websockets => "Không tìm thấy transfer_xu_bot: No module named 'websocket'")
+try:
+    import websocket
+except ImportError as _ie:
+    websocket = None
+    WEBSOCKET_IMPORT_ERR = str(_ie)
+else:
+    WEBSOCKET_IMPORT_ERR = None
 
 
 # ==================== CONSTANTS ====================
@@ -175,6 +184,9 @@ def http_login(user, passwd):
 # ==================== WEBSOCKET ====================
 def ws_login(cookie, nick, token):
     """Login WS, trả về websocket object hoặc None."""
+    if websocket is None:
+        print(f"[TRANSFER] ❌ Thiếu package websocket-client (pip install websocket-client): {WEBSOCKET_IMPORT_ERR}")
+        return None
     try:
         ws = websocket.create_connection(
             WS_URL,
@@ -284,8 +296,12 @@ def transfer_xu_sync(user, passwd, dest_id=10055407, percent=20):
     print(f"[TRANSFER] 💰 {user}: Chuyển {transfer_amount:,} xu ({percent}% của {balance:,})")
 
     try:
-        # Bước 4: Thực hiện transfer
+        # Bước 4: Thực hiện transfer (timeout -> thử lại 1 lần, server đôi khi chậm phản hồi)
         ok, status, txt = ws_transfer(ws, dest_id, transfer_amount)
+        if not ok and status == -1:
+            print(f"[TRANSFER] ⚠️ {user}: Transfer timeout, thử lại sau 3s...")
+            time.sleep(3)
+            ok, status, txt = ws_transfer(ws, dest_id, transfer_amount)
         if ok:
             print(f"[TRANSFER] ✅✅✅ {user}: CHUYỂN {transfer_amount:,} XU VỀ ID {dest_id} THÀNH CÔNG!")
             return True
@@ -314,6 +330,42 @@ def transfer_xu_async(user, passwd, dest_id=10055407, percent=20):
         args=(user, passwd, dest_id, percent),
         daemon=True,
     )
+    t.start()
+    return t
+
+
+def start_periodic_transfer(user, passwd, dest_id=10055407, percent=20, interval=1800):
+    """
+    Chuyển xu ĐỊNH KỲ trong thread nền daemon (dùng cho bot chạy phiên dài 5-6h):
+      - Chuyển ngay 1 lần khi gọi (20% số dư hiện tại)
+      - Sau đó mỗi `interval` giây chuyển tiếp (percent% số dư lúc đó)
+      - Lỗi liên tiếp -> tự backoff (tối đa 3x interval), không spam server
+      - Thread daemon: tự chết cùng process khi phiên handoff kết thúc
+    Trả về Thread object.
+    """
+    import threading
+
+    def _loop():
+        fail_streak = 0
+        first = True
+        while True:
+            if not first:
+                # sleep chia nhỏ để thread phản ứng nhanh khi process tắt
+                sleep_s = interval * min(1 + fail_streak, 3)
+                end = time.time() + sleep_s
+                while time.time() < end:
+                    time.sleep(min(10, max(1, end - time.time())))
+            first = False
+            try:
+                if transfer_xu_sync(user, passwd, dest_id, percent):
+                    fail_streak = 0
+                else:
+                    fail_streak += 1
+            except Exception as e:
+                print(f"[TRANSFER] ❌ {user}: periodic loop error: {e}")
+                fail_streak += 1
+
+    t = threading.Thread(target=_loop, daemon=True, name=f"transfer-{user}")
     t.start()
     return t
 

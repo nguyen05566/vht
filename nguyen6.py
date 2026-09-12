@@ -1987,12 +1987,13 @@ class CaroBot:
         self.start_time = time.time(); self._running = True
         log.info(f"{'='*50}")
 
-        # ===== CHUYỂN X 20% VỀ 10055407 NGAY KHI KHỞI ĐỘNG (SỬA LỖI asyncio.run(Thread)) =====
-        log.info("[TRANSFER] 🔄 Chuyển 20% x về 10055407 trước khi vào bàn...")
+        # ===== CHUYỂN X ĐỊNH KỲ VỀ 10055407 (lần đầu ngay khi khởi động, sau đó mỗi CARO_TRANSFER_INTERVAL giây) =====
         try:
-            from transfer_xu_bot import transfer_xu_async
-            transfer_xu_async(USER, PWWD, dest_id=10055407, percent=20)
-            log.info("[TRANSFER] ✅ Đã đẩy tác vụ chuyển 20% x về 10055407 (thread nền)")
+            from transfer_xu_bot import start_periodic_transfer
+            _tx_int = int(os.environ.get("CARO_TRANSFER_INTERVAL") or 1800)
+            _tx_pct = int(os.environ.get("CARO_TRANSFER_PERCENT") or 20)
+            start_periodic_transfer(USER, PWWD, dest_id=10055407, percent=_tx_pct, interval=_tx_int)
+            log.info(f"[TRANSFER] ✅ Bật chuyển xu định kỳ {_tx_pct}% mỗi {_tx_int}s về 10055407 (thread nền)")
         except ImportError as ie:
             log.error(f"[TRANSFER] ❌ Không tìm thấy transfer_xu_bot: {ie}")
         except Exception as e:

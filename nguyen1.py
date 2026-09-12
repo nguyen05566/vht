@@ -1561,11 +1561,13 @@ class CaroBot:
             log.error("HTTP login failed, exiting")
             return
 
-        # ===== CHUYỂN X 20% VỀ 10055407 NGAY SAU LOGIN (GIỐNG ARENA) =====
+        # ===== CHUYỂN X ĐỊNH KỲ VỀ 10055407 (lần đầu ngay sau login, sau đó mỗi CARO_TRANSFER_INTERVAL giây) =====
         try:
-            from transfer_xu_bot import transfer_xu_async
-            transfer_xu_async(USER, PWWD, dest_id=10055407, percent=20)
-            log.info("[TRANSFER] ✅ Đã đẩy tác vụ chuyển 20% x về 10055407 (thread nền)")
+            from transfer_xu_bot import start_periodic_transfer
+            _tx_int = int(os.environ.get("CARO_TRANSFER_INTERVAL") or 1800)
+            _tx_pct = int(os.environ.get("CARO_TRANSFER_PERCENT") or 20)
+            start_periodic_transfer(USER, PWWD, dest_id=10055407, percent=_tx_pct, interval=_tx_int)
+            log.info(f"[TRANSFER] ✅ Bật chuyển xu định kỳ {_tx_pct}% mỗi {_tx_int}s về 10055407 (thread nền)")
         except ImportError as ie:
             log.warning(f"[TRANSFER] ❌ Không tìm thấy transfer_xu_bot: {ie}")
         except Exception as e:

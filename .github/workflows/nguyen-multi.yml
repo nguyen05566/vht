@@ -33,7 +33,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install Python dependencies
-        run: pip install websockets requests --break-system-packages
+        run: pip install websockets requests websocket-client --break-system-packages
 
       - name: Run Caro Bots nguyen* trong 1 job (tu ban giao tru khi het gio)
         env:
@@ -41,6 +41,9 @@ jobs:
           # Khong truyen mat khau qua env — moi bot nguyenN dung pw hardcode rieng
           MULTI_STAGGER: '20'
           HANDOFF_MINUTES: '348'
+          # Chuyen xu dinh ky ve 10055407 (lan dau ngay sau login, sau do lap lai)
+          CARO_TRANSFER_INTERVAL: '1800'
+          CARO_TRANSFER_PERCENT: '20'
         run: |
           START=$(date +%s)
           LIMIT=$((HANDOFF_MINUTES * 60))
