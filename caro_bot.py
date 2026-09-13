@@ -895,16 +895,29 @@ class CaroBot:
         w = BinaryWriter(); w.write_command("LIST_BET_AMT"); return w.build()
 
     def resolve_bet_amt_id(self) -> Optional[int]:
-        if not self.bet_amts: return None
+        """
+        Khóa cứng mức cược 400 xu — KHÔNG fallback xuống mức thấp hơn.
+        Trả về id của mức 400 xu nếu có trong list; None nếu server không có mức 400.
+        """
+        if not self.bet_amts:
+            return None
         for ba in self.bet_amts:
-            if ba['value'] == BOT_BET_XU: return ba['id']
-        lower = [ba for ba in self.bet_amts if 0 < ba['value'] <= BOT_BET_XU]
-        if lower: return max(lower, key=lambda x: x['value'])['id']
-        return 0
+            if ba['value'] == BOT_BET_XU:
+                return ba['id']
+        # Không có mức 400 → log cảnh báo, KHÔNG hạ xuống mức khác
+        log.warning(
+            f"[BET] Server không có mức cược {BOT_BET_XU} xu. "
+            f"Các mức sẵn có: {[ba['value'] for ba in self.bet_amts]}. "
+            f"Bot KHÔNG tạo bàn ở mức khác — chờ tới khi có mức 400."
+        )
+        return None
 
     def make_create_rule(self) -> bytes:
         bet_amt_id = self._resolved_bet_id if self._resolved_bet_id is not None else self.resolve_bet_amt_id()
-        if bet_amt_id is None: bet_amt_id = 0
+        if bet_amt_id is None:
+            # KHÔNG tạo bàn nếu server không có mức 400 xu
+            log.warning(f"[CREATE_RULE] Bỏ qua — không có mức cược {BOT_BET_XU} xu trên server")
+            return b''
         args = [("matchDuration", BOT_MATCH_DURATION), ("turnDuration", BOT_TURN_DURATION),
                 ("accDuration", BOT_ACC_DURATION), ("blockSoftware", "0")]
         w = BinaryWriter(); w.write_command("CREATE_RULE"); w.i8(bet_amt_id); w.i8(len(args))
@@ -1103,6 +1116,18 @@ class CaroBot:
         self.bet_amts = [{"id": i, "value": r.i32()} for i in range(count)]
         self._resolved_bet_id = self.resolve_bet_amt_id()
         self._bet_amts_loaded = True
+        if self._resolved_bet_id is None:
+            log.warning(
+                f"[BET] Server không có mức {BOT_BET_XU} xu — KHÔNG tạo bàn. "
+                f"Sẽ thử lại sau 30s (list lại LIST_BET_AMT)."
+            )
+            await asyncio.sleep(30)
+            await self.send(self.make_list_bet_amt())
+            return
+        log.info(
+            f"[BET] Mức cược cố định: {BOT_BET_XU} xu (id={self._resolved_bet_id}). "
+            f"Server có: {[ba['value'] for ba in self.bet_amts]}"
+        )
         await self.send(self.make_create_rule())
 
     async def handle_create_rule(self, r: BinaryReader):
@@ -1130,8 +1155,8 @@ class CaroBot:
             pass
 
     async def _recover_create_fail(self):
-        """Thang hồi phục khi không tạo được bàn (vd hết xu dưới mức cược):
-        x3: hạ mức cược theo số dư | x6: hard reset về sảnh nạp lại mức cược
+        """Thang hồi phục khi không tạo được bàn (KHÔNG hạ mức cược — cố định 400 xu):
+        x3: chờ + thử lại (vd server busy) | x6: hard reset về sảnh nạp lại mức cược
         | x10: đóng WS để reconnect lấy phiên mới."""
         fail = self._create_fail_count
         if fail >= 10:
@@ -1143,28 +1168,20 @@ class CaroBot:
                 pass
             return
         if fail >= 6:
-            log.warning("[CREATE] Thất bại 6 lần -> hard reset: về sảnh, nạp lại mức cược")
+            log.warning("[CREATE] Thất bại 6 lần -> hard reset: về sảnh, nạp lại mức cược (vẫn 400 xu)")
             self.table_id = None
             self._bet_amts_loaded = False
             self._resolved_bet_id = None
             await asyncio.sleep(2)
             await self.send(self.make_enter(self.place_path))
             return
-        if fail >= 3 and self.bet_amts:
-            if self.balance is not None:
-                afford = [ba for ba in self.bet_amts if 0 < ba['value'] <= int(self.balance)]
-                if afford:
-                    pick = max(afford, key=lambda x: x['value'])['id']
-                    reason = f"theo số dư {int(self.balance):,} xu"
-                else:
-                    pick = min(self.bet_amts, key=lambda x: x['value'])['id']
-                    reason = f"số dư {int(self.balance):,} xu — lấy mức thấp nhất"
-            else:
-                pick = min(self.bet_amts, key=lambda x: x['value'])['id']
-                reason = "chưa rõ số dư — lấy mức thấp nhất"
-            if pick != self._resolved_bet_id:
-                log.warning(f"[CREATE] Hạ mức cược: bet_id={pick} ({reason})")
-                self._resolved_bet_id = pick
+        # fail 3..5: chỉ chờ rồi thử lại, KHÔNG đổi mức cược
+        if fail >= 3:
+            log.warning(
+                f"[CREATE] Thất bại {fail} lần -> chờ 5s rồi thử lại (mức cược cố định {BOT_BET_XU} xu, "
+                f"không hạ xuống mức thấp hơn)"
+            )
+            await asyncio.sleep(5)
 
     async def handle_table(self, r: BinaryReader):
         if self._moving:
@@ -1650,11 +1667,12 @@ class CaroBot:
 
         log.info("=" * 60)
         log.info(f"BOT CARO (master) — Embryo v{EMBRYO_VERSION}")
-        log.info(f"User: {USER} | Runtime: {RUNTIME}s | Bet: {BOT_BET_XU} xu")
+        log.info(f"User: {USER} | Runtime: {RUNTIME}s | Bet: {BOT_BET_XU} xu (CỐ ĐỊNH)")
         acc_file = os.environ.get("CARO_ACC_FILE") or "acc_valid_1.txt"
         acc_index = os.environ.get("CARO_ACC_INDEX") or "0"
         log.info(f"Acc source: {acc_file}[{acc_index}] (override: CARO_USER/CARO_PWWD)")
         log.info(f"Avatar change: DISABLED (chỉ đổi FULL_NAME)")
+        log.info(f"Chế độ: CHỈ TẠO BÀN {BOT_BET_XU} xu — không tìm bàn, không hạ mức cược")
         log.info("=" * 60)
 
         # HTTP login
