@@ -459,6 +459,11 @@ RUNTIME = int(os.environ.get("CARO_RUNTIME_SECONDS") or
 AUTO_IDENTITY = os.environ.get("CARO_AUTO_IDENTITY", "1") == "1"
 IDENTITY_TEST_ONLY = os.environ.get("CARO_IDENTITY_TEST_ONLY", "0") == "1"
 BOT_BET_XU = 400
+# Hardcode id của mức 400 xu — đã sniff từ LIST_BET_AMT response (12/09/2026):
+#   server trả 12 mức: 20,40,100,200,400,1000,2000,4000,10000,20000,40000,100000
+#   400 xu nằm ở index 4 (zero-based) → id=4
+# Bot giờ KHÔNG gửi LIST_BET_AMT nữa, gửi CREATE_RULE thẳng với bet_amt_id=4
+BET_AMT_ID_400 = 4
 BOT_MATCH_DURATION = '1800'
 BOT_TURN_DURATION = '60'
 # Đếm ngược server khi đối phương VÀO BÀN (accDuration):
@@ -785,6 +790,7 @@ class CaroBot:
         self.pending_move = False
         self.bet_amts = []; self._resolved_bet_id = None
         self._bet_amts_loaded = False; self._joining_table = False
+        self._last_create_rule_at = 0.0  # WATCHDOG: tránh gửi CREATE_RULE liên tục
 
         self.engine = None; self.embryo_available = False
         self.embryo_moves = 0; self.embryo_errors = 0; self.embryo_fallback_count = 0
@@ -900,28 +906,14 @@ class CaroBot:
 
     def resolve_bet_amt_id(self) -> Optional[int]:
         """
-        Khóa cứng mức cược 400 xu — KHÔNG fallback xuống mức thấp hơn.
-        Trả về id của mức 400 xu nếu có trong list; None nếu server không có mức 400.
+        Trả về id hardcode của mức 400 xu (=4, đã sniff từ server).
+        KHÔNG cần LIST_BET_AMT — bot gửi CREATE_RULE thẳng với id này.
         """
-        if not self.bet_amts:
-            return None
-        for ba in self.bet_amts:
-            if ba['value'] == BOT_BET_XU:
-                return ba['id']
-        # Không có mức 400 → log cảnh báo, KHÔNG hạ xuống mức khác
-        log.warning(
-            f"[BET] Server không có mức cược {BOT_BET_XU} xu. "
-            f"Các mức sẵn có: {[ba['value'] for ba in self.bet_amts]}. "
-            f"Bot KHÔNG tạo bàn ở mức khác — chờ tới khi có mức 400."
-        )
-        return None
+        return BET_AMT_ID_400
 
     def make_create_rule(self) -> bytes:
-        bet_amt_id = self._resolved_bet_id if self._resolved_bet_id is not None else self.resolve_bet_amt_id()
-        if bet_amt_id is None:
-            # KHÔNG tạo bàn nếu server không có mức 400 xu
-            log.warning(f"[CREATE_RULE] Bỏ qua — không có mức cược {BOT_BET_XU} xu trên server")
-            return b''
+        """Tạo bàn mức 400 xu (id=4 hardcode). KHÔNG cần LIST_BET_AMT."""
+        bet_amt_id = BET_AMT_ID_400
         args = [("matchDuration", BOT_MATCH_DURATION), ("turnDuration", BOT_TURN_DURATION),
                 ("accDuration", BOT_ACC_DURATION), ("blockSoftware", "0")]
         w = BinaryWriter(); w.write_command("CREATE_RULE"); w.i8(bet_amt_id); w.i8(len(args))
@@ -951,14 +943,9 @@ class CaroBot:
             except Exception: pass
 
     async def create_new_table(self):
-        """Tạo bàn mới mức 400 xu. Nếu chưa nạp mức cược hoặc mức 400 không khả dụng,
-        gửi LIST_BET_AMT để load/reload. Nếu đã có _resolved_bet_id hợp lệ → gửi CREATE_RULE."""
-        if not self._bet_amts_loaded or self._resolved_bet_id is None:
-            self._bet_amts_loaded = False
-            self._resolved_bet_id = None
-            await self.send(self.make_list_bet_amt())
-        else:
-            await self.send(self.make_create_rule())
+        """Tạo bàn mới mức 400 xu (id=4 hardcode). Gửi CREATE_RULE thẳng —
+        KHÔNG cần LIST_BET_AMT nữa."""
+        await self.send(self.make_create_rule())
 
     async def do_move(self):
         if not self.is_playing or not self.running or self.slot < 0: return
@@ -1097,9 +1084,8 @@ class CaroBot:
                     log.info(f"[BOT] Thử vào lại bàn cũ: {path}")
                     await self.send(self.make_enter(path))
                 else:
-                    # Vào sảnh OK → nạp lại mức cược rồi tạo bàn
-                    self._bet_amts_loaded = False; self._resolved_bet_id = None
-                    await self.send(self.make_list_bet_amt())
+                    # Vào sảnh OK → tạo bàn thẳng mức 400 xu (id=4 hardcode)
+                    await asyncio.sleep(0.3); await self.send(self.make_create_rule())
         else:
             if self._joining_table:
                 self._joining_table = False
@@ -1116,29 +1102,14 @@ class CaroBot:
                 await self.send(self.make_enter(self.place_path))
 
     async def handle_list_bet_amt(self, r: BinaryReader):
-        status = r.i8()
-        if status != 0:
-            log.warning(f"[BET] Lấy mức cược lỗi (status={status}) -> thử lại sau 3s")
-            await asyncio.sleep(3)
-            await self.send(self.make_list_bet_amt())
-            return
-        count = r.i8()
-        self.bet_amts = [{"id": i, "value": r.i32()} for i in range(count)]
-        self._resolved_bet_id = self.resolve_bet_amt_id()
-        self._bet_amts_loaded = True
-        if self._resolved_bet_id is None:
-            log.warning(
-                f"[BET] Server không có mức {BOT_BET_XU} xu — KHÔNG tạo bàn. "
-                f"Sẽ thử lại sau 30s (list lại LIST_BET_AMT)."
-            )
-            await asyncio.sleep(30)
-            await self.send(self.make_list_bet_amt())
-            return
-        log.info(
-            f"[BET] Mức cược cố định: {BOT_BET_XU} xu (id={self._resolved_bet_id}). "
-            f"Server có: {[ba['value'] for ba in self.bet_amts]}"
-        )
-        await self.send(self.make_create_rule())
+        """Handler giữ lại cho tương thích — nhưng bot giờ KHÔNG gửi LIST_BET_AMT.
+        Nếu server tự đẩy (hiếm), chỉ log, không làm gì cả."""
+        try:
+            status = r.i8()
+            count = r.u8() if status == 0 else 0
+            log.info(f"[BET] (unsolicited) LIST_BET_AMT status={status} count={count} — bỏ qua, dùng id hardcode={BET_AMT_ID_400}")
+        except Exception:
+            pass
 
     async def handle_create_rule(self, r: BinaryReader):
         status = r.i8()
@@ -1165,8 +1136,8 @@ class CaroBot:
             pass
 
     async def _recover_create_fail(self):
-        """Thang hồi phục khi không tạo được bàn (KHÔNG hạ mức cược — cố định 400 xu):
-        x3: chờ + thử lại (vd server busy) | x6: hard reset về sảnh nạp lại mức cược
+        """Thang hồi phục khi không tạo được bàn (400 xu cố định, id=4 hardcode):
+        x3: chờ 5s rồi thử lại | x6: hard reset về sảnh, ENTER lại
         | x10: đóng WS để reconnect lấy phiên mới."""
         fail = self._create_fail_count
         if fail >= 10:
@@ -1178,18 +1149,16 @@ class CaroBot:
                 pass
             return
         if fail >= 6:
-            log.warning("[CREATE] Thất bại 6 lần -> hard reset: về sảnh, nạp lại mức cược (vẫn 400 xu)")
+            log.warning("[CREATE] Thất bại 6 lần -> hard reset: về sảnh, ENTER lại")
             self.table_id = None
-            self._bet_amts_loaded = False
-            self._resolved_bet_id = None
             await asyncio.sleep(2)
             await self.send(self.make_enter(self.place_path))
             return
-        # fail 3..5: chỉ chờ rồi thử lại, KHÔNG đổi mức cược
+        # fail 3..5: chỉ chờ rồi thử lại
         if fail >= 3:
             log.warning(
                 f"[CREATE] Thất bại {fail} lần -> chờ 5s rồi thử lại (mức cược cố định {BOT_BET_XU} xu, "
-                f"không hạ xuống mức thấp hơn)"
+                f"id={BET_AMT_ID_400} hardcode)"
             )
             await asyncio.sleep(5)
 
@@ -1251,8 +1220,8 @@ class CaroBot:
                     self.ready = False
             elif not is_playing and self.slot < 0:
                 self.in_table = False; self.table_id = None
-                self._bet_amts_loaded = False; self._resolved_bet_id = None
-                await asyncio.sleep(1); await self.send(self.make_list_bet_amt())
+                # Slot<0 = bị đá khỏi bàn → tạo bàn mới thẳng mức 400 xu
+                await asyncio.sleep(1); await self.send(self.make_create_rule())
 
             self._rejoining = False
         except Exception as e: log.error(f"Table error: {e}")
@@ -1497,20 +1466,18 @@ class CaroBot:
                         self._pending_new_table_at = None
             except Exception: pass
 
-            # ===== ANTISTUCK: đứng sảnh quá 90s không có bàn -> reset cờ kẹt, nạp lại cược =====
+            # ===== ANTISTUCK: đứng sảnh quá 90s không có bàn -> reset cờ kẹt, ENTER lại sảnh =====
             try:
                 if not self.is_playing and not self.in_table:
                     if self._lobby_idle_since is None:
                         self._lobby_idle_since = time.time()
                     elif time.time() - self._lobby_idle_since > 90:
-                        log.warning("[ANTISTUCK] >90s đứng sảnh không bàn -> reset cờ (_joining/_rejoining/_bet_amts), ENTER lại sảnh")
+                        log.warning("[ANTISTUCK] >90s đứng sảnh không bàn -> reset cờ (_joining/_rejoining), ENTER lại sảnh")
                         self._lobby_idle_since = time.time()
                         self._joining_table = False
                         self._rejoining = False
                         self._want_rejoin = False
                         self.table_id = None
-                        self._bet_amts_loaded = False
-                        self._resolved_bet_id = None
                         await self.send(self.make_enter(self.place_path))
                 else:
                     self._lobby_idle_since = None
@@ -1540,21 +1507,15 @@ class CaroBot:
                     self._table_lost_at = None; self.table_id = None
                     await self.create_new_table()
 
-                # ===== TẠO BÀN KHI ĐỨNG SẢNH: kiểm tra _resolved_bet_id hợp lệ =====
-                # Trước đây: chỉ cần _bet_amts_loaded=True là gửi make_create_rule
-                # → b'' khi server không có mức 400 → bot đứng sảnh mãi
-                # Giờ: chỉ gửi khi _resolved_bet_id != None (chắc chắn có mức 400)
+                # ===== TẠO BÀN KHI ĐỨNG SẢNH: gửi CREATE_RULE thẳng (id=4 hardcode) =====
+                # Không cần LIST_BET_AMT — bet_amt_id đã được hardcode
+                # Rate-limit: tối đa 1 CREATE_RULE / 15s (tránh spam server)
                 if (not self.is_playing and not self.in_table and not self._joining_table
-                    and not self._rejoining and self._bet_amts_loaded
-                    and self._resolved_bet_id is not None):
+                    and not self._rejoining
+                    and time.time() - self._last_create_rule_at > 15):
+                    log.info("[WATCHDOG] Đứng sảnh, gửi CREATE_RULE (400 xu, id=4 hardcode)")
+                    self._last_create_rule_at = time.time()
                     await self.send(self.make_create_rule())
-                elif (not self.is_playing and not self.in_table and not self._joining_table
-                      and not self._rejoining and self._bet_amts_loaded
-                      and self._resolved_bet_id is None):
-                    # Đã load bet_amts nhưng không có mức 400 → nạp lại sau 30s
-                    log.info("[WATCHDOG] _resolved_bet_id=None (không có mức 400) -> nạp lại LIST_BET_AMT")
-                    self._bet_amts_loaded = False
-                    await self.send(self.make_list_bet_amt())
             except Exception: pass
 
     # ======================== HTTP LOGIN & IDENTITY ========================
@@ -1711,7 +1672,7 @@ class CaroBot:
         acc_index = os.environ.get("CARO_ACC_INDEX") or "0"
         log.info(f"Acc source: {acc_file}[{acc_index}] (override: CARO_USER/CARO_PWWD)")
         log.info(f"Avatar change: DISABLED (chỉ đổi FULL_NAME)")
-        log.info(f"Chế độ: CHỈ TẠO BÀN {BOT_BET_XU} xu — không tìm bàn, không hạ mức cược")
+        log.info(f"Chế độ: TẠO BÀN THẲNG mức {BOT_BET_XU} xu (id={BET_AMT_ID_400} hardcode) — bỏ qua LIST_BET_AMT")
         log.info("=" * 60)
 
         # HTTP login
