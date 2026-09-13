@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-transfer_xu_bot.py - Module chuyển xu cho arena bots
-Được gọi từ arena*.py để chuyển 20% xu về tài khoản đích.
+transfer_xu_bot.py - Module chuyển xu cho caro bots
+Cơ chế: chuyển 1 LẦN DUY NHẤT ngay khi bot bắt đầu chạy.
+        Chừa lại KEEP_RESERVE xu (mặc định 3000) để bot có xu chơi.
+        KHÔNG chuyển định kỳ nữa.
 """
 
 import struct
@@ -32,6 +34,7 @@ LOGIN_URL = "https://gamevh.net/login.jsp"
 GAME_URL = "https://gamevh.net/play/xiangqi/0"
 PROFILE_URL = "https://gamevh.net/com/ftl/game/profile/player_profile.jsp"
 MIN_TRANSFER = 200  # server: chuyển tối thiểu > 200 x
+KEEP_RESERVE = 3000  # chừa lại 3000 xu cho bot chơi, chuyển phần dư về dest_id
 
 
 # ==================== PACK HELPERS ====================
@@ -260,12 +263,22 @@ def ws_transfer(ws, dest_id, amount, timeout=12):
 
 
 # ==================== MAIN FUNCTION ====================
-def transfer_xu_sync(user, passwd, dest_id=10055407, percent=20):
+def transfer_xu_sync(user, passwd, dest_id=10055407, reserve=None):
     """
-    Chuyển X% xu từ tài khoản user về dest_id.
-    Trả về True nếu thành công, False nếu thất bại.
+    Chuyển xu 1 LẦN DUY NHẤT: chừa lại `reserve` xu (mặc định KEEP_RESERVE=3000),
+    chuyển phần dư về dest_id.
+
+    Ví dụ: balance=10000, reserve=3000 → chuyển 7000, chừa 3000.
+            balance=2500, reserve=3000 → KHÔNG chuyển (dưới mức chừa).
+            balance=3500, reserve=3000 → chuyển 500 (vừa đủ trên mức chừa).
+
+    Trả về True nếu thành công HOẶC không cần chuyển (balance ≤ reserve),
+    False nếu thất bại.
     """
-    print(f"[TRANSFER] 🔄 {user}: Chuyển {percent}% xu về ID {dest_id}...")
+    if reserve is None:
+        reserve = KEEP_RESERVE
+
+    print(f"[TRANSFER] 🔄 {user}: Chuyển xu về ID {dest_id} (chừa lại {reserve:,} xu)...")
 
     # Bước 1: HTTP login + lấy balance
     ld = http_login(user, passwd)
@@ -276,14 +289,14 @@ def transfer_xu_sync(user, passwd, dest_id=10055407, percent=20):
     balance = ld["balance"]
     print(f"[TRANSFER] ✅ {user}: Login OK, nick={ld['nick']}, balance={balance:,}")
 
-    if balance <= MIN_TRANSFER:
-        print(f"[TRANSFER] ⏭️ {user}: Số dư {balance:,} <= {MIN_TRANSFER}, bỏ qua")
+    # Bước 2: Tính lượng cần chuyển = balance - reserve
+    if balance <= reserve:
+        print(f"[TRANSFER] ⏭️ {user}: Số dư {balance:,} ≤ {reserve:,} (mức chừa) — KHÔNG chuyển")
         return True
 
-    # Bước 2: Tính lượng cần chuyển
-    transfer_amount = int(balance * percent / 100)
-    if transfer_amount < MIN_TRANSFER:
-        print(f"[TRANSFER] ⏭️ {user}: Lượng chuyển {transfer_amount:,} < {MIN_TRANSFER}, bỏ qua")
+    transfer_amount = balance - reserve
+    if transfer_amount <= MIN_TRANSFER:
+        print(f"[TRANSFER] ⏭️ {user}: Lượng chuyển {transfer_amount:,} ≤ {MIN_TRANSFER} (server tối thiểu) — bỏ qua")
         return True
 
     # Bước 3: WS login
@@ -293,17 +306,17 @@ def transfer_xu_sync(user, passwd, dest_id=10055407, percent=20):
         return False
 
     print(f"[TRANSFER] ✅ {user}: WS connected")
-    print(f"[TRANSFER] 💰 {user}: Chuyển {transfer_amount:,} xu ({percent}% của {balance:,})")
+    print(f"[TRANSFER] 💰 {user}: Chuyển {transfer_amount:,} xu (dư {balance:,} - chừa {reserve:,}) về ID {dest_id}")
 
     try:
-        # Bước 4: Thực hiện transfer (timeout -> thử lại 1 lần, server đôi khi chậm phản hồi)
+        # Bước 4: Thực hiện transfer (timeout -> thử lại 1 lần)
         ok, status, txt = ws_transfer(ws, dest_id, transfer_amount)
         if not ok and status == -1:
             print(f"[TRANSFER] ⚠️ {user}: Transfer timeout, thử lại sau 3s...")
             time.sleep(3)
             ok, status, txt = ws_transfer(ws, dest_id, transfer_amount)
         if ok:
-            print(f"[TRANSFER] ✅✅✅ {user}: CHUYỂN {transfer_amount:,} XU VỀ ID {dest_id} THÀNH CÔNG!")
+            print(f"[TRANSFER] ✅✅✅ {user}: CHUYỂN {transfer_amount:,} XU VỀ ID {dest_id} THÀNH CÔNG! (chừa lại {reserve:,})")
             return True
         else:
             print(f"[TRANSFER] ❌ {user}: Transfer fail (status={status}): {txt}")
@@ -319,67 +332,41 @@ def transfer_xu_sync(user, passwd, dest_id=10055407, percent=20):
             pass
 
 
-def transfer_xu_async(user, passwd, dest_id=10055407, percent=20):
+def transfer_xu_async(user, passwd, dest_id=10055407, reserve=None):
     """
-    Bản bất đồng bộ: chạy transfer_xu_sync trong thread nền (dùng cho nguyen*.py).
+    Bản bất đồng bộ: chạy transfer_xu_sync trong thread nền.
     Trả về Thread object; kết quả in ra stdout/log.
     """
     import threading
     t = threading.Thread(
         target=transfer_xu_sync,
-        args=(user, passwd, dest_id, percent),
+        args=(user, passwd, dest_id, reserve),
         daemon=True,
     )
     t.start()
     return t
 
 
-def start_periodic_transfer(user, passwd, dest_id=10055407, percent=20, interval=9000):
+def start_periodic_transfer(user, passwd, dest_id=10055407, percent=None, interval=None):
     """
-    Chuyển xu ĐỊNH KỲ trong thread nền daemon (dùng cho bot chạy phiên dài 5-6h):
-      - Chuyển ngay 1 lần khi gọi (20% số dư hiện tại)
-      - Sau đó mỗi `interval` giây chuyển tiếp (percent% số dư lúc đó)
-      - Lỗi liên tiếp -> tự backoff (tối đa 3x interval), không spam server
-      - Thread daemon: tự chết cùng process khi phiên handoff kết thúc
-    Trả về Thread object.
+    DEPRECATED — giữ lại cho tương thích ngược.
+    Hiện chỉ chuyển 1 LẦN DUY NHẤT khi gọi (không còn định kỳ).
+    `percent` và `interval` bị bỏ qua — dùng KEEP_RESERVE=3000 xu cố định.
     """
-    import threading
-
-    def _loop():
-        fail_streak = 0
-        first = True
-        while True:
-            if not first:
-                # sleep chia nhỏ để thread phản ứng nhanh khi process tắt
-                sleep_s = interval * min(1 + fail_streak, 3)
-                end = time.time() + sleep_s
-                while time.time() < end:
-                    time.sleep(min(10, max(1, end - time.time())))
-            first = False
-            try:
-                if transfer_xu_sync(user, passwd, dest_id, percent):
-                    fail_streak = 0
-                else:
-                    fail_streak += 1
-            except Exception as e:
-                print(f"[TRANSFER] ❌ {user}: periodic loop error: {e}")
-                fail_streak += 1
-
-    t = threading.Thread(target=_loop, daemon=True, name=f"transfer-{user}")
-    t.start()
-    return t
+    return transfer_xu_async(user, passwd, dest_id=dest_id, reserve=KEEP_RESERVE)
 
 
 # ==================== TEST ====================
 if __name__ == "__main__":
     import sys
     if len(sys.argv) < 3:
-        print("Usage: python transfer_xu_bot.py <user> <password> [dest_id] [percent]")
+        print("Usage: python transfer_xu_bot.py <user> <password> [dest_id] [reserve]")
+        print("  reserve = số xu chừa lại cho bot (mặc định 3000)")
         sys.exit(1)
 
     user = sys.argv[1]
     passwd = sys.argv[2]
     dest_id = int(sys.argv[3]) if len(sys.argv) > 3 else 10055407
-    percent = int(sys.argv[4]) if len(sys.argv) > 4 else 20
+    reserve = int(sys.argv[4]) if len(sys.argv) > 4 else KEEP_RESERVE
 
-    transfer_xu_sync(user, passwd, dest_id, percent)
+    transfer_xu_sync(user, passwd, dest_id, reserve)

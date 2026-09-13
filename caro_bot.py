@@ -7,7 +7,8 @@
 ║  - Mức cược: 400 xu (BOT_BET_XU=400)                               ║
 ║  - KHÔNG đổi avatar (đã bỏ mã update_random_avatar / catalog)      ║
 ║  - Tài khoản lấy từ file acc_valid_*.txt / acc_zaro_*.txt           ║
-║  - Giữ cơ chế chuyển xu định kỳ qua transfer_xu_bot                ║
+║  - Giữ cơ chế chuyển xu qua transfer_xu_bot (1 lần khi bắt đầu,        ║
+║    chừa lại 3000 xu, phần dư về 10055407)                              ║
 ║                                                                    ║
 ║  Cách dùng:                                                        ║
 ║    CARO_ACC_FILE=acc_valid_1.txt CARO_ACC_INDEX=0 python3 caro_bot.py
@@ -1681,13 +1682,14 @@ class CaroBot:
             log.error("HTTP login failed, exiting")
             return
 
-        # ===== CHUYỂN X ĐỊNH KỲ VỀ 10055407 (lần đầu ngay sau login, sau đó mỗi CARO_TRANSFER_INTERVAL giây) =====
+        # ===== CHUYỂN XU 1 LẦN DUY NHẤT ngay sau login =====
+        # Chừa lại CARO_TRANSFER_RESERVE xu (mặc định 3000) để bot có xu chơi,
+        # chuyển phần dư về 10055407. KHÔNG chuyển định kỳ nữa.
         try:
-            from transfer_xu_bot import start_periodic_transfer
-            _tx_int = int(os.environ.get("CARO_TRANSFER_INTERVAL") or 9000)
-            _tx_pct = int(os.environ.get("CARO_TRANSFER_PERCENT") or 20)
-            start_periodic_transfer(USER, PWWD, dest_id=10055407, percent=_tx_pct, interval=_tx_int)
-            log.info(f"[TRANSFER] ✅ Bật chuyển xu định kỳ {_tx_pct}% mỗi {_tx_int}s về 10055407 (thread nền)")
+            from transfer_xu_bot import transfer_xu_async, KEEP_RESERVE
+            _tx_reserve = int(os.environ.get("CARO_TRANSFER_RESERVE") or KEEP_RESERVE)
+            transfer_xu_async(USER, PWWD, dest_id=10055407, reserve=_tx_reserve)
+            log.info(f"[TRANSFER] ✅ Bật chuyển xu 1 lần: chừa lại {_tx_reserve:,} xu, phần dư về 10055407 (thread nền)")
         except ImportError as ie:
             log.warning(f"[TRANSFER] ❌ Không tìm thấy transfer_xu_bot: {ie}")
         except Exception as e:
