@@ -805,6 +805,10 @@ class CaroBot:
         self._identity_attempted = False
         self.identity_result = {}
 
+        # === KICK FALLBACK: nếu sau khi gameover + kick mà quá lâu không tạo bàn mới,
+        # watchdog sẽ tự kích hoạt create_new_table để tránh bot đứng sảnh mãi ===
+        self._pending_new_table_at = None
+
         # === SET_TURN TIMER TRACKER ===
         self.timer_tracker = SetTurnTracker()
 
@@ -947,8 +951,11 @@ class CaroBot:
             except Exception: pass
 
     async def create_new_table(self):
-        if not self._bet_amts_loaded:
+        """Tạo bàn mới mức 400 xu. Nếu chưa nạp mức cược hoặc mức 400 không khả dụng,
+        gửi LIST_BET_AMT để load/reload. Nếu đã có _resolved_bet_id hợp lệ → gửi CREATE_RULE."""
+        if not self._bet_amts_loaded or self._resolved_bet_id is None:
             self._bet_amts_loaded = False
+            self._resolved_bet_id = None
             await self.send(self.make_list_bet_amt())
         else:
             await self.send(self.make_create_rule())
@@ -1090,6 +1097,7 @@ class CaroBot:
                     log.info(f"[BOT] Thử vào lại bàn cũ: {path}")
                     await self.send(self.make_enter(path))
                 else:
+                    # Vào sảnh OK → nạp lại mức cược rồi tạo bàn
                     self._bet_amts_loaded = False; self._resolved_bet_id = None
                     await self.send(self.make_list_bet_amt())
         else:
@@ -1097,9 +1105,11 @@ class CaroBot:
                 self._joining_table = False
                 if self._rejoining:
                     self._rejoining = False; self._rejoin_attempts += 1; self.table_id = None
-                    await asyncio.sleep(1); await self.send(self.make_list_bet_amt())
+                    # Vào lại bàn cũ thất bại → tạo bàn mới qua create_new_table
+                    await asyncio.sleep(1); await self.create_new_table()
                 else:
-                    await asyncio.sleep(1); await self.send(self.make_create_rule())
+                    # Tạo bàn thất bại ở cấp ENTER → nạp lại mức cược rồi tạo lại
+                    await asyncio.sleep(1); await self.create_new_table()
             else:
                 log.warning(f"[ENTER] Vào sảnh lỗi (status={status}) -> thử lại sau 3s")
                 await asyncio.sleep(3)
@@ -1241,6 +1251,7 @@ class CaroBot:
                     self.ready = False
             elif not is_playing and self.slot < 0:
                 self.in_table = False; self.table_id = None
+                self._bet_amts_loaded = False; self._resolved_bet_id = None
                 await asyncio.sleep(1); await self.send(self.make_list_bet_amt())
 
             self._rejoining = False
@@ -1371,6 +1382,9 @@ class CaroBot:
             if winner_id is not None:
                 log.info(f"[BOT] Bot thua; kick người thắng {winner.get('name', winner_id)} sau 5 giây...")
                 asyncio.create_task(self._delay_kick(winner_id, 5.0))
+                # Fallback: nếu sau 30s vẫn chưa tạo bàn mới (kick không response / callback kẹt),
+                # watchdog sẽ tạo bàn mới. Đặt cờ _pending_new_table để watchdog biết.
+                self._pending_new_table_at = time.time() + 30
                 return
             log.warning("[BOT] Bot thua nhưng không tìm thấy playerId người thắng; chuyển sang sẵn sàng")
 
@@ -1470,6 +1484,19 @@ class CaroBot:
 
             if not self.ws or self.ws.close_code is not None: continue
 
+            # ===== KICK FALLBACK: sau gameover, nếu 30s không tạo bàn mới → ép tạo =====
+            try:
+                if (self._pending_new_table_at is not None
+                        and time.time() >= self._pending_new_table_at):
+                    if not self.is_playing and not self.in_table:
+                        log.warning("[FALLBACK] 30s sau kick vẫn chưa tạo bàn mới -> tạo bàn ngay")
+                        self._pending_new_table_at = None
+                        await self.create_new_table()
+                    else:
+                        # Đã vào bàn mới rồi (qua callback kick) → xóa cờ
+                        self._pending_new_table_at = None
+            except Exception: pass
+
             # ===== ANTISTUCK: đứng sảnh quá 90s không có bàn -> reset cờ kẹt, nạp lại cược =====
             try:
                 if not self.is_playing and not self.in_table:
@@ -1513,9 +1540,21 @@ class CaroBot:
                     self._table_lost_at = None; self.table_id = None
                     await self.create_new_table()
 
+                # ===== TẠO BÀN KHI ĐỨNG SẢNH: kiểm tra _resolved_bet_id hợp lệ =====
+                # Trước đây: chỉ cần _bet_amts_loaded=True là gửi make_create_rule
+                # → b'' khi server không có mức 400 → bot đứng sảnh mãi
+                # Giờ: chỉ gửi khi _resolved_bet_id != None (chắc chắn có mức 400)
                 if (not self.is_playing and not self.in_table and not self._joining_table
-                    and not self._rejoining and self._bet_amts_loaded):
+                    and not self._rejoining and self._bet_amts_loaded
+                    and self._resolved_bet_id is not None):
                     await self.send(self.make_create_rule())
+                elif (not self.is_playing and not self.in_table and not self._joining_table
+                      and not self._rejoining and self._bet_amts_loaded
+                      and self._resolved_bet_id is None):
+                    # Đã load bet_amts nhưng không có mức 400 → nạp lại sau 30s
+                    log.info("[WATCHDOG] _resolved_bet_id=None (không có mức 400) -> nạp lại LIST_BET_AMT")
+                    self._bet_amts_loaded = False
+                    await self.send(self.make_list_bet_amt())
             except Exception: pass
 
     # ======================== HTTP LOGIN & IDENTITY ========================
