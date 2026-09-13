@@ -8,8 +8,6 @@ on:
         required: false
         default: '5.9'
         type: string
-  schedule:
-    - cron: '84 */6 * * *'
 
 permissions:
   contents: read
