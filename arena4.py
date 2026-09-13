@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-arena6.py — Bot Caro (wrapper) — gamevh.net
-Mức cược: 400 xu | KHÔNG đổi avatar | Tài khoản từ acc_valid_1.txt[5]
+arena4.py — Bot Caro (wrapper) — gamevh.net
+Mức cược: 400 xu | KHÔNG đổi avatar | Tài khoản từ acc_valid_1.txt[3]
 Giữ cơ chế chuyển xu định kỳ qua transfer_xu_bot.
 """
 import os
@@ -14,7 +14,7 @@ if _HERE not in sys.path:
 
 # Chọn tài khoản từ file (chỉ setdefault — để runner override qua CARO_USER/CARO_PWWD)
 os.environ.setdefault("CARO_ACC_FILE", "acc_valid_1.txt")
-os.environ.setdefault("CARO_ACC_INDEX", "5")
+os.environ.setdefault("CARO_ACC_INDEX", "3")
 
 from caro_bot import main  # noqa: E402
 

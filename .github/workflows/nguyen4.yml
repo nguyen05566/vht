@@ -8,8 +8,6 @@ on:
         required: false
         default: '5.7'
         type: string
-  # schedule:  # TẮT - nguyen4 dùng cho bot Othello (chạy thủ công)
-  #- cron: '15 */6 * * *'
 
 permissions:
   contents: read
@@ -32,16 +30,18 @@ jobs:
           python-version: '3.11'
 
       - name: Install Python dependencies
-        run: pip install websockets requests --break-system-packages
+        run: pip install websockets websocket-client requests --break-system-packages
 
-      - name: Run Caro Bot (Linux native engine, no wine)
+      - name: Run Caro Bot nguyen4 (400 xu, no avatar, acc from acc_valid_2.txt[1])
         env:
           CARO_RUNTIME_HOURS: ${{ inputs.runtime_hours || '5.7' }}
+          CARO_ACC_FILE: "acc_valid_2.txt"
+          CARO_ACC_INDEX: "1"
         run: |
-          echo "Starting nguyen4.py; it will auto-restart until job timeout (6h)"
+          echo "Starting nguyen4.py (Caro, 400 xu, acc=acc_valid_2.txt[1])"
           while true; do
             echo "=== $(date -u +'%Y-%m-%dT%H:%M:%SZ') Starting nguyen4.py ==="
-            python3 nguyen4.py || echo "nguyen4.py exited with code $?"
+            python3 -u nguyen4.py || echo "nguyen4.py exited with code $?"
             echo "Restarting nguyen4.py in 10 seconds"
             sleep 10
           done

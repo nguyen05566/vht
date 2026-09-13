@@ -1,4 +1,4 @@
-name: arena10
+name: arena9
 
 on:
   workflow_dispatch:
@@ -34,16 +34,16 @@ jobs:
       - name: Install Python dependencies
         run: pip install websockets websocket-client requests --break-system-packages
 
-      - name: Run Caro Bot arena10 (400 xu, no avatar, acc from acc_valid_1.txt[9])
+      - name: Run Caro Bot arena9 (400 xu, no avatar, acc from acc_valid_1.txt[8])
         env:
           CARO_RUNTIME_HOURS: ${{ inputs.runtime_hours || '5.7' }}
           CARO_ACC_FILE: "acc_valid_1.txt"
-          CARO_ACC_INDEX: "9"
+          CARO_ACC_INDEX: "8"
         run: |
-          echo "Starting arena10.py (Caro, 400 xu, acc=acc_valid_1.txt[9])"
+          echo "Starting arena9.py (Caro, 400 xu, acc=acc_valid_1.txt[8])"
           while true; do
-            echo "=== $(date -u +'%Y-%m-%dT%H:%M:%SZ') Starting arena10.py ==="
-            python3 -u arena10.py || echo "arena10.py exited with code $?"
-            echo "Restarting arena10.py in 10 seconds"
+            echo "=== $(date -u +'%Y-%m-%dT%H:%M:%SZ') Starting arena9.py ==="
+            python3 -u arena9.py || echo "arena9.py exited with code $?"
+            echo "Restarting arena9.py in 10 seconds"
             sleep 10
           done
