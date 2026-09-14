@@ -910,6 +910,14 @@ class ChessBot:
 
     # ==================== HTTP LOGIN ====================
     def http_login(self):
+        """Login — PS_VH (username/password) hoặc FB OAuth (FB_COOKIES env)."""
+        fb_cookies = os.environ.get("FB_COOKIES", "").strip()
+        if fb_cookies:
+            return self._fb_oauth_login(fb_cookies)
+        return self._psvh_login()
+
+    def _psvh_login(self):
+        """Login bằng username/password (PS_VH provider)."""
         try:
             cj = http.cookiejar.CookieJar()
             op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
@@ -928,10 +936,48 @@ class ChessBot:
             self.cookie = "; ".join(f"{c.name}={c.value}" for c in cj)
             self.nickname = m_nick.group(1)
             self.token = int(m_tok.group(1))
-            log.info(f"[HTTP] Login OK: nick={self.nickname}, token={self.token}")
+            log.info(f"[HTTP] Login OK (PS_VH): nick={self.nickname}, token={self.token}")
             return True
         except Exception as e:
-            log.error(f"[HTTP] Login error: {e}")
+            log.error(f"[HTTP] PS_VH login error: {e}")
+            return False
+
+    def _fb_oauth_login(self, fb_cookies):
+        """Login qua Facebook OAuth (FB_COOKIES env)."""
+        try:
+            cj = http.cookiejar.CookieJar()
+            op = urllib.request.build_opener(
+                urllib.request.HTTPCookieProcessor(cj),
+                urllib.request.HTTPRedirectHandler()
+            )
+            op.addheaders = [
+                ("User-Agent", "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 Chrome/139.0 Mobile Safari/537.36"),
+                ("Accept-Language", "vi-VN,vi;q=0.9"),
+                ("Cookie", fb_cookies),
+            ]
+            # Visit facebook.jsp → FB OAuth → redirect back
+            r = op.open("https://gamevh.net/facebook.jsp", timeout=20)
+            final_url = r.geturl()
+            if "facebook.com" in final_url:
+                log.warning("[HTTP] FB consent dialog — cần browser click 'Tiếp tục'")
+                return False
+            # Get token
+            g = op.open(GAME_URL, timeout=15).read().decode("utf-8", "replace")
+            m_tok = re.search(r"var\s+token\s*=\s*(-?\d+)", g)
+            m_nick = re.search(r"var\s+currentPlayerNickName\s*=\s*[\"']([^\"']+)[\"']", g)
+            m_pid = re.search(r"var\s+currentPlayerId\s*=\s*(-?\d+)", g)
+            if not m_tok or not m_nick: return False
+            self.cookie = "; ".join(f"{c.name}={c.value}" for c in cj)
+            self.nickname = m_nick.group(1)
+            self.token = int(m_tok.group(1))
+            pid = int(m_pid.group(1)) if m_pid else 0
+            if pid == 0:
+                log.warning("[HTTP] FB OAuth returned pid=0 — session expired")
+                return False
+            log.info(f"[HTTP] Login OK (FB OAuth): nick={self.nickname}, pid={pid}")
+            return True
+        except Exception as e:
+            log.error(f"[HTTP] FB OAuth error: {e}")
             return False
 
     # ==================== WATCHDOG ====================
