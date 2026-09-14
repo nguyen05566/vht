@@ -54,10 +54,10 @@ UA_POOL = [
 ]
 
 # ==================== OUTPUT FILES ====================
-ALIVE_FILE = "/home/z/my-project/vht/acc_alive.txt"
-DEAD_FILE = "/home/z/my-project/vht/acc_dead.txt"
-DONE_FILE = "/home/z/my-project/vht/acc_spin_done.txt"
-REPORT_CSV = "/home/z/my-project/vht/spin_report.csv"
+ALIVE_FILE = "acc_alive.txt"
+DEAD_FILE = "acc_dead.txt"
+DONE_FILE = "acc_spin_done.txt"
+REPORT_CSV = "spin_report.csv"
 
 # Thread-safe locks cho file append
 _alive_lock = threading.Lock()

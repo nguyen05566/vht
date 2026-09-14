@@ -2,7 +2,7 @@ name: batch_spin_35k
 
 on:
   schedule:
-    - cron: '0 18 * * *'  # 01:00 VN (UTC+7) = 18:00 UTC ngày trước
+    - cron: '0 18 * * *'  # 01:00 VN (UTC+7)
   workflow_dispatch:
     inputs:
       workers:
@@ -14,6 +14,11 @@ on:
         description: 'Giới hạn số acc (0 = hết)'
         required: false
         default: '0'
+        type: string
+      fresh:
+        description: 'Chạy lại từ đầu (xóa done file)'
+        required: false
+        default: '1'
         type: string
 
 permissions:
@@ -39,6 +44,13 @@ jobs:
 
       - name: Install dependencies
         run: pip install websocket-client -q --break-system-packages
+
+      - name: Clear done file for new day
+        if: ${{ github.event.inputs.fresh != '0' }}
+        run: |
+          echo "Clearing acc_spin_done.txt for fresh run..."
+          rm -f acc_spin_done.txt spin_report.csv acc_alive.txt acc_dead.txt
+          echo "Cleared."
 
       - name: Run batch spin 35k accounts
         env:
@@ -68,11 +80,11 @@ jobs:
         if: always()
         run: |
           echo "## Batch Spin 35k — Tổng kết" >> $GITHUB_STEP_SUMMARY
-          echo "- Total accounts: $(wc -l < acc_valid_all.txt)" >> $GITHUB_STEP_SUMMARY
+          echo "- Accounts: $(wc -l < acc_valid_all.txt)" >> $GITHUB_STEP_SUMMARY
           echo "- Processed: $(wc -l < acc_spin_done.txt 2>/dev/null || echo 0)" >> $GITHUB_STEP_SUMMARY
           echo "- Alive: $(wc -l < acc_alive.txt 2>/dev/null || echo 0)" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
           if [ -f spin_report.csv ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
             echo "### Stats" >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
             awk -F, 'NR>1{s+=$4+$5; r+=$6; t+=$7; n++} END{
