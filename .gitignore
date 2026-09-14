@@ -8,3 +8,4 @@ batch_*
 .gh_token
 drain_logs/
 acc_files/
+stockfish-engine/

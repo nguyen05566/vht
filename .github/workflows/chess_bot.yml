@@ -1,0 +1,77 @@
+name: chess_bot
+
+on:
+  workflow_dispatch:
+    inputs:
+      bet_xu:
+        description: 'Mức cược xu (50/100/250/500/1000/2500/5000)'
+        required: false
+        default: '1000'
+        type: string
+      runtime_hours:
+        description: 'Runtime (hours)'
+        required: false
+        default: '5.7'
+        type: string
+      acc_file:
+        description: 'File acc (default: acc_valid_1.txt)'
+        required: false
+        default: 'acc_valid_1.txt'
+        type: string
+      acc_index:
+        description: 'Index acc (default: 0)'
+        required: false
+        default: '0'
+        type: string
+  schedule:
+    - cron: '0 19 * * *'  # 02:00 VN
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chess-bot
+  cancel-in-progress: true
+
+jobs:
+  play:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install websockets websocket-client -q --break-system-packages
+
+      - name: Cache Stockfish engine
+        id: cache-sf
+        uses: actions/cache@v4
+        with:
+          path: stockfish-engine
+          key: stockfish-19-linux-x86-64
+
+      - name: Download Stockfish 19
+        if: steps.cache-sf.outputs.cache-hit != 'true'
+        timeout-minutes: 5
+        run: |
+          mkdir -p stockfish-engine
+          curl -sL -o /tmp/sf.tar.gz "https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz"
+          tar xzf /tmp/sf.tar.gz -C stockfish-engine
+          chmod +x stockfish-engine/stockfish/stockfish-linux-x86-64-universal
+
+      - name: Run Chess Bot
+        env:
+          CHESS_BET_XU: ${{ inputs.bet_xu || '1000' }}
+          CHESS_RUNTIME_HOURS: ${{ inputs.runtime_hours || '5.7' }}
+          CHESS_ACC_FILE: ${{ inputs.acc_file || 'acc_valid_1.txt' }}
+          CHESS_ACC_INDEX: ${{ inputs.acc_index || '0' }}
+        run: |
+          echo "=== $(date -u +'%Y-%m-%dT%H:%M:%SZ') Starting Chess Bot ==="
+          echo "Bet: $CHESS_BET_XU xu | Runtime: $CHESS_RUNTIME_HOURS hours"
+          python3 chess_bot.py
