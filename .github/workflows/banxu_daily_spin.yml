@@ -1,0 +1,43 @@
+name: banxu_daily_spin
+
+on:
+  schedule:
+    - cron: '0 17 * * *'  # 00:00 VN (UTC+7) = 17:00 UTC ngày trước
+  workflow_dispatch:
+    inputs:
+      runtime:
+        description: 'Test mode (skip transfer)'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: banxu-daily-spin
+  cancel-in-progress: true
+
+jobs:
+  spin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install websocket-client -q --break-system-packages
+
+      - name: Run ban_xu daily spin
+        env:
+          FB_COOKIES: ${{ secrets.FB_COOKIES }}
+        run: |
+          echo "=== $(date -u +'%Y-%m-%dT%H:%M:%SZ') Starting ban_xu daily spin ==="
+          python3 spin_banxu_daily.py
+          echo "=== Done ==="
