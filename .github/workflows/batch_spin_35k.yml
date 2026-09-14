@@ -1,0 +1,88 @@
+name: batch_spin_35k
+
+on:
+  schedule:
+    - cron: '0 18 * * *'  # 01:00 VN (UTC+7) = 18:00 UTC ngày trước
+  workflow_dispatch:
+    inputs:
+      workers:
+        description: 'Số luồng (mặc định: 32)'
+        required: false
+        default: '32'
+        type: string
+      limit:
+        description: 'Giới hạn số acc (0 = hết)'
+        required: false
+        default: '0'
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: batch-spin-35k
+  cancel-in-progress: true
+
+jobs:
+  spin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install websocket-client -q --break-system-packages
+
+      - name: Run batch spin 35k accounts
+        env:
+          WORKERS: ${{ inputs.workers || '32' }}
+          LIMIT: ${{ inputs.limit || '0' }}
+        run: |
+          echo "=== $(date -u +'%Y-%m-%dT%H:%M:%SZ') Starting batch spin ==="
+          echo "Workers: $WORKERS | Limit: $LIMIT"
+          echo "Accounts: $(wc -l < acc_valid_all.txt)"
+          echo "Already done: $(wc -l < acc_spin_done.txt 2>/dev/null || echo 0)"
+          echo "---"
+          python3 check_spin_batch.py acc_valid_all.txt $WORKERS $LIMIT
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: spin-results
+          path: |
+            acc_alive.txt
+            acc_dead.txt
+            acc_spin_done.txt
+            spin_report.csv
+          retention-days: 7
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Batch Spin 35k — Tổng kết" >> $GITHUB_STEP_SUMMARY
+          echo "- Total accounts: $(wc -l < acc_valid_all.txt)" >> $GITHUB_STEP_SUMMARY
+          echo "- Processed: $(wc -l < acc_spin_done.txt 2>/dev/null || echo 0)" >> $GITHUB_STEP_SUMMARY
+          echo "- Alive: $(wc -l < acc_alive.txt 2>/dev/null || echo 0)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ -f spin_report.csv ]; then
+            echo "### Stats" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            awk -F, 'NR>1{s+=$4+$5; r+=$6; t+=$7; n++} END{
+              if(n>0) {
+                print "Acc processed:  " n
+                print "Total spins:    " s
+                print "Total reward:    " r " xu"
+                print "Transferred:     " t " xu"
+                print "Avg reward/acc:  " int(r/n) " xu"
+              }
+            }' spin_report.csv >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
