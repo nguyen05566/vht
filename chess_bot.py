@@ -223,7 +223,7 @@ class StockfishEngine:
             return None
 
     def _uci_to_positions(self, uci_move):
-        """Convert UCI move (e.g. 'e2e4', 'e7e8q') to game positions."""
+        """Convert UCI move (e.g. 'e2e4', 'e7e8q') to game positions + promotion byte."""
         if len(uci_move) < 4:
             return None
         src_file = ord(uci_move[0]) - ord('a')
@@ -233,11 +233,19 @@ class StockfishEngine:
         # Game position: 0-63, pos = rank * 8 + file
         src_pos = src_rank * 8 + src_file
         tgt_pos = tgt_rank * 8 + tgt_file
-        promotion = None
+        # Promotion: convert to server byte
+        promo_byte = None
         if len(uci_move) >= 5:
-            promo_map = {'q': 1, 'r': 2, 'b': 3, 'n': 4, 'Q': 7, 'R': 8, 'B': 9, 'N': 10}
-            promotion = promo_map.get(uci_move[4])
-        return (src_pos, tgt_pos, promotion)
+            promo_char = uci_move[4]
+            # Determine color from whose move it is
+            # White promotion: uppercase piece (Q=16, R=24, B=32, N=40)
+            # Black promotion: negative (-16, -24, -32, -40)
+            type_map = {'q': 2, 'r': 3, 'b': 4, 'n': 5}
+            t = type_map.get(promo_char.lower(), 2)
+            byte_val = t << 3
+            # Color will be set by caller
+            promo_byte = byte_val  # Will be made negative for black in do_move
+        return (src_pos, tgt_pos, promo_byte)
 
     def stop(self):
         with self.lock:
@@ -313,16 +321,35 @@ class BinaryWriter:
     def build(self): return b"".join(self.parts)
 
 # ==================== CHESS BOARD ====================
-# Piece encoding (from JS decodePieceId):
-# White: K=0, Q=1, R=2, B=3, N=4, P=5
-# Black: K=6, Q=7, R=8, B=9, N=10, P=11
+# Piece byte encoding (signed byte from server):
+# decodePieceId(byte): color = byte < 0 ? 'b' : 'w'
+#   type = abs(byte) >> 3: 1=k, 2=q, 3=r, 4=b, 5=n, 6=p
+#   suffix = (abs(byte) & 7) + 1 (K/Q have no suffix)
+# FEN: white=uppercase, black=lowercase
+TYPE_TO_FEN = {1:'k', 2:'q', 3:'r', 4:'b', 5:'n', 6:'p'}
+
+def byte_to_fen_char(byte_val):
+    """Convert signed byte to FEN piece char."""
+    color = 'b' if byte_val < 0 else 'w'
+    t = abs(byte_val) >> 3
+    tc = TYPE_TO_FEN.get(t, '?')
+    return tc.upper() if color == 'w' else tc.lower()
+
+def fen_char_to_byte(char):
+    """Convert FEN char to signed byte (for promotion)."""
+    color = 'w' if char.isupper() else 'b'
+    tc = char.lower()
+    type_num = {'k':1, 'q':2, 'r':3, 'b':4, 'n':5, 'p':6}.get(tc, 2)
+    byte_val = type_num << 3  # suffix=0 → suffix_id=1
+    return byte_val if color == 'w' else -byte_val
+
 PIECE_CHARS = {0:"K",1:"Q",2:"R",3:"B",4:"N",5:"P",6:"k",7:"q",8:"r",9:"b",10:"n",11:"p"}
 CHAR_TO_PIECE = {v:k for k,v in PIECE_CHARS.items()}
 
 class ChessBoard:
     """8x8 chess board, tracks pieces for FEN generation."""
     def __init__(self):
-        self.squares = [None] * 64  # each: piece_id (0-11) or None
+        self.squares = [None] * 64  # each: signed byte (piece encoded id) or None
         self.white_to_move = True
         self.castling = "KQkq"
         self.en_passant = "-"
@@ -340,60 +367,53 @@ class ChessBoard:
     def setup_standard(self):
         """Setup standard starting position."""
         self.clear()
-        # Black pieces (rank 8 = positions 56-63)
-        self.squares[56] = 8  # r
-        self.squares[57] = 9  # b
-        self.squares[58] = 10  # n
-        self.squares[59] = 7  # q
-        self.squares[60] = 6  # k
-        self.squares[61] = 9  # b
-        self.squares[62] = 10  # n
-        self.squares[63] = 8  # r
-        for i in range(48, 56):
-            self.squares[i] = 11  # p (black pawns)
-        for i in range(8, 16):
-            self.squares[i] = 5  # P (white pawns)
-        # White pieces (rank 1 = positions 0-7)
-        self.squares[0] = 2  # R
-        self.squares[1] = 3  # B
-        self.squares[2] = 4  # N
-        self.squares[3] = 1  # Q
-        self.squares[4] = 0  # K
-        self.squares[5] = 3  # B
-        self.squares[6] = 4  # N
-        self.squares[7] = 2  # R
+        # Standard chess layout:
+        # Rank 8 (pos 56-63): r n b q k b n r
+        # Rank 1 (pos 0-7):   R N B Q K B N R
+        # Type: 1=k, 2=q, 3=r, 4=b, 5=n, 6=p
+        # Byte = (type << 3) | (suffix-1), positive=white, negative=black
+        # K=8, Q=16, R1=24, R2=25, B1=32, B2=33, N1=40, N2=41, P1-P8=48-55
+        standard_black = [-24,-40,-32,-16,-8,-33,-41,-25]  # r n b q k b n r
+        standard_white = [24,40,32,16,8,33,41,25]          # R N B Q K B N R
+        for i in range(8):
+            self.squares[56+i] = standard_black[i]  # rank 8
+            self.squares[i] = standard_white[i]     # rank 1
+        for i in range(8):
+            self.squares[48+i] = -(48+i)  # black pawns rank 7
+            self.squares[8+i] = 48+i       # white pawns rank 2
 
-    def set_from_pieces(self, pieces):
-        """Set board from list of (piece_id, position)."""
+    def set_from_server_pieces(self, pieces):
+        """Set board from fillBoardData: list of (sid_byte, face_byte, position, moved).
+        face_byte is the encoded piece ID (signed byte)."""
         self.squares = [None] * 64
-        for pid, pos in pieces:
+        for sid_byte, face_byte, pos, moved in pieces:
             if 0 <= pos < 64:
-                self.squares[pos] = pid
+                self.squares[pos] = face_byte  # Use face byte (piece type+color)
+        log.info(f"[BOARD] Set {len(pieces)} pieces. Board: {self.to_fen()[:60]}")
 
-    def make_move(self, src, tgt, promotion=None):
-        """Apply a move to the board."""
+    def make_move(self, src, tgt, promotion_byte=None):
+        """Apply a move to the board. promotion_byte is the signed byte for promoted piece."""
         piece = self.squares[src]
         if piece is None:
             return
         # Handle promotion
-        if promotion is not None:
-            self.squares[tgt] = promotion
+        if promotion_byte is not None:
+            self.squares[tgt] = promotion_byte
         else:
             self.squares[tgt] = piece
         self.squares[src] = None
         # Handle en passant (pawn diagonal capture to empty square)
-        if piece in (5, 11) and src % 8 != tgt % 8 and self.squares[tgt] is None:
+        piece_type = abs(piece) >> 3
+        if piece_type == 6 and src % 8 != tgt % 8 and self.squares[tgt] is None:
             # En passant capture
             cap_pos = (src // 8) * 8 + (tgt % 8)
             self.squares[cap_pos] = None
         # Handle castling (king moves 2 squares)
-        if piece in (0, 6) and abs(tgt - src) == 2:
+        if piece_type == 1 and abs(tgt - src) == 2:
             if tgt > src:
-                # Kingside: move rook
                 rook_src = (src // 8) * 8 + 7
                 rook_tgt = (src // 8) * 8 + 5
             else:
-                # Queenside
                 rook_src = (src // 8) * 8 + 0
                 rook_tgt = (src // 8) * 8 + 3
             if 0 <= rook_src < 64 and 0 <= rook_tgt < 64:
@@ -411,14 +431,14 @@ class ChessBoard:
             empty = 0
             for file in range(8):
                 pos = rank * 8 + file
-                piece = self.squares[pos]
-                if piece is None:
+                piece_byte = self.squares[pos]
+                if piece_byte is None:
                     empty += 1
                 else:
                     if empty > 0:
                         row += str(empty)
                         empty = 0
-                    row += PIECE_CHARS.get(piece, "?")
+                    row += byte_to_fen_char(piece_byte)
             if empty > 0:
                 row += str(empty)
             rows.append(row)
@@ -699,26 +719,34 @@ class ChessBot:
         self.total_games += 1; self.is_playing = True
         self.ready = False; self.pending_move = False; self._moving = False
         self.opponent_gone_at = None
-        # Parse START_MATCH for chess
-        # fillBoardData: count + pieces + lastMove + then firstTurnSlotId + mySlotId
+        # Parse START_MATCH for chess (fillBoardData format)
+        # fillBoardData: count(byte) + [sid(byte), face(byte), pos(byte), moved(byte)] × count
+        #                 + lastMoveSourcePos(byte) + lastMoveTargetPos(byte)
+        # Then: firstTurnSlotId(byte) + mySlotId(byte)
         try:
-            piece_count = r.u8()
+            piece_count = r.i8()
+            log.info(f"[START] pieceCount={piece_count}")
             pieces = []
-            for _ in range(piece_count):
-                sid = r.u8(); face = r.u8(); pos = r.u8(); moved = r.u8()
-                # Decode piece ID (simplified — may need adjustment)
-                piece_id = face  # The 'face' byte encodes piece type
-                pieces.append((piece_id, pos))
-            last_src = r.u8(); last_tgt = r.u8()
-            self.board.set_from_pieces(pieces)
+            for i in range(piece_count):
+                sid_byte = r.i8()
+                face_byte = r.i8()
+                pos = r.u8()
+                moved = r.i8()
+                pieces.append((sid_byte, face_byte, pos, moved))
+                if i < 5:  # Log first 5 pieces
+                    log.info(f"  piece[{i}]: sid={sid_byte} face={face_byte} pos={pos} moved={moved}")
+            last_src = r.u8()
+            last_tgt = r.u8()
+            self.board.set_from_server_pieces(pieces)
             self.board.last_move_src = last_src
             self.board.last_move_tgt = last_tgt
             first_turn = r.i8()
             my_slot = r.i8()
             if my_slot >= 0: self.slot = my_slot
-            # White = slot 0, Black = slot 1 (typically)
+            # White = slot 0, Black = slot 1
             self.board.white_to_move = (first_turn == 0)
-            log.info(f"=== GAME {self.total_games} === Slot={self.slot} FirstTurn=slot{first_turn} Pieces={len(pieces)}")
+            log.info(f"=== GAME {self.total_games} === Slot={my_slot} FirstTurn=slot{first_turn} Pieces={piece_count}")
+            log.info(f"[FEN] {self.board.to_fen()}")
             if self.engine is None:
                 self.init_engine()
             else:
@@ -727,6 +755,9 @@ class ChessBot:
                 await asyncio.sleep(0.5); await self.send(self.make_get_table())
         except Exception as e:
             log.error(f"[START] Parse error: {e}")
+            # Log remaining hex for debug
+            remaining = r.d[r.o:]
+            log.info(f"[START] Remaining {len(remaining)} bytes: {remaining.hex()[:200]}")
 
     async def handle_turn(self, r):
         sid = r.i8(); turn_timeout = r.i16(); acc_timeout = r.i16()
@@ -852,18 +883,22 @@ class ChessBot:
                 self.init_engine()
             if self.engine:
                 fen = self.board.to_fen()
-                log.info(f"[SF] FEN: {fen[:60]}...")
+                is_white = (self.slot == 0)
+                log.info(f"[SF] FEN: {fen[:80]}")
                 move = await asyncio.wait_for(
                     asyncio.get_event_loop().run_in_executor(
-                        None, lambda: self.engine.get_bestmove(fen, "w" if self.slot == 0 else "b")
+                        None, lambda: self.engine.get_bestmove(fen, "w" if is_white else "b")
                     ), timeout=15
                 )
                 if move and self.is_playing and self.running:
-                    src, tgt, promo = move
+                    src, tgt, promo_byte = move
+                    # Set promotion byte sign based on color
+                    if promo_byte is not None and not is_white:
+                        promo_byte = -promo_byte
                     log.info(f"[MOVE] {self.board.pos_to_square(src)}→{self.board.pos_to_square(tgt)}" +
-                             (f" promo={promo}" if promo else ""))
-                    await self.send(self.make_play(src, tgt, promo))
-                    self.board.make_move(src, tgt, promo)
+                             (f" promo={promo_byte}" if promo_byte else ""))
+                    await self.send(self.make_play(src, tgt, promo_byte))
+                    self.board.make_move(src, tgt, promo_byte)
                 else:
                     log.warning("[SF] No move from engine")
         except asyncio.TimeoutError:
