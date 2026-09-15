@@ -36,6 +36,7 @@ import urllib.request, urllib.parse, http.cookiejar
 
 
 class _UrllibSession:
+    """Wrapper cho urllib opener có API giống requests.Session (get/post/url/text)."""
     def __init__(self):
         self.cj = http.cookiejar.CookieJar()
         self.op = urllib.request.build_opener(
@@ -126,7 +127,6 @@ BOT_TURN_DURATION = '60'
 BOT_ACC_DURATION = '0'
 BOT_BLOCK_SOFTWARE = '0'
 
-# Danh sách tên phong phú (gộp từ cả 2 file)
 VN_TEN_DAU = [
     "Tuấn", "Minh", "Đức", "Hoàng", "Huy", "Hùng", "Dũng", "Cường", "Long", "Nam",
     "Sơn", "Hải", "Phong", "Thắng", "Trung", "Kiên", "Quân", "Thanh", "Đạt", "Khoa",
@@ -147,12 +147,14 @@ VN_TEN_KHONG_DAU = [
 
 _IDENTITY_SYNCED = False
 
+
 def generate_dotted_full_name():
     name = random.choice(VN_TEN_DAU if random.choice([True, False]) else VN_TEN_KHONG_DAU)
     if len(name) >= 2:
         pos = random.randint(1, len(name) - 1)
         name = name[:pos] + "." + name[pos:]
     return name
+
 
 def sync_profile_name(session):
     try:
@@ -191,6 +193,7 @@ def sync_profile_name(session):
     except Exception as e:
         print(f"[PROFILE] Lỗi cập nhật tên: {e}")
 
+
 def sync_random_avatar(session):
     try:
         profile_url = "https://gamevh.net/com/ftl/game/profile/player_profile.jsp"
@@ -221,6 +224,7 @@ def sync_random_avatar(session):
     except Exception as e:
         print(f"[PROFILE] Lỗi đổi avatar: {e}")
 
+
 def is_block_software_message(raw_bytes):
     try:
         idx = raw_bytes.find(b"blockSoftware")
@@ -231,7 +235,9 @@ def is_block_software_message(raw_bytes):
     except Exception: pass
     return False
 
+
 ACTIVE_TABLES_FILE = os.path.join(tempfile.gettempdir(), "zaro_active_tables.json")
+
 
 def get_active_bot_tables():
     try:
@@ -244,6 +250,7 @@ def get_active_bot_tables():
         return {tp: info for tp, info in data.items() if isinstance(info, dict) and now - info.get("timestamp", 0) < 180}
     except Exception: return {}
 
+
 def register_bot_table(table_path, user):
     if not table_path: return
     try:
@@ -251,6 +258,7 @@ def register_bot_table(table_path, user):
         data[table_path] = {"user": user, "timestamp": time.time(), "pid": os.getpid()}
         with open(ACTIVE_TABLES_FILE, 'w') as f: json.dump(data, f)
     except Exception: pass
+
 
 def unregister_bot_table(table_path):
     if not table_path: return
@@ -260,6 +268,7 @@ def unregister_bot_table(table_path):
             data.pop(table_path, None)
             with open(ACTIVE_TABLES_FILE, 'w') as f: json.dump(data, f)
     except Exception: pass
+
 
 def fetch_session_info():
     global COOKIE, TOKEN, CURRENT_PLAYER_NICKNAME, CURRENT_PLAYER_ID, PLACE_PATH, _IDENTITY_SYNCED
@@ -315,6 +324,7 @@ def fetch_session_info():
         print(f"[SESSION] Lỗi đăng nhập: {e}")
         return False
 
+
 CMD_NAMES = {
     300: "PONG", 301: "PING", 302: "LOGIN", 303: "ALERT",
     311: "BROADCAST", 314: "SET_CLIENT_MODE", 315: "CONFIG",
@@ -326,6 +336,7 @@ CMD_NAMES = {
     420: "SET_TURN", 434: "SET_READY",
     502: "PLAY", 529: "MOVE", 533: "ASK_DRAW", 534: "SURRENDER", 601: "LOGIN_EX",
 }
+
 
 class Conn:
     def pack(self, cmd, data=b''):
@@ -346,6 +357,7 @@ class Conn:
     def pack_string(self, value):
         encoded = value.encode('utf-16-be')
         return struct.pack('>h', len(encoded) // 2) + encoded
+
 
 class InboundMessage:
     def __init__(self, data):
@@ -392,10 +404,12 @@ class InboundMessage:
     def rem(self):
         return len(self.data) - self.offset
 
+
 STANDARD_PAWN_POSITIONS = set()
 for _c in [0, 2, 4, 6, 8]:
     STANDARD_PAWN_POSITIONS.add(6 * 9 + _c)
     STANDARD_PAWN_POSITIONS.add(3 * 9 + _c)
+
 
 class XiangqiBoardTracker:
     """
@@ -1304,11 +1318,8 @@ class PikafishBot:
 
             self.board.set_my_slot(my_slot_id, first_turn_slot_id)
 
-            # Dò hướng bàn cờ từ vị trí tướng
-            self.board.detect_flip(board_pieces)
-
-            # Dựng FEN (dùng sid cho quân úp)
-            _built_fen = self._rebuild_fen_with_current_flip(board_pieces)
+            # Dò hướng bàn cờ từ vị trí tướng + dựng FEN
+            _built_fen = self._build_fen_from_pieces(board_pieces)
 
             # Sanity check 2 lớp
             _ok, _why = self.board.sanity_check_fen(_built_fen)
@@ -1348,6 +1359,22 @@ class PikafishBot:
                 threading.Thread(target=self._make_auto_move, daemon=True).start()
         except Exception as e:
             print(f"[START_MATCH ERROR] {e}")
+
+    # ---------------------------------------------------------------
+    # ★ DỰNG FEN CỜ ÚP — 2 method cho tương thích + rõ ràng
+    # ---------------------------------------------------------------
+    def _build_fen_from_pieces(self, pieces):
+        """Dựng FEN cờ úp từ danh sách (sid, face, position, is_open).
+
+        ★ Wrapper giữ API tương thích test_cup_flip.py:
+          1. Dò hướng bàn cờ từ vị trí TƯỚNG (board.detect_flip)
+          2. Gọi _rebuild_fen_with_current_flip để dựng chuỗi FEN
+
+        Test gọi method này với cả 4 tổ hợp (đỏ trên/dưới × bot đỏ/đen) và
+        yêu cầu FEN luôn có 'K' ở nửa dưới, 'k' ở nửa trên.
+        """
+        self.board.detect_flip(pieces)
+        return self._rebuild_fen_with_current_flip(pieces)
 
     def _rebuild_fen_with_current_flip(self, pieces):
         """Dựng FEN cờ úp.
@@ -1633,6 +1660,10 @@ class PikafishBot:
                 print(f"[BOT ERROR] Dịch tọa độ lỗi: {e}")
 
     def _decode_piece_id(self, encoded_id):
+        """Decode encoded_id thành "{color}{type}{instance}".
+
+        CỜ ÚP trên gamevh.net: encoding giống cờ tướng (positive=red, negative=black).
+        """
         color = 'r'
         if encoded_id < 0: encoded_id = -encoded_id; color = 'b'
         return f"{color}{encoded_id >> 3}{'' if (encoded_id & 7) == 0 else (encoded_id & 7)}"
