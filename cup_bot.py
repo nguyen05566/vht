@@ -16,10 +16,14 @@ Các fix quan trọng đã áp dụng:
   9. record_move append revealed_chars TRUNG THỰC (dedup ở _handle_move).
  10. Fallback MultiPV khi engine không trả lời — luôn có nước để đi.
  11. MAX_SAFE_MOVES = 100 + TRUST_ENGINE_AFTER = 40.
- 12. ★ v5: BỎ `bag_from_moves` + warning BAG lệch.
-     Lý do: `uci_moves` CỐ TÌNH không có hậu tố cho quân BỊ ĂN (đúng thiết kế
-     engine), nên cross-check với `revealed_chars` LUÔN lệch giả. `revealed_chars`
-     là nguồn sự thật duy nhất — đếm được cả quân úp đi lẫn quân úp bị ăn.
+ 12. BỎ `bag_from_moves` + warning BAG lệch (chỉ dùng `revealed_chars`).
+ 13. ★ v5.1:
+     - Cược CỐ ĐỊNH 5000 xu (không giảm khi thua).
+     - Thời gian mỗi nước 30s (trước 60s).
+     - Engine suy nghĩ 3 giây (trước 3.2s).
+     - MIN_MOVE_SECONDS = 3.0 (trước 2.0).
+     - Log MOVE gọn: `[MOVE] xxxx -> 'xxxxX' 🔓X [raw hex]`
+       (bỏ `src=.. tgt=..`, `dark_move=..`, và `[raw 00]` vô nghĩa).
 """
 
 import struct
@@ -120,7 +124,9 @@ PLACE_PATH = 'Lobby.mystery_xiangqi.0'
 
 ENGINE_MULTIPV = 1
 ENGINE_MULTIPV_FALLBACK = 3
-MIN_MOVE_SECONDS = 2.0
+
+# ★ v5.1: MIN_MOVE_SECONDS 2.0 -> 3.0 (đồng bộ với movetime 3000ms)
+MIN_MOVE_SECONDS = 3.0
 
 # Guard an toàn cho chuỗi moves (cờ úp chơi rất dài)
 MAX_SAFE_MOVES = 100
@@ -130,10 +136,12 @@ TRUST_ENGINE_AFTER = 40
 KICK_MODE = "when_lose"
 KICK_DELAY = 5.0
 
-BOT_BET_XU = 1000
+# ★ v5.1: cược CỐ ĐỊNH 5000 xu, KHÔNG giảm khi thua
+BOT_BET_XU = 5000
 BOT_USE_CREATE_TABLE = True
 BOT_MATCH_DURATION = '5'
-BOT_TURN_DURATION = '60'
+# ★ v5.1: thời gian mỗi nước 60s -> 30s
+BOT_TURN_DURATION = '30'
 BOT_ACC_DURATION = '0'
 BOT_BLOCK_SOFTWARE = '0'
 
@@ -450,8 +458,8 @@ class XiangqiBoardTracker:
         self.is_my_turn = False
         self.is_playing = False
         self.is_red = None
-        # ★ v5: `revealed_chars` là NGUỒN SỰ THẬT DUY NHẤT cho BAG.
-        #   Nó đếm MỌI quân đã lật — kể cả quân bị ăn (raw MOVE có rest[2]).
+        # `revealed_chars` là NGUỒN SỰ THẬT DUY NHẤT cho BAG.
+        # Nó đếm MỌI quân đã lật — kể cả quân bị ăn (raw MOVE có rest[2]).
         self.revealed_chars = []
         self.dark_positions = set()
         self.flip = False
@@ -481,9 +489,9 @@ class XiangqiBoardTracker:
     def bag_string(self):
         """BAG (túi quân chưa lật) — trừ dần theo `revealed_chars`.
 
-        ★ v5: Đây là HÀM DUY NHẤT tính BAG. Không còn `bag_from_moves`
-          (đã bỏ vì logic cross-check sai — `uci_moves` cố tình không có
-          hậu tố cho quân bị ăn, khiến cross-check LUÔN lệch giả).
+        Đây là HÀM DUY NHẤT tính BAG. Không còn `bag_from_moves` (đã bỏ vì
+        logic cross-check sai — `uci_moves` cố tình không có hậu tố cho quân
+        bị ăn, khiến cross-check LUÔN lệch giả).
         """
         bag = dict(INITIAL_BAG)
         for ch in self.revealed_chars:
@@ -493,11 +501,7 @@ class XiangqiBoardTracker:
         return out or "-"
 
     def get_current_fen(self):
-        """Trả về (fen_đầu_ván, danh_sách_nước).
-
-        ★ v5: BAG dùng `bag_string()` (từ `revealed_chars`) — nguồn duy nhất
-          đếm được cả quân úp đi lẫn quân úp bị ăn.
-        """
+        """Trả về (fen_đầu_ván, danh_sách_nước)."""
         fen = f"{self.start_fen} {self.bag_string()} {self.start_side} - - 0 1"
         return fen, list(self.uci_moves)
 
@@ -515,15 +519,7 @@ class XiangqiBoardTracker:
         self.dark_positions.clear()
 
     def record_move(self, mv, revealed_char=None):
-        """Ghi 1 nước đi.
-
-        Args:
-            mv:            nước UCI, vd 'e3e4'
-            revealed_char: chữ cái quân VỪA LẬT (nếu có)
-
-        ★ v5: KHÔNG dedup nội bộ — append TRUNG THỰC cả uci_moves lẫn
-          revealed_chars. Dedup nằm ở _handle_move (1 chỗ duy nhất).
-        """
+        """Ghi 1 nước đi (KHÔNG dedup nội bộ — dedup ở _handle_move)."""
         uci = mv + (revealed_char or "")
         self.move_history.append(mv)
         self.moves_since_base.append(mv)
@@ -854,7 +850,8 @@ class PikafishBot:
             self._latest_bestmove = None
             self._mate_status = None
             self._fsf_cmd(pos_cmd)
-            self._fsf_cmd("go movetime 3200")
+            # ★ v5.1: movetime 3200 -> 3000 (3 giây)
+            self._fsf_cmd("go movetime 3000")
             return self._read_bestmove(timeout=6.0, reset=False)
         except Exception as e:
             print(f"[ENGINE] Lỗi tính toán: {e}")
@@ -1056,32 +1053,16 @@ class PikafishBot:
         self._enter_fail_at = 0.0
         self.send_enter_place(PLACE_PATH)
 
-    def _lower_bet_level(self):
-        global BOT_BET_XU
-        if not self.bet_amts:
-            self._bet_amts_loaded = False
-            self.send_list_bet_amt()
-            return
-        current = BOT_BET_XU
-        all_values = sorted(set(ba['value'] for ba in self.bet_amts if ba['value'] > 0))
-        lower_options = [v for v in all_values if v < current]
-        if lower_options:
-            new_bet = max(lower_options)
-            print(f"[BET] 📉 Giảm mức cược: {current} -> {new_bet}")
-            BOT_BET_XU = new_bet
-            self._resolved_bet_id = self.resolve_bet_amt_id()
-        else:
-            print(f"[BET] ⚠️ Đã ở mức cược thấp nhất ({current})")
-            self._resolved_bet_id = self.resolve_bet_amt_id()
-        self._bet_amts_loaded = False
-        self.send_list_bet_amt()
-
     def resolve_bet_amt_id(self):
+        """Tìm bet_amt_id khớp BOT_BET_XU (5000)."""
         if not self.bet_amts: return None
+        # Ưu tiên 1: khớp chính xác 5000
         exact = [ba for ba in self.bet_amts if ba["value"] == BOT_BET_XU]
         if exact: return exact[0]['id']
+        # Ưu tiên 2: mức thấp nhất >= 5000
         above = [ba for ba in self.bet_amts if ba["value"] >= BOT_BET_XU]
         if above: return min(above, key=lambda x: x['value'])['id']
+        # Fallback: mức cao nhất có
         return self.bet_amts[-1]['id'] if self.bet_amts else 0
 
     def send_create_table(self, bet_amt_id=None):
@@ -1267,9 +1248,9 @@ class PikafishBot:
                 self.player_names[pid] = name
                 print(f"[PLAYER] 👤 '{name}' (id={pid}) vào bàn")
                 if not self.board.is_playing and self.is_family_bot(name) and self.opponent_player_id() == pid:
-                    print(f"[AVOID] ⚠️ Đồng đội '{name}' -> rời bàn + giảm cược")
+                    # ★ v5.1: cược cố định 5000 — KHÔNG giảm cược khi gặp đồng đội
+                    print(f"[AVOID] ⚠️ Đồng đội '{name}' -> rời bàn (cược giữ nguyên)")
                     self.leave_table()
-                    self._lower_bet_level()
         except Exception: pass
 
     def _handle_slot_changed(self, msg):
@@ -1289,9 +1270,9 @@ class PikafishBot:
                     name = self.player_names.get(player_id, "")
                     print(f"[TABLE] 👤 Ghế đối diện: pid={player_id}{f', {name}' if name else ''}")
                     if not self.board.is_playing and self.is_family_bot(name):
-                        print(f"[AVOID] ⚠️ Đồng đội '{name}' -> rời bàn + giảm cược")
+                        # ★ v5.1: cược cố định — KHÔNG giảm cược
+                        print(f"[AVOID] ⚠️ Đồng đội '{name}' -> rời bàn (cược giữ nguyên)")
                         self.leave_table()
-                        self._lower_bet_level()
                         return
                     self._sit_alone_since = None
                     if not self.board.is_playing:
@@ -1435,11 +1416,12 @@ class PikafishBot:
     def _handle_move(self, msg):
         """Xử lý MOVE: src(u8) tgt(u8) [reveal_count(u8) sid(u8) face(u8)]
 
-        ★ v5:
+        ★ v5.1:
           - Dedup uci ở ĐÂY (1 chỗ duy nhất), KHÔNG dedup trong record_move.
-          - `revealed_char` lấy từ rest[2] (face thật) — KHÔNG fallback rest[1]
-            (rest[1] là sid, có thể decode thành quân KHÁC).
+          - `revealed_char` lấy từ rest[2] (face thật) — KHÔNG fallback rest[1].
           - BAG tính từ `revealed_chars` — append cho MỌI quân lật.
+          - Log GỌN: `[MOVE] xxxx -> 'xxxxX' 🔓X [raw hex]`
+            (chỉ hiện raw khi có lật quân — bỏ [raw 00] vô nghĩa).
         """
         try:
             source_pos = msg.read_byte()
@@ -1450,7 +1432,7 @@ class PikafishBot:
             rest = list(msg.data[msg.offset:]) if msg.offset < len(msg.data) else []
             rest_hex = bytes(rest).hex()
 
-            # ★ Trích xuất chữ cái quân VỪA LẬT — CHỈ từ rest[2] (face)
+            # Trích xuất chữ cái quân VỪA LẬT — CHỈ từ rest[2] (face)
             revealed_char = None
             if rest and rest[0] > 0 and len(rest) >= 3:
                 cand = self._sid_to_fen_char(rest[2])
@@ -1464,7 +1446,7 @@ class PikafishBot:
 
             move_suffix = revealed_char if is_dark_move else None
 
-            # ★ v5: DEDUP Ở TẦNG NÀY — 1 chỗ duy nhất
+            # ★ v5.1: DEDUP Ở TẦNG NÀY — 1 chỗ duy nhất
             expected_uci = engine_move + (move_suffix or "")
             if self.board.uci_moves and self.board.uci_moves[-1] == expected_uci:
                 print(f"[MOVE] ⚠️ Bỏ qua MOVE trùng lặp: {expected_uci}", flush=True)
@@ -1473,14 +1455,14 @@ class PikafishBot:
             uci = self.board.record_move(engine_move, move_suffix)
 
             # Nếu quân đi KHÔNG úp nhưng có quân bị ăn lật ra -> append thủ công
-            # (record_move chỉ append khi move_suffix != None, tức khi quân ĐI úp)
             if revealed_char and not is_dark_move:
                 self.board.revealed_chars.append(revealed_char)
 
             self._played_this_turn = False
-            print(f"[MOVE] {engine_move} (src={source_pos} tgt={target_pos})"
-                  + (f" 🔓 '{revealed_char}' (dark_move={is_dark_move})" if revealed_char else "")
-                  + f" -> engine '{uci}'  [raw {rest_hex}]", flush=True)
+            # ★ v5.1: LOG GỌN — chỉ hiện raw khi có lật quân (bỏ [raw 00] vô nghĩa)
+            _reveal_suffix = f" 🔓{revealed_char}" if revealed_char else ""
+            _raw_suffix = f" [{rest_hex}]" if revealed_char else ""
+            print(f"[MOVE] {engine_move} -> '{uci}'{_reveal_suffix}{_raw_suffix}", flush=True)
         except Exception as e:
             print(f"[MOVE ERROR] {e}")
 
@@ -1593,10 +1575,10 @@ class PikafishBot:
                         time.sleep(2.0)
                 elif is_guest:
                     print("[GAME] 👤 Khách -> không có quyền kick")
-                print("[GAME] 🔄 Thua -> rời bàn + giảm cược")
+                # ★ v5.1: cược CỐ ĐỊNH 5000 — KHÔNG giảm khi thua
+                print("[GAME] 🔄 Thua -> rời bàn (cược giữ nguyên 5000 xu)")
                 time.sleep(1.0)
                 self.leave_table()
-                self._lower_bet_level()
             else:
                 print("[GAME] ✅ Thắng/Hoà -> ở lại bàn")
                 time.sleep(3.0)
@@ -1605,7 +1587,7 @@ class PikafishBot:
 
     # ==================== TÍNH NƯỚC ====================
     def _find_legal_fallback_move(self, fen, moves):
-        """★ Tìm nước đi bất kỳ hợp lệ khi engine không trả lời."""
+        """Tìm nước đi bất kỳ hợp lệ khi engine không trả lời."""
         try:
             self._fsf_cmd("setoption name MultiPV value 10")
             try:
@@ -1727,6 +1709,7 @@ class PikafishBot:
         if best_move:
             try:
                 source_pos, target_pos = self.board.engine_move_to_pos(best_move)
+                # ★ v5.1: MIN_MOVE_SECONDS = 3.0 — chờ đủ 3 giây từ lúc tới lượt
                 _turn_start = getattr(self, '_turn_started_at', 0.0) or time.time()
                 _remain = MIN_MOVE_SECONDS - (time.time() - _turn_start)
                 if _remain > 0: time.sleep(_remain)
@@ -1836,7 +1819,7 @@ class PikafishBot:
                                 self.send_quick_play(room_id=room, bet_amt_id=bet_obj['id'])
                                 self._quick_play_attempts += 1
                             else:
-                                print("[SEARCH] ❌ Không có cược 500-10k -> tạo bàn")
+                                print("[SEARCH] ❌ Không có cược 5000-10k -> tạo bàn")
                                 self.send_create_table()
                                 self._quick_play_attempts = 0
                 time.sleep(1)
