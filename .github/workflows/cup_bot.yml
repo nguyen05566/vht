@@ -8,7 +8,7 @@ on:
 jobs:
   run-cup-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 360          # cho phép job sống tối đa 6 giờ
+    timeout-minutes: 360          # job sống tối đa 6 giờ
     steps:
       - uses: actions/checkout@v4
 
@@ -67,7 +67,7 @@ jobs:
           XDG_RUNTIME_DIR: /tmp/xdg-runtime
         run: |
           mkdir -p $WINEPREFIX "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
-          timeout 5h50m python3 -u cup_bot.py 2>&1 | tee cup_run.log
+          timeout 350m python3 -u cup_bot.py 2>&1 | tee cup_run.log
 
       - name: Upload log
         if: always()
