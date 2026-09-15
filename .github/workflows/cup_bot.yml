@@ -36,7 +36,7 @@ jobs:
 
       - name: Chạy cup_bot
         env:
-          CARO_USER19: nguyen10
+          CARO_USER19: nguyen15
           CARO_PASSWD19: nhat123456
         run: |
           timeout 45m python3 cup_bot.py 2>&1 | tee cup_run.log
