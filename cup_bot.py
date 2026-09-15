@@ -138,7 +138,16 @@ MIN_MOVE_SECONDS = 2.0
 KICK_MODE = "when_lose"
 KICK_DELAY = 5.0
 
-BOT_BET_XU = 1000  # cờ úp không có 400 — 1000 xu là mức thấp nhất hợp lý (id=3)
+# ============================ MỨC CƯỢC ============================
+# Thang cược bot dùng (xu). Server cờ úp hỗ trợ: 100, 200, 500, 1000, 2000,
+# 5000, 10000, 20000, 50000, 100000, 200000, 500000, 1000000, 2000000.
+# Bot CHỈ chơi trong 4 mức dưới đây — không bao giờ tụt xuống 500/200/100 nữa.
+BOT_BET_LEVELS = [5000, 10000, 20000, 50000]
+BOT_BET_MIN = BOT_BET_LEVELS[0]    # sàn: thua mấy cũng không xuống dưới mức này
+BOT_BET_MAX = BOT_BET_LEVELS[-1]   # trần: thắng mấy cũng không vượt mức này
+
+# Mức khởi đầu mỗi lần chạy bot.
+BOT_BET_XU = 5000
 BOT_USE_CREATE_TABLE = True
 BOT_MATCH_DURATION = '5'
 BOT_TURN_DURATION = '60'
@@ -1254,15 +1263,24 @@ class PikafishBot:
     def send_list_bet_amt(self): self.send_message("LIST_BET_AMT")
 
     
-    def get_1k_to_5k_bet_objs(self):
-        """Trả về danh sách cược trong khoảng 500-10000xu, xáo trộn ngẫu nhiên."""
+    def get_target_bet_objs(self):
+        """Các mức cược bot chấp nhận dò bàn: đúng thang BOT_BET_LEVELS.
+
+        ★ SỬA: bản cũ chỉ lọc 5000..10000 nên bỏ sót 20000 và 50000.
+        Ưu tiên mức đang dùng (BOT_BET_XU) lên đầu, phần còn lại xáo ngẫu nhiên.
+        """
         if not self.bet_amts:
             return []
-        valid = [ba for ba in self.bet_amts if 5000 <= ba["value"] <= 10000]
+        valid = [ba for ba in self.bet_amts if ba["value"] in BOT_BET_LEVELS]
         if valid:
-            random.shuffle(valid)
-            return valid
+            cur = [ba for ba in valid if ba["value"] == BOT_BET_XU]
+            rest = [ba for ba in valid if ba["value"] != BOT_BET_XU]
+            random.shuffle(rest)
+            return cur + rest
         return [self.bet_amts[0]] if self.bet_amts else []
+
+    # Giữ tên cũ để không vỡ chỗ gọi khác (nếu có)
+    get_1k_to_5k_bet_objs = get_target_bet_objs
 
     def is_family_bot(self, name):
         """Nhận diện bot đồng đội: tên hiển thị chứa dấu chấm '.' (do chính bot đặt)."""
@@ -1271,11 +1289,11 @@ class PikafishBot:
         return "." in name
 
     def leave_table(self):
-        """Rời bàn hiện tại và quay về sảnh để tiếp tục dò bàn 500-10k."""
+        """Rời bàn hiện tại và quay về sảnh để tiếp tục dò bàn trong thang cược."""
         if self.board.is_playing:
             print("[TABLE] ⚠️ Đang trong ván đấu -> Khóa không rời bàn cho đến khi GAMEOVER!")
             return
-        print("[TABLE] 🚪 Rời bàn chơi, quay lại sảnh tiếp tục dò tìm bàn 500-10k...")
+        print(f"[TABLE] 🚪 Rời bàn, về sảnh dò bàn mức {BOT_BET_XU} xu...")
         if getattr(self, '_table_path', None):
             unregister_bot_table(self._table_path)
         self.in_game = False
@@ -1291,43 +1309,71 @@ class PikafishBot:
         self._enter_fail_at = 0.0
         self.send_enter_place(PLACE_PATH)
 
-    def _lower_bet_level(self):
-        """Giảm mức cược xuống 1 bậc rồi tạo bàn mới. Nếu đã ở mức thấp nhất thì giữ nguyên."""
+    def _set_bet_level(self, new_bet, reason=""):
+        """Đổi mức cược sang new_bet (đã kẹp trong thang BOT_BET_LEVELS)."""
         global BOT_BET_XU
-        if not self.bet_amts:
-            print("[BET] ⚠️ Chưa có danh sách mức cược, gửi yêu cầu lấy lại...")
-            self._bet_amts_loaded = False
-            self.send_list_bet_amt()
-            return
-        current = BOT_BET_XU
-        all_values = sorted(set(ba['value'] for ba in self.bet_amts if ba['value'] > 0))
-        lower_options = [v for v in all_values if v < current]
-        if lower_options:
-            new_bet = max(lower_options)
-            print(f"[BET] 📉 Giảm mức cược: {current} -> {new_bet}")
-            BOT_BET_XU = new_bet
-            self._resolved_bet_id = self.resolve_bet_amt_id()
+        old = BOT_BET_XU
+        BOT_BET_XU = new_bet
+        if new_bet != old:
+            arrow = "📈 Tăng" if new_bet > old else "📉 Giảm"
+            print(f"[BET] {arrow} mức cược: {old} -> {new_bet} xu {reason}")
         else:
-            print(f"[BET] ⚠️ Đã ở mức cược thấp nhất ({current}), giữ nguyên.")
-            self._resolved_bet_id = self.resolve_bet_amt_id()
+            print(f"[BET] 🔒 Giữ nguyên mức cược {old} xu {reason}")
+        self._resolved_bet_id = self.resolve_bet_amt_id()
+        # Nạp lại danh sách để lấy đúng bet_amt_id trước khi tạo bàn mới
         self._bet_amts_loaded = False
         self.send_list_bet_amt()
 
+    def _raise_bet_level(self):
+        """THẮNG -> leo lên 1 bậc trong thang, chạm trần thì giữ nguyên.
+
+        Thang: 5000 -> 10000 -> 20000 -> 50000 (trần).
+        """
+        higher = [v for v in BOT_BET_LEVELS if v > BOT_BET_XU]
+        if higher:
+            self._set_bet_level(min(higher), "(thắng ván trước)")
+        else:
+            self._set_bet_level(BOT_BET_MAX, f"(đã ở mức cao nhất {BOT_BET_MAX})")
+
+    def _lower_bet_level(self):
+        """THUA -> lùi xuống 1 bậc trong thang, chạm SÀN thì giữ nguyên.
+
+        ★ SỬA: bản cũ lấy mức thấp hơn từ TOÀN BỘ danh sách server nên bot cứ
+          thua là tụt dần 1000 -> 500 -> 200 -> 100 xu (thấy rõ trong log cũ).
+          Nay chỉ lùi trong thang BOT_BET_LEVELS và không bao giờ xuống dưới
+          BOT_BET_MIN (5000).
+        """
+        lower = [v for v in BOT_BET_LEVELS if v < BOT_BET_XU]
+        if lower:
+            self._set_bet_level(max(lower), "(thua ván trước)")
+        else:
+            self._set_bet_level(BOT_BET_MIN, f"(đã ở mức sàn {BOT_BET_MIN})")
+
     def resolve_bet_amt_id(self):
-        """Tìm bet_amt_id khớp với BOT_BET_XU. Nếu không thấy chính xác,
-        lấy mức thấp nhất ≥ BOT_BET_XU; nếu vẫn không có, lấy mức cao nhất."""
+        """Tìm bet_amt_id khớp với BOT_BET_XU, LUÔN nằm trong thang BOT_BET_LEVELS.
+
+        ★ SỬA: fallback cũ là `self.bet_amts[-1]` — phần tử cuối danh sách server
+          lại là mức 0 xu (id=14). Nếu rơi vào nhánh đó, bot tạo bàn 0 xu, chơi
+          xong chẳng ăn thua gì. Nay mọi nhánh dự phòng đều kẹp trong thang cược.
+        """
         if not self.bet_amts: return None
-        # Tìm mức chính xác
-        exact = [ba for ba in self.bet_amts if ba["value"] == BOT_BET_XU]
+
+        # Chỉ xét các mức nằm trong thang bot được phép chơi
+        allowed = [ba for ba in self.bet_amts if ba["value"] in BOT_BET_LEVELS]
+        if not allowed:
+            print(f"[BET] ⚠️ Server không có mức nào thuộc {BOT_BET_LEVELS}!", flush=True)
+            valid = [ba for ba in self.bet_amts if ba["value"] > 0]
+            return min(valid, key=lambda x: x["value"])['id'] if valid else None
+
+        # Mức chính xác
+        exact = [ba for ba in allowed if ba["value"] == BOT_BET_XU]
         if exact:
             return exact[0]['id']
-        # Mức thấp nhất >= BOT_BET_XU
-        above = [ba for ba in self.bet_amts if ba["value"] >= BOT_BET_XU]
-        if above:
-            chosen = min(above, key=lambda x: x['value'])
-            return chosen['id']
-        # Fallback: mức cao nhất có
-        return self.bet_amts[-1]['id'] if self.bet_amts else 0
+        # Không khớp -> lấy mức gần nhất TRONG THANG (ưu tiên thấp hơn cho an toàn)
+        below = [ba for ba in allowed if ba["value"] <= BOT_BET_XU]
+        if below:
+            return max(below, key=lambda x: x["value"])['id']
+        return min(allowed, key=lambda x: x["value"])['id']
 
     def send_create_table(self, bet_amt_id=None):
         now = time.time()
@@ -1504,6 +1550,8 @@ class PikafishBot:
         self.bet_amts = [{"id": i, "value": msg.read_int()} for i in range(count)]
         self._resolved_bet_id = self.resolve_bet_amt_id()
         self._bet_amts_loaded = True
+        print("[BET] 📋 Các mức cược server hỗ trợ: "
+              + ", ".join(f"{ba['value']}(id={ba['id']})" for ba in self.bet_amts), flush=True)
 
     def _handle_create_rule_response(self, msg):
         status = msg.read_byte()
@@ -1925,8 +1973,16 @@ class PikafishBot:
                 time.sleep(1.0)
                 self.leave_table()
                 self._lower_bet_level()
+            elif bot_won and BOT_BET_XU < BOT_BET_MAX:
+                # ★ THẮNG -> leo lên bậc cược cao hơn. Mức cược gắn với BÀN, nên
+                #   muốn đổi mức thì phải rời bàn cũ và tạo bàn mới.
+                print(f"[GAME] ✅ Thắng -> Leo bậc cược (đang {BOT_BET_XU} xu) -> tạo bàn mới...")
+                time.sleep(1.0)
+                self.leave_table()
+                self._raise_bet_level()
             else:
-                print("[GAME] ✅ Thắng/Hoà -> Ở lại bàn, sẵn sàng ván tiếp...")
+                # Hoà, hoặc thắng khi đã ở mức trần -> ở lại bàn cho nhanh
+                print(f"[GAME] ✅ Thắng/Hoà (mức cược {BOT_BET_XU} xu) -> Ở lại bàn, sẵn sàng ván tiếp...")
                 time.sleep(3.0)
                 self.send_ready(1)
         threading.Thread(target=after_gameover, daemon=True).start()
@@ -2112,7 +2168,7 @@ class PikafishBot:
                             else:
                                 elapsed = time.time() - self._sit_alone_since
                                 if elapsed >= 30.0:
-                                    print(f"[TABLE] ⏱️ Đã chờ {int(elapsed)}s không có người chơi -> Rời bàn tiếp tục tìm bàn 500-10k")
+                                    print(f"[TABLE] ⏱️ Đã chờ {int(elapsed)}s không có người chơi -> Rời bàn, tìm bàn mức {BOT_BET_XU} xu")
                                     self.leave_table()
                         else:
                             self._sit_alone_since = None
@@ -2137,7 +2193,7 @@ class PikafishBot:
                             print(f"[CREATE] 🪑 Tạo bàn cờ úp {BOT_BET_XU} xu (bet_amt_id={bid})...")
                             self.send_create_table(bet_amt_id=bid)
                         else:
-                            valid_bets = self.get_1k_to_5k_bet_objs()
+                            valid_bets = self.get_target_bet_objs()
                             if valid_bets:
                                 bet_obj = random.choice(valid_bets)
                                 room = random.choice(self.ROOM_LIST)
@@ -2145,7 +2201,7 @@ class PikafishBot:
                                 self.send_quick_play(room_id=room, bet_amt_id=bet_obj['id'])
                                 self._quick_play_attempts += 1
                             else:
-                                print(f"[SEARCH] ❌ Không tìm thấy mức cược 500-10k -> TẠO BÀN MỚI")
+                                print(f"[SEARCH] ❌ Không thấy bàn ở mức {BOT_BET_LEVELS} -> TẠO BÀN MỚI")
                                 self.send_create_table()
                                 self._quick_play_attempts = 0
                 time.sleep(1)
