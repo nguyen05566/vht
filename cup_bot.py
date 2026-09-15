@@ -129,12 +129,12 @@ PLACE_PATH = 'Lobby.mystery_xiangqi.0'
 ENGINE_MOVETIME_MS   = 2500   # thời gian engine được phép nghĩ
 ENGINE_READ_TIMEOUT  = 4.5    # chờ 'bestmove' (> movetime một chút)
 ENGINE_SYNC_TIMEOUT  = 4.0    # chờ 'readyok' khi bắt tay đầu lượt
-ENGINE_STOP_GRACE    = 2.0    # chờ thêm sau khi gửi 'stop'
+ENGINE_STOP_GRACE    = 1.0    # chờ thêm sau khi gửi 'stop'
 TURN_WATCHDOG_SEC    = 12     # mốc watchdog (chỉ để đối chiếu)
 
 ENGINE_MULTIPV = 5
 # Số nhánh tạm bật khi cần né chốt cố định.
-ENGINE_MULTIPV_FALLBACK = 3
+ENGINE_MULTIPV_FALLBACK = 5
 
 # Thoi gian TOI THIEU tu luc toi luot den khi gui nuoc di (giay).
 # Engine tim ra nuoc thang/sat cuc se tra loi gan nhu tuc thi; neu di ngay
@@ -154,7 +154,7 @@ KICK_DELAY = 5.0
 # Thang cược bot dùng (xu). Server cờ úp hỗ trợ: 100, 200, 500, 1000, 2000,
 # 5000, 10000, 20000, 50000, 100000, 200000, 500000, 1000000, 2000000.
 # Bot CHỈ chơi trong 4 mức dưới đây — không bao giờ tụt xuống 500/200/100 nữa.
-BOT_BET_LEVELS = [5000, 10000, 20000, 50000]
+BOT_BET_LEVELS = [5000]
 BOT_BET_MIN = BOT_BET_LEVELS[0]    # sàn: thua mấy cũng không xuống dưới mức này
 BOT_BET_MAX = BOT_BET_LEVELS[-1]   # trần: thắng mấy cũng không vượt mức này
 
@@ -984,13 +984,14 @@ class PikafishBot:
             self._fsf_cmd(f"setoption name Threads value {_threads}")
             # Hash nhỏ lại: hộp chạy bot thường chỉ 2GB RAM. 256MB mỗi lần restart
             # rất dễ đẩy máy vào trạng thái hết bộ nhớ.
-            self._fsf_cmd("setoption name Hash value 64")
+            self._fsf_cmd("setoption name Hash value 256")
             self._fsf_cmd(f"setoption name MultiPV value {ENGINE_MULTIPV}")
             # EvalFile: dùng pikafish.nnue ở cùng thư mục với PKJQ.exe (cwd đã set)
             self._fsf_cmd("setoption name EvalFile value pikafish.nnue")
             # ★ CHỜ 'readyok' THẬT SỰ thay vì sleep(1) đoán mò.
             #   Nạp NNUE 50MB qua wine có khi mất vài giây; bản cũ chỉ ngủ 1s rồi
             #   bắn 'go' ngay -> engine chưa sẵn sàng, lượt đó mất trắng.
+            self._fsf_cmd("setoption name Contempt value 0")
             self._readyok = False
             self._fsf_cmd("isready")
             _t0 = time.time()
