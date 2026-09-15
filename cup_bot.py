@@ -2,8 +2,10 @@
 """
 cup_bot.py — Cờ Úp Bot (gamevh.net / mystery_xiangqi) — engine PKJQ.exe qua wine
 ================================================================================
-Engine: PKJQ.exe (Pikafish Cờ Úp) chạy qua wine.
-Đã fix lỗi lệch FEN màu quân và lỗi gán nhầm hậu tố khi quân ngửa ăn quân úp.
+Fix chuẩn FEN Flip theo đúng cơ chế hiển thị của GameVH:
+- Bot cầm ĐỎ: flip = False (Đỏ ở dưới, Đen ở trên)
+- Bot cầm ĐEN: flip = True (xoay 180 độ để đưa Đỏ về dưới cho chuẩn FEN của Pikafish/PKJQ)
+Đồng bộ 2 chiều hoàn hảo giữa Server Pos và Engine UCI Move.
 """
 
 import struct
@@ -19,11 +21,10 @@ import tempfile
 import json
 import random
 
-# urllib (stdlib) thay requests — requests gây REFRESH token trên gamevh.net
 import urllib.request, urllib.parse, http.cookiejar
 
 class _UrllibSession:
-    """Wrapper cho urllib opener có API giống requests.Session (get/post/url/text)."""
+    """Wrapper cho urllib opener có API giống requests.Session."""
     def __init__(self):
         self.cj = http.cookiejar.CookieJar()
         self.op = urllib.request.build_opener(
@@ -116,8 +117,7 @@ BOT_BLOCK_SOFTWARE = '0'
 VN_TEN_DAU = [
     "Tuấn", "Minh", "Đức", "Hoàng", "Huy", "Hùng", "Dũng", "Cường", "Long", "Nam",
     "Sơn", "Hải", "Phong", "Thắng", "Trung", "Kiên", "Quân", "Thanh", "Đạt", "Khoa",
-    "Phúc", "Nghĩa", "Trọng", "Quang", "Bảo", "Khánh", "Hiếu", "Lâm", "Trí", "Thịnh",
-    "Lộc", "Phát", "Tiến", "Việt", "Duy", "Vĩnh", "Phước", "Bình", "Đăng", "Tùng"
+    "Phúc", "Nghĩa", "Trọng", "Quang", "Bảo", "Khánh", "Hiếu", "Lâm", "Trí", "Thịnh"
 ]
 
 VN_TEN_KHONG_DAU = [
@@ -200,16 +200,6 @@ def sync_random_avatar(session):
                      allow_redirects=True)
     except Exception as e:
         print(f"[PROFILE] Lỗi đổi avatar: {e}")
-
-def is_block_software_message(raw_bytes):
-    try:
-        idx = raw_bytes.find(b"blockSoftware")
-        if idx != -1:
-            snippet = raw_bytes[idx:idx+40]
-            if b"1" in snippet or b"true" in snippet.lower():
-                return True
-    except Exception: pass
-    return False
 
 ACTIVE_TABLES_FILE = os.path.join(tempfile.gettempdir(), "zaro_active_tables.json")
 
@@ -396,28 +386,38 @@ class XiangqiBoardTracker:
         self.is_red = None
         self.revealed_chars = []
         self.flip = False
-        self.flip_known = False
-        self.dark_positions = set()  # Lưu các ô server (0..89) đang có quân úp
+        self.dark_positions = set()  # Lưu server pos (0..89) của các ô đang úp
 
     def pos_to_rc(self, pos):
-        s_row, col = pos // 9, pos % 9
-        return ((9 - s_row) if self.flip else s_row), col
+        """Chuyển server pos -> (fen_row, fen_col)."""
+        s_row, s_col = pos // 9, pos % 9
+        if self.flip:
+            # Bot cầm Đen: Xoay 180 độ cả hàng lẫn cột để đưa Đỏ về nửa dưới FEN chuẩn
+            return (9 - s_row), (8 - s_col)
+        return s_row, s_col
 
-    def rc_to_pos(self, fen_row, col):
-        s_row = (9 - fen_row) if self.flip else fen_row
-        return s_row * 9 + col
+    def rc_to_pos(self, fen_row, fen_col):
+        """Chuyển (fen_row, fen_col) -> server pos."""
+        if self.flip:
+            s_row = 9 - fen_row
+            s_col = 8 - fen_col
+            return s_row * 9 + s_col
+        return fen_row * 9 + fen_col
 
     def pos_to_engine_move(self, source_pos, target_pos):
+        """Chuyển nước đi trên bàn server -> dạng UCI cho engine (vd: 'h2e2')."""
         s_row, s_col = self.pos_to_rc(source_pos)
         t_row, t_col = self.pos_to_rc(target_pos)
         return (f"{chr(ord('a') + s_col)}{9 - s_row}"
                 f"{chr(ord('a') + t_col)}{9 - t_row}")
 
     def engine_move_to_pos(self, engine_move):
-        s_col, s_rank = ord(engine_move[0]) - ord('a'), int(engine_move[1])
-        t_col, t_rank = ord(engine_move[2]) - ord('a'), int(engine_move[3])
-        return (self.rc_to_pos(9 - s_rank, s_col),
-                self.rc_to_pos(9 - t_rank, t_col))
+        """Chuyển nước đi UCI từ engine -> (source_pos, target_pos) của server."""
+        s_col = ord(engine_move[0]) - ord('a')
+        s_row = 9 - int(engine_move[1])
+        t_col = ord(engine_move[2]) - ord('a')
+        t_row = 9 - int(engine_move[3])
+        return (self.rc_to_pos(s_row, s_col), self.rc_to_pos(t_row, t_col))
 
     def bag_string(self):
         bag = {'A': 2, 'B': 2, 'N': 2, 'R': 2, 'C': 2, 'P': 5,
@@ -456,53 +456,9 @@ class XiangqiBoardTracker:
         self.my_slot_id = slot_id
         self.first_turn_slot_id = first_turn_slot_id
         self.is_red = (self.my_slot_id == first_turn_slot_id)
-
-    def detect_flip(self, pieces):
-        red_rows, black_rows = [], []
-        red_king_row = black_king_row = None
-        for sid, face, position, is_open in pieces:
-            if position is None or position < 0 or position >= 90:
-                continue
-            row = position // 9
-            color = face[0] if face else (sid[0] if sid else 'r')
-            ptype = int(face[1]) if len(face) > 1 and str(face[1]).isdigit() else 0
-            if ptype == 0 and len(sid) > 1 and str(sid[1]).isdigit():
-                ptype = int(sid[1])
-            if color == 'r':
-                red_rows.append(row)
-                if ptype == 1: red_king_row = row
-            else:
-                black_rows.append(row)
-                if ptype == 1: black_king_row = row
-
-        flip = None
-        if red_king_row is not None and black_king_row is not None:
-            flip = red_king_row < black_king_row
-        elif red_king_row is not None:
-            flip = red_king_row <= 4
-        elif black_king_row is not None:
-            flip = black_king_row >= 5
-        elif red_rows and black_rows:
-            flip = (sum(red_rows) / len(red_rows)) < (sum(black_rows) / len(black_rows))
-
-        if flip is None:
-            flip = bool(self.is_red)
-            self.flip_known = False
-        else:
-            self.flip_known = True
-        self.flip = bool(flip)
-        return self.flip
-
-    def sanity_check_fen(self, board_fen):
-        rows = board_fen.split(' ')[0].split('/')
-        if len(rows) != 10: return False, f"FEN có {len(rows)} hàng"
-        k_row = K_row = None
-        for i, r in enumerate(rows):
-            if 'K' in r: K_row = i
-            if 'k' in r: k_row = i
-        if K_row is None or k_row is None: return False, "thiếu tướng"
-        if K_row < 7 or k_row > 2: return False, "tướng sai chiều"
-        return True, "ok"
+        # ★ NGUYÊN TẮC FLIP CHUẨN:
+        # Nếu bot cầm Đen: đối thủ (Đỏ) ở trên -> phải xoay 180 độ để Đỏ xuống dưới cho PKJQ.
+        self.flip = (not self.is_red)
 
 class MultiPVCollector:
     _re = re.compile(
@@ -1187,9 +1143,11 @@ class PikafishBot:
             if my_slot_id < 0 or my_slot_id == 255:
                 my_slot_id = self.board.my_slot_id if self.board.my_slot_id >= 0 else first_turn_slot_id
 
+            # Chốt màu bot và thiết lập flip chuẩn xác
             self.board.set_my_slot(my_slot_id, first_turn_slot_id)
+            print(f"[FEN] 🔄 Bot cầm {'ĐỎ' if self.board.is_red else 'ĐEN/XANH'} | flip={self.board.flip}", flush=True)
 
-            # ★ THEO DÕI CÁC Ô ĐANG CÓ QUÂN ÚP (0..89)
+            # Theo dõi ô có quân úp (server pos 0..89)
             for sid, face, position, is_open in board_pieces:
                 if not is_open and 0 <= position < 90:
                     self.board.dark_positions.add(position)
@@ -1198,16 +1156,9 @@ class PikafishBot:
                     self.fixed_pawn_positions.add(position)
 
             _built_fen = self._build_fen_from_pieces(board_pieces)
-            _ok, _why = self.board.sanity_check_fen(_built_fen)
-            if not _ok:
-                self.board.flip = not self.board.flip
-                _rebuilt = self._rebuild_fen_with_current_flip(board_pieces)
-                _ok2, _why2 = self.board.sanity_check_fen(_rebuilt)
-                if _ok2: _built_fen = _rebuilt
-                else: self.board.flip = not self.board.flip
-
             self.board.set_base(_built_fen, 'w')
-            # Nạp lại các vị trí úp chuẩn xác sau khi set_base
+            
+            # Khôi phục tập dark_positions sau set_base
             for sid, face, position, is_open in board_pieces:
                 if not is_open and 0 <= position < 90:
                     self.board.dark_positions.add(position)
@@ -1222,15 +1173,11 @@ class PikafishBot:
         except Exception as e: print(f"[START_MATCH ERROR] {e}")
 
     def _build_fen_from_pieces(self, pieces):
-        self.board.detect_flip(pieces)
-        return self._rebuild_fen_with_current_flip(pieces)
-
-    def _rebuild_fen_with_current_flip(self, pieces):
-        """Dựng FEN chuẩn: quân úp Đỏ='X', Đen='x' dựa vào sid của ô xuất phát."""
+        """Dựng FEN theo self.board.flip đã chốt (xoay 180 độ khi bot cầm Đen)."""
         board = [['.' for _ in range(9)] for _ in range(10)]
         for sid, face, position, is_open in pieces:
             if position < 0 or position >= 90: continue
-            fen_row, col = self.board.pos_to_rc(position)
+            fen_row, fen_col = self.board.pos_to_rc(position)
             
             if is_open and len(face) > 1:
                 color = face[0]
@@ -1239,9 +1186,9 @@ class PikafishBot:
                 fen_char = type_to_fen.get(piece_type, '?')
                 if color == 'r': fen_char = fen_char.upper()
             else:
-                # ★ FIX: Phân định quân úp theo sid gốc, Đỏ='X', Đen='x'
+                # Quân úp: Đỏ='X', Đen='x' dựa vào sid gốc ban đầu
                 fen_char = 'X' if sid.startswith('r') else 'x'
-            board[fen_row][col] = fen_char
+            board[fen_row][fen_col] = fen_char
 
         fen_rows = []
         for row in board:
@@ -1282,17 +1229,14 @@ class PikafishBot:
                 if cand and cand not in ('k', 'K'):
                     revealed_char = cand
 
-            # ★ FIX CỐT TỬ: Chỉ gán hậu tố khi ô xuất phát là quân ÚP
             is_dark_move = source_pos in self.board.dark_positions
 
-            # Cập nhật ô cờ
             self.board.dark_positions.discard(source_pos)
             self.board.dark_positions.discard(target_pos)
 
             move_suffix = revealed_char if is_dark_move else None
             uci = self.board.record_move(engine_move, move_suffix)
 
-            # Trừ túi BAG nếu có quân lật ra (kể cả do bị ăn)
             if revealed_char:
                 self.board.revealed_chars.append(revealed_char)
 
