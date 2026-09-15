@@ -17,3 +17,7 @@ jieqibox/
 cup_run.log
 batch_run.log
 *.bak.*
+
+# Wine portable + prefix
+wine-portable/
+.wine/

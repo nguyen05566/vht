@@ -16,15 +16,30 @@ jobs:
         with:
           python-version: '3.13'
 
-      - name: Cài deps
+      - name: Cài deps Python
         run: |
-          pip install --break-system-packages websocket-client py7zr
-          sudo apt-get update -y && sudo apt-get install -y wine64 unrar-free
+          pip install --break-system-packages websocket-client
+
+      - name: Cài wine portable (Kron4ek 9.0)
+        run: |
+          mkdir -p wine-portable
+          curl -sL "https://github.com/Kron4ek/Wine-Builds/releases/download/9.0/wine-9.0-staging-amd64.tar.xz" \
+            -o /tmp/wine.tar.xz
+          tar -xf /tmp/wine.tar.xz -C wine-portable
+          wine-portable/wine-9.0-staging-amd64/bin/wine64 --version
+
+      - name: Compile unrar from source (unrar-free không hỗ trợ RAR5)
+        run: |
+          cd /tmp
+          wget -q "https://www.rarlab.com/rar/unrarsrc-7.1.3.tar.gz" -O unrarsrc.tar.gz
+          mkdir -p unrarsrc && tar xzf unrarsrc.tar.gz -C unrarsrc --strip-components=1
+          cd unrarsrc && make -f makefile -j$(nproc) 2>&1 | tail -3
+          sudo install -m 755 unrar /usr/local/bin/unrar
+          unrar --version 2>&1 | head -1 || echo "unrar OK"
 
       - name: Tải Jieqibox engines (PKJQ.exe cho cờ úp)
         run: |
           mkdir -p jieqibox
-          # Jieqibox.rar đã có trong repo (commit cũ)
           if [ -f Jieqibox.rar ]; then
             unrar x -o+ Jieqibox.rar jieqibox/
           else
@@ -35,27 +50,20 @@ jobs:
 
       - name: Tải pikafish.nnue (NNUE cho PKJQ)
         run: |
-          # PKJQ.exe cần pikafish.nnue cùng thư mục — tải từ networks repo
           curl -sL "https://github.com/official-pikafish/Networks/releases/download/master-net/pikafish.nnue" \
             -o jieqibox/Jieqibox/Engines/PikaJieQi0111/pikafish.nnue
           ls -la jieqibox/Jieqibox/Engines/PikaJieQi0111/pikafish.nnue
-
-      - name: Cài wine portable (Kron4ek 9.0)
-        run: |
-          mkdir -p wine-portable
-          curl -sL "https://github.com/Kron4ek/Wine-Builds/releases/download/9.0/wine-9.0-staging-amd64.tar.xz" \
-            -o /tmp/wine.tar.xz
-          tar -xf /tmp/wine.tar.xz -C wine-portable
-          ls wine-portable/wine-9.0-staging-amd64/bin/wine64
 
       - name: Chạy cup_bot
         env:
           CARO_USER19: nguyen15
           CARO_PASSWD19: nhat123456
-          WINEPREFIX: /home/runner/wine-prefix
+          WINEPREFIX: /home/runner/work/vht/vht/.wine
+          WINEDEBUG: "-all"
+          DISPLAY: ""
         run: |
           mkdir -p $WINEPREFIX
-          timeout 45m python3 cup_bot.py 2>&1 | tee cup_run.log
+          timeout 45m python3 -u cup_bot.py 2>&1 | tee cup_run.log
 
       - name: Upload log
         if: always()

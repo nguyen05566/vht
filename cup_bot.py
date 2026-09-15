@@ -466,6 +466,13 @@ class InboundMessage:
         s = self.data[self.offset:self.offset + char_count * 2].decode('utf-16-be', errors='replace')
         self.offset += char_count * 2
         return s
+    def rem(self):
+        """Số byte còn lại chưa đọc."""
+        return len(self.data) - self.offset
+    def peek_hex(self, n=32):
+        """Debug: xem n byte tiếp theo dạng hex."""
+        end = min(self.offset + n, len(self.data))
+        return self.data[self.offset:end].hex()
 
 STANDARD_PAWN_POSITIONS = set()
 for _c in [0, 2, 4, 6, 8]:
@@ -490,6 +497,12 @@ class XiangqiBoardTracker:
         self.is_my_turn = False
         self.is_playing = False
         self.is_red = None
+        # ★ Track quân úp đã lật (revealed): {position: fen_char}
+        # Khi quân 'x'/'X' di chuyển, server sẽ reveal -> cập nhật ở đây
+        self.revealed_pieces = {}
+        # ★ Track số quân úp đã reveal mỗi màu để trừ BAG động
+        self._revealed_red_count = 0
+        self._revealed_black_count = 0
     # ---------------------------------------------------------------
     # ★ CỜ ÚP TỌA ĐỘ: _build_fen_from_pieces flip hàng theo is_red.
     #   - Bot RED (is_red=True): FLIP FEN → engine rank r ↔ server row r
@@ -512,8 +525,12 @@ class XiangqiBoardTracker:
             # Bot BLACK: FEN not flipped → engine rank r ↔ server row (9-r)
             return (9 - s_rank) * 9 + s_col, (9 - t_rank) * 9 + t_col
     @staticmethod
-    def _apply_move_to_fen(board_fen, move):
-        """Áp 1 nước vào bàn cờ (cờ tướng không có nhập thành/phong cấp nên chỉ là dời quân)."""
+    def _apply_move_to_fen(board_fen, move, revealed_pieces=None):
+        """Áp 1 nước vào bàn cờ (cờ tướng không có nhập thành/phong cấp nên chỉ là dời quân).
+
+        ★ CỜ ÚP FIX: Khi quân úp 'x'/'X' di chuyển, nếu đã biết piece type từ
+        revealed_pieces dict -> thay 'x'/'X' bằng quân thật tại vị trí đích.
+        """
         try:
             grid = []
             for r in board_fen.split('/'):
@@ -531,6 +548,13 @@ class XiangqiBoardTracker:
                 return None
             piece = grid[s_row][s_col]
             if piece == '.': return None
+
+            # ★ CỜ ÚP: Nếu quân úp di chuyển và đã reveal -> dùng quân thật
+            if piece in ('x', 'X') and revealed_pieces:
+                tgt_pos = t_row * 9 + t_col
+                if tgt_pos in revealed_pieces:
+                    piece = revealed_pieces[tgt_pos]
+
             grid[t_row][t_col] = piece; grid[s_row][s_col] = '.'
             rows = []
             for line in grid:
@@ -547,29 +571,38 @@ class XiangqiBoardTracker:
             return None
 
     def get_current_fen(self):
-        """Nạp cho engine: dựng thế cờ hiện tại + side đúng + BAG.
+        """Nạp cho engine: dựng thế cờ hiện tại + side đúng + BAG ĐỘNG.
 
-        ★ CỜ ÚP LIMITATION: PKJQ.exe crash khi FEN có 'x' và 'X' cùng row
-        (sau khi có move). Giải pháp tạm: nếu moves_since_base > 0, vẫn gửi
-        board đã apply moves, nhưng nếu engine crash, sẽ retry với initial FEN.
+        ★ BAG động: mỗi quân úp được reveal (lật) sẽ giảm tương ứng trong BAG.
+        Red revealed -> giảm A/B/N/R/C/P (uppercase)
+        Black revealed -> giảm a/b/n/r/c/p (lowercase)
         """
         my_side = 'w' if self.is_red else 'b'
         turn_side = my_side if self.is_my_turn else ('b' if my_side == 'w' else 'w')
-        bag = "A2B2N2R2C2P5a2b2n2r2c2p5"
+
+        # ★ BAG động: ban đầu đầy đủ, trừ đi các quân đã reveal
+        _bag_init = {'A': 2, 'B': 2, 'N': 2, 'R': 2, 'C': 2, 'P': 5,
+                     'a': 2, 'b': 2, 'n': 2, 'r': 2, 'c': 2, 'p': 5}
+        for _pos, _char in self.revealed_pieces.items():
+            if _char in _bag_init:
+                _bag_init[_char] = max(0, _bag_init[_char] - 1)
+        bag = "".join(f"{k}{v}" for k, v in _bag_init.items() if v > 0)
+        if not bag:
+            bag = "-"
 
         # Dựng thế cờ hiện tại
         cur = self.base_fen
         for mv in self.moves_since_base:
-            nxt = self._apply_move_to_fen(cur, mv)
+            nxt = self._apply_move_to_fen(cur, mv, self.revealed_pieces)
             if nxt is None:
-                return self._scrub_face_down(f"{self.base_fen} {bag} {turn_side} - - 0 1"), []
+                return f"{self.base_fen} {bag} {turn_side} - - 0 1", []
             cur = nxt
         # Cập nhật mốc
         if cur != self.base_fen:
             self.base_fen = cur
             self.base_side = turn_side
             self.moves_since_base = []
-        return self._scrub_face_down(f"{cur} {bag} {turn_side} - - 0 1"), []
+        return f"{cur} {bag} {turn_side} - - 0 1", []
 
     @staticmethod
     def _scrub_face_down(fen):
@@ -726,6 +759,7 @@ class PikafishBot:
         """
         # --- Tìm wine64 ---
         wine_candidates = [
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "wine-portable", "wine-9.0-staging-amd64", "bin", "wine64"),
             "/home/z/my-project/wine-portable/wine-9.0-staging-amd64/bin/wine64",
             os.path.expanduser("~/wine-portable/wine-9.0-staging-amd64/bin/wine64"),
             "/usr/bin/wine64",
@@ -761,7 +795,7 @@ class PikafishBot:
         nnue_path = os.path.join(engine_dir, "pikafish.nnue")
         if not os.path.isfile(nnue_path):
             # Copy từ pikafish-engine/ nếu có
-            src_nnue = "/home/z/my-project/vht/pikafish-engine/pikafish.nnue"
+            src_nnue = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pikafish-engine", "pikafish.nnue")
             if os.path.isfile(src_nnue):
                 import shutil
                 try:
@@ -774,7 +808,7 @@ class PikafishBot:
 
         # --- Khởi động PKJQ qua wine ---
         env = os.environ.copy()
-        env["WINEPREFIX"] = env.get("WINEPREFIX", "/home/z/my-project/wine-portable/.wine")
+        env["WINEPREFIX"] = env.get("WINEPREFIX", os.path.join(os.path.dirname(os.path.abspath(__file__)), ".wine"))
         env["WINEDEBUG"] = "-all"
         env["DISPLAY"] = ""
         try:
@@ -1423,6 +1457,26 @@ class PikafishBot:
                 print(f"[GAME] 🛡️ Bàn đấu có {len(self.fixed_pawn_positions)} chốt bị liệt/khóa!")
 
             self.board.set_base(self._build_fen_from_pieces(board_pieces), 'w')
+
+            # ★ Khởi tạo revealed_pieces từ START_MATCH: quân is_open=true đã lộ
+            self.board.revealed_pieces.clear()
+            self.board._revealed_red_count = 0
+            self.board._revealed_black_count = 0
+            for sid, face, position, is_open in board_pieces:
+                if is_open and len(face) > 1:
+                    color = face[0]
+                    ptype = int(face[1])
+                    _type_map = {1: 'k', 2: 'a', 3: 'b', 4: 'r', 5: 'c', 6: 'n', 7: 'p'}
+                    fen_char = _type_map.get(ptype, '?')
+                    if color == 'r':
+                        fen_char = fen_char.upper()
+                        self.board._revealed_red_count += 1
+                    else:
+                        self.board._revealed_black_count += 1
+                    self.board.revealed_pieces[position] = fen_char
+            print(f"[START_MATCH] revealed_pieces={len(self.board.revealed_pieces)} "
+                  f"(red={self.board._revealed_red_count} black={self.board._revealed_black_count})", flush=True)
+
             if my_slot_id == first_turn_slot_id:
                 self.board.is_my_turn = True
                 self._turn_started_at = time.time()
@@ -1477,11 +1531,98 @@ class PikafishBot:
             target_pos = msg.read_byte()
             engine_move = self.board.pos_to_engine_move(source_pos, target_pos)
             self.last_action_timestamp = time.time()
-            print(f"[MOVE] {engine_move} (server src={source_pos} tgt={target_pos})", flush=True)
+
+            # ★ SNIFF: dump toàn bộ bytes còn lại để phân tích packet structure
+            remaining_hex = msg.data[msg.offset:].hex() if msg.offset < len(msg.data) else ''
+            remaining_bytes = list(msg.data[msg.offset:]) if msg.offset < len(msg.data) else []
+            print(f"[MOVE] {engine_move} (src={source_pos} tgt={target_pos}) "
+                  f"remaining[{len(remaining_bytes)}]: {remaining_hex}", flush=True)
+
+            # ★ REVEAL TRACKING: khi quân úp 'x'/'X' di chuyển, nó sẽ được lật.
+            # Kiểm tra xem source có phải quân úp không (dựa trên FEN hiện tại).
+            self._try_reveal_piece(source_pos, target_pos, remaining_bytes)
+
             if not self.board.move_history or self.board.move_history[-1] != engine_move:
                 self.board.record_move(engine_move)
                 self._played_this_turn = False
         except Exception as e: print(f"[MOVE ERROR] {e}")
+
+    def _try_reveal_piece(self, src_pos, tgt_pos, remaining_bytes):
+        """Khi quân úp di chuyển, đoán piece type từ dữ liệu packet hoặc heuristic.
+
+        ★ Strategy:
+        1. Nếu packet MOVE có thêm byte sau src/tgt → đó là piece type info
+        2. Nếu không có → heuristic: quân úp ở vị trí cố định (như king row) có thể
+           được đoán dựa trên vị trí ban đầu
+        3. Worst case: giữ nguyên 'x'/'X' (engine vẫn chơi được, chỉ BAG sai)
+        """
+        # Lấy FEN hiện tại để kiểm tra source có phải quân úp không
+        fen_board = self.board.base_fen.split(' ')[0]
+        grid = []
+        for r in fen_board.split('/'):
+            line = []
+            for ch in r:
+                if ch.isdigit(): line.extend(['.'] * int(ch))
+                else: line.append(ch)
+            grid.append(line)
+
+        src_row, src_col = src_pos // 9, src_pos % 9
+        # Flip tọa độ nếu bot là đỏ
+        if self.board.is_red:
+            fen_row = 9 - src_row
+        else:
+            fen_row = src_row
+
+        if not (0 <= fen_row < 10 and 0 <= src_col < 9):
+            return
+
+        piece_at_src = grid[fen_row][src_col]
+        is_mystery = piece_at_src in ('x', 'X')
+
+        if not is_mystery:
+            return  # Quân đã lộ, không cần reveal
+
+        # ★ Thử đọc piece type từ packet (nếu server gửi thêm)
+        revealed_char = None
+        if len(remaining_bytes) >= 1:
+            # Có thêm data → thử parse piece type
+            # Format có thể là: [piece_type_id] hoặc [color_piece_id]
+            extra = remaining_bytes[0]
+            print(f"[REVEAL] Quân úp {piece_at_src} di chuyển từ ({src_row},{src_col}). "
+                  f"Extra byte: 0x{extra:02x} ({extra})", flush=True)
+
+            # Mapping từ gamevh encoding (same as _decode_piece_id)
+            # positive = red, negative = black, type = abs(val) >> 3
+            if extra > 0:
+                ptype = extra >> 3
+                color = 'r'
+            elif extra < 0:
+                ptype = (-extra) >> 3
+                color = 'b'
+            else:
+                ptype = 0
+                color = 'r'
+
+            _type_map = {1: 'k', 2: 'a', 3: 'b', 4: 'r', 5: 'c', 6: 'n', 7: 'p'}
+            if ptype in _type_map:
+                fen_char = _type_map[ptype]
+                if color == 'r':
+                    fen_char = fen_char.upper()
+                revealed_char = fen_char
+                print(f"[REVEAL] ✅ Quân úp lật thành: {revealed_char} (ptype={ptype} color={color})", flush=True)
+        else:
+            print(f"[REVEAL] Quân úp {piece_at_src} di chuyển, không có extra byte trong packet", flush=True)
+
+        if revealed_char:
+            # Cập nhật revealed_pieces dict
+            self.board.revealed_pieces[tgt_pos] = revealed_char
+            if revealed_char.isupper():
+                self.board._revealed_red_count += 1
+            else:
+                self.board._revealed_black_count += 1
+            print(f"[REVEAL] 📝 revealed_pieces[{tgt_pos}] = {revealed_char} "
+                  f"(red_revealed={self.board._revealed_red_count} "
+                  f"black_revealed={self.board._revealed_black_count})", flush=True)
 
     def _handle_play_response(self, msg):
         status = msg.read_byte()
