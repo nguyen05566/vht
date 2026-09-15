@@ -8,4 +8,12 @@ batch_*
 .gh_token
 drain_logs/
 acc_files/
-stockfish-engine/
+
+# Pikafish engine binary + NNUE (download runtime, not commit)
+pikafish-engine/
+# Jieqibox (Windows-only engines, not used)
+jieqibox/
+# Logs
+cup_run.log
+batch_run.log
+*.bak.*

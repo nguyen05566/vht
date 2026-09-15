@@ -1,0 +1,50 @@
+name: cup_bot (cờ úp - mystery_xiangqi)
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Chạy lúc 03:00 UTC = 10:00 Việt Nam
+    - cron: '0 3 * * *'
+
+jobs:
+  run-cup-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Cài deps
+        run: |
+          pip install --break-system-packages websocket-client py7zr
+
+      - name: Tải Pikafish Linux + NNUE
+        run: |
+          mkdir -p pikafish-engine
+          # Tải bản universal 2026-09-06 (Pikafish engine cho cờ tướng; thay 'x'→std piece cho cờ úp)
+          curl -sL "https://github.com/official-pikafish/Pikafish/releases/download/Pikafish-2026-09-06/Pikafish.2026-09-06.7z" -o /tmp/pikafish.7z
+          python3 -c "
+          import py7zr
+          with py7zr.SevenZipFile('/tmp/pikafish.7z', 'r') as z:
+              z.extractall('pikafish-engine')
+          "
+          chmod +x pikafish-engine/Pikafish-Linux-x86-64-universal
+          ls -la pikafish-engine/Pikafish-Linux-x86-64-universal pikafish-engine/pikafish.nnue
+
+      - name: Chạy cup_bot
+        env:
+          CARO_USER19: nguyen10
+          CARO_PASSWD19: nhat123456
+        run: |
+          timeout 45m python3 cup_bot.py 2>&1 | tee cup_run.log
+
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cup_run_log
+          path: cup_run.log
+          retention-days: 3
