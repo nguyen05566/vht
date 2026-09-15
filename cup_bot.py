@@ -4,29 +4,23 @@ cup_bot.py — Cờ Úp Bot (gamevh.net / mystery_xiangqi) — engine PKJQ.exe q
 ================================================================================
 Engine: PKJQ.exe (Pikafish Cờ Úp) chạy qua wine.
 
-Các fix quan trọng đã áp dụng:
-  1. FEN quân úp: phân định màu theo `sid` (ô xuất phát), KHÔNG theo `face`.
-  2. Hậu tố nước đi: CHỈ thêm khi quân ĐI đang ÚP.
-  3. Track `dark_positions` (ô server 0..89 đang có quân úp).
-  4. FEN hướng: dò từ vị trí TƯỚNG (detect_flip), có sanity check 2 lớp.
-  5. Anti-loop: cấm nước server đã từ chối, dùng MultiPV lấy nước kế tiếp.
-  6. Reconnect: exponential backoff.
-  7. Single-instance lock theo USER.
-  8. KHÔNG RAM-learn: dùng thẳng bestmove của PKJQ.
-  9. record_move append revealed_chars TRUNG THỰC (dedup ở _handle_move).
- 10. Fallback MultiPV khi engine không trả lời — luôn có nước để đi.
- 11. BỎ `bag_from_moves` + warning BAG lệch (chỉ dùng `revealed_chars`).
- 12. Cược CỐ ĐỊNH 5000 xu (không giảm khi thua).
- 13. Thời gian mỗi nước 30s, engine suy nghĩ 3s, MIN_MOVE_SECONDS = 3.0.
- 14. ★ v5.2 — CHẨN ĐOÁN LỖI CHI TIẾT cho ván dài (200+ nước):
-     - Lock chống race giữa các MOVE packet.
-     - Dedup có timing window 100ms (thay vì so sánh uci thô).
-     - Nâng MAX_SAFE_MOVES = 250 và TRUST_ENGINE_AFTER = 100.
-     - Log đầy đủ cho mọi exception trong MOVE/RECV.
-     - Verify nước đi trước khi gửi: kiểm tra source có quân không.
-     - Giới hạn restart engine (2 lần/ván) để tránh loop.
-     - Đếm và log số nước bot gửi / nước bị từ chối / nước lật.
-     - Watchdog cảnh báo khi chuỗi moves lệch giữa các lượt.
+★ v5.3 — FIX BAG THIẾU ENTRIES (bug fatal làm PKJQ crash giữa ván)
+========================================================================
+Bot cũ (v5.0-5.2) build BAG bằng:
+    out = "".join(f"{k}{v}" for k, v in bag.items() if v > 0)
+→ BỎ entries có value=0 → BAG chỉ còn 11, 10, 9... entries.
+→ PKJQ.exe CRASH khi nạp BAG thiếu entries.
+
+Bằng chứng:
+  - Ván #23: BAG đầy đủ 12 entries → KHÔNG crash
+  - Ván #25: BAG chỉ 4 entries → CRASH
+  - Ván #26: BAG 11 entries → CRASH (log: "Crash 3 lần cho cùng thế cờ")
+
+Fix: GIỮ ĐỦ 12 entries, kể cả value=0
+    out = "".join(f"{k}{v}" for k, v in bag.items())
+
+Format mới:
+    A0B2C0N1R1P2a1b1n2c1p1r0     ← 12 entries, có value=0
 """
 
 import struct
@@ -129,29 +123,21 @@ PLACE_PATH = 'Lobby.mystery_xiangqi.0'
 ENGINE_MULTIPV = 1
 ENGINE_MULTIPV_FALLBACK = 3
 
-# MIN_MOVE_SECONDS: chờ đủ 3s từ lúc tới lượt trước khi gửi nước
 MIN_MOVE_SECONDS = 3.0
 
-# ★ v5.2: MAX_SAFE_MOVES 100 -> 250 (cover ván 200+ nước)
 MAX_SAFE_MOVES = 250
-# ★ v5.2: TRUST_ENGINE_AFTER 40 -> 100 (tin tưởng engine sớm hơn)
 TRUST_ENGINE_AFTER = 100
 
-# ★ v5.2: giới hạn restart engine trong 1 ván
 MAX_ENGINE_RESTARTS_PER_GAME = 2
 
-# ★ v5.2: cửa sổ thời gian dedup MOVE (giây). Nếu packet thứ 2 giống packet
-# thứ nhất đến trong vòng 0.1s -> coi là retransmission, bỏ qua.
 MOVE_DEDUP_WINDOW = 0.1
 
 KICK_MODE = "when_lose"
 KICK_DELAY = 5.0
 
-# Cược CỐ ĐỊNH 5000 xu, KHÔNG giảm khi thua
 BOT_BET_XU = 5000
 BOT_USE_CREATE_TABLE = True
 BOT_MATCH_DURATION = '5'
-# Thời gian mỗi nước 30s
 BOT_TURN_DURATION = '30'
 BOT_ACC_DURATION = '0'
 BOT_BLOCK_SOFTWARE = '0'
@@ -436,9 +422,15 @@ for _c in [0, 2, 4, 6, 8]:
     STANDARD_PAWN_POSITIONS.add(3 * 9 + _c)
 
 
-# BAG chuẩn của cờ úp (không tính 2 tướng lộ sẵn)
+# ★ BAG chuẩn của cờ úp — 12 entries, THỨ TỰ CỐ ĐỊNH:
+#   ĐỎ: A(2) B(2) C(2) N(2) R(2) P(5)
+#   ĐEN: a(2) b(2) c(2) n(2) r(2) p(5)
+# PKJQ.exe dựa vào thứ tự này để parse BAG.
 INITIAL_BAG = {'A':2,'B':2,'N':2,'R':2,'C':2,'P':5,
                'a':2,'b':2,'n':2,'r':2,'c':2,'p':5}
+
+# ★ Thứ tự CỐ ĐỊNH cho BAG — PHẢI khớp với thứ tự PKJQ expect
+BAG_ORDER = ['A', 'B', 'C', 'N', 'R', 'P', 'a', 'b', 'c', 'n', 'r', 'p']
 
 
 class XiangqiBoardTracker:
@@ -473,7 +465,6 @@ class XiangqiBoardTracker:
         self.dark_positions = set()
         self.flip = False
         self.flip_known = False
-        # ★ v5.2: đếm số nước đã record — để log khi lệch
         self.recorded_count = 0
 
     def pos_to_rc(self, pos):
@@ -497,12 +488,25 @@ class XiangqiBoardTracker:
                 self.rc_to_pos(9 - t_rank, t_col))
 
     def bag_string(self):
+        """★ v5.3: BAG đủ 12 entries, kể cả value=0.
+
+        Format: A0B2C0N1R1P2a1b1c1n0r0p3
+
+        Lý do fix: PKJQ.exe CRASH khi BAG thiếu entries (bỏ entry value=0).
+        Bằng chứng từ log:
+          - Ván #23: BAG 12 entries → KHÔNG crash
+          - Ván #25: BAG 4 entries  → CRASH
+          - Ván #26: BAG 11 entries → CRASH
+
+        Thứ tự entries theo BAG_ORDER cố định (A B C N R P a b c n r p).
+        """
         bag = dict(INITIAL_BAG)
         for ch in self.revealed_chars:
             if ch in bag:
                 bag[ch] = max(0, bag[ch] - 1)
-        out = "".join(f"{k}{v}" for k, v in bag.items() if v > 0)
-        return out or "-"
+        # ★ v5.3: GIỮ ĐỦ 12 entries — KHÔNG filter value > 0
+        out = "".join(f"{k}{bag[k]}" for k in BAG_ORDER)
+        return out
 
     def get_current_fen(self):
         fen = f"{self.start_fen} {self.bag_string()} {self.start_side} - - 0 1"
@@ -665,22 +669,16 @@ class PikafishBot:
         self._last_score = "?"
         self._last_depth = "?"
 
-        # ============ ★ v5.2: STATE CHẨN ĐOÁN ============
-        # Lock chống race giữa nhiều MOVE packet đến gần như đồng thời.
+        # v5.2 diagnostics state
         self._move_lock = threading.Lock()
-        # Timing dedup: chỉ bỏ qua packet trùng nếu đến trong MOVE_DEDUP_WINDOW
         self._last_move_time = 0.0
         self._last_move_uci = None
-        # Đếm sự kiện để chẩn đoán
         self._move_recv_count = 0
         self._move_skip_count = 0
         self._move_error_count = 0
         self._play_reject_total = 0
         self._engine_restart_count = 0
-        # Watchdog: lưu len(uci_moves) tại thời điểm bắt đầu lượt bot.
-        # Nếu khi đến lượt bot mà chuỗi lệch so với dự đoán -> cảnh báo.
         self._moves_len_at_turn_start = 0
-        # Debug cờ thực tế: lưu ván vừa bắt đầu để debug
         self._game_seq = 0
 
         self._init_engine()
@@ -1142,7 +1140,6 @@ class PikafishBot:
 
     # ==================== XỬ LÝ GÓI ĐẾN ====================
     def _handle_binary_message(self, data):
-        # Lấy tên lệnh trước để log khi lỗi
         cmd_for_log = "?"
         try:
             msg = InboundMessage(data)
@@ -1166,7 +1163,6 @@ class PikafishBot:
                 try: print(f"[SERVER] ALERT: {msg.read_string()}")
                 except Exception: pass
         except Exception as e:
-            # ★ v5.2: log traceback đầy đủ để bắt exception nào nuốt packet
             print(f"[RECV ERROR] cmd={cmd_for_log} err={e}", flush=True)
             traceback.print_exc()
 
@@ -1319,7 +1315,6 @@ class PikafishBot:
         self._sit_alone_since = None
         self._engine_crash_fingerprint = None
         self._engine_crash_count = 0
-        # ★ v5.2: reset counters cho ván mới
         self._move_recv_count = 0
         self._move_skip_count = 0
         self._move_error_count = 0
@@ -1399,7 +1394,7 @@ class PikafishBot:
             traceback.print_exc()
 
     # ---------------------------------------------------------------
-    # ★ DỰNG FEN CỜ ÚP
+    # DỰNG FEN CỜ ÚP
     # ---------------------------------------------------------------
     def _build_fen_from_pieces(self, pieces):
         self.board.detect_flip(pieces)
@@ -1446,15 +1441,6 @@ class PikafishBot:
         return ch.upper() if v > 0 else ch
 
     def _handle_move(self, msg):
-        """Xử lý MOVE: src(u8) tgt(u8) [reveal_count(u8) sid(u8) face(u8)]
-
-        ★ v5.2:
-          - Lock chống race với các MOVE packet khác.
-          - Dedup có TIMING WINDOW (0.1s) — bỏ qua retransmission,
-            KHÔNG bỏ nhầm nước hợp lệ đi cùng uci ở cách xa thời gian.
-          - Log traceback nếu exception -> không nuốt packet.
-          - Đếm số MOVE nhận / skip / lỗi để chẩn đoán.
-        """
         with self._move_lock:
             self._move_recv_count += 1
             try:
@@ -1466,7 +1452,6 @@ class PikafishBot:
                 rest = list(msg.data[msg.offset:]) if msg.offset < len(msg.data) else []
                 rest_hex = bytes(rest).hex()
 
-                # Trích xuất chữ cái quân VỪA LẬT — CHỈ từ rest[2] (face)
                 revealed_char = None
                 if rest and rest[0] > 0 and len(rest) >= 3:
                     cand = self._sid_to_fen_char(rest[2])
@@ -1480,7 +1465,6 @@ class PikafishBot:
 
                 move_suffix = revealed_char if is_dark_move else None
 
-                # ★ v5.2: DEDUP CÓ TIMING WINDOW
                 expected_uci = engine_move + (move_suffix or "")
                 now = time.time()
                 if (self._last_move_uci == expected_uci
@@ -1505,7 +1489,8 @@ class PikafishBot:
                 print(f"[MOVE] #{self._move_recv_count} {engine_move} -> '{uci}'"
                       f"{_reveal_suffix}{_raw_suffix} "
                       f"| uci_total={len(self.board.uci_moves)} "
-                      f"revealed_total={len(self.board.revealed_chars)}", flush=True)
+                      f"revealed_total={len(self.board.revealed_chars)} "
+                      f"| BAG={self.board.bag_string()}", flush=True)
             except Exception as e:
                 self._move_error_count += 1
                 print(f"[MOVE ERROR] recv#{self._move_recv_count} err#{self._move_error_count} "
@@ -1555,10 +1540,9 @@ class PikafishBot:
             self._turn_started_at = time.time()
             if not was_my_turn:
                 self._played_this_turn = False
-                # ★ v5.2: ghi nhận độ dài chuỗi moves khi bắt đầu lượt mới
                 self._moves_len_at_turn_start = len(self.board.uci_moves)
                 print(f"[TURN] Đến lượt bot — uci_total={len(self.board.uci_moves)} "
-                      f"| moves_hash={hash(tuple(self.board.uci_moves)) & 0xffff}", flush=True)
+                      f"| BAG={self.board.bag_string()}", flush=True)
             if not self._thinking:
                 threading.Thread(target=self._make_auto_move, daemon=True).start()
         except Exception as e:
@@ -1598,7 +1582,6 @@ class PikafishBot:
         elif my_result is None: print("[GAME] 🏁 Kết thúc")
         else: print("[GAME] 🏁 >>> HOÀ <<<")
 
-        # ★ v5.2: log chẩn đoán cuối ván
         print(f"[SUMMARY] Trận #{self._game_seq} | "
               f"uci_total={len(self.board.uci_moves)} | "
               f"revealed_total={len(self.board.revealed_chars)} | "
@@ -1606,7 +1589,8 @@ class PikafishBot:
               f"MOVE_skip={self._move_skip_count} | "
               f"MOVE_err={self._move_error_count} | "
               f"PLAY_reject={self._play_reject_total} | "
-              f"engine_restart={self._engine_restart_count}", flush=True)
+              f"engine_restart={self._engine_restart_count} | "
+              f"BAG_cuoi={self.board.bag_string()}", flush=True)
 
         should_kick = (KICK_MODE == "always"
                        or (KICK_MODE == "when_lose" and bot_lost)
@@ -1702,7 +1686,6 @@ class PikafishBot:
         print(f"[ENGINE-IN] FEN: {fen}", flush=True)
         print(f"[ENGINE-IN] moves({len(moves)}): {' '.join(moves) if moves else '(chưa có)'}", flush=True)
 
-        # Guard an toàn cho chuỗi moves quá dài
         if len(moves) > MAX_SAFE_MOVES:
             if len(self.board.uci_moves) >= TRUST_ENGINE_AFTER:
                 print(f"[ENGINE] ℹ️ Chuỗi moves dài ({len(moves)}) nhưng engine vẫn OK "
@@ -1714,7 +1697,6 @@ class PikafishBot:
 
         raw_bestmove_line = self.get_best_move(fen, moves, fixed_positions=fixed)
 
-        # Fallback khi engine chết / không trả lời
         if not raw_bestmove_line:
             fp = (fen, tuple(moves))
             if fp == self._engine_crash_fingerprint:
@@ -1733,7 +1715,6 @@ class PikafishBot:
             else:
                 for _attempt in (1, 2):
                     if self._engine_proc is None or self._engine_proc.poll() is not None:
-                        # ★ v5.2: giới hạn restart
                         if self._engine_restart_count >= MAX_ENGINE_RESTARTS_PER_GAME:
                             print(f"[ENGINE] ❌ Đã restart {self._engine_restart_count} lần "
                                   f"trong ván này -> không restart nữa", flush=True)
@@ -1748,7 +1729,6 @@ class PikafishBot:
                     raw_bestmove_line = self.get_best_move(fen, moves, fixed_positions=fixed)
                     if raw_bestmove_line: break
 
-        # Fallback MultiPV khi engine vẫn không trả lời
         if not raw_bestmove_line:
             print("[ENGINE] ⚠️ Không lấy được nước đi — thử FALLBACK MultiPV", flush=True)
             fallback_move = self._find_legal_fallback_move(fen, moves)
@@ -1780,11 +1760,6 @@ class PikafishBot:
         if best_move:
             try:
                 source_pos, target_pos = self.board.engine_move_to_pos(best_move)
-                # ★ v5.2: VERIFY nước đi — kiểm tra source có khả năng chứa quân
-                # Nếu source nằm trong dark_positions và bot không có manh mối gì
-                # → vẫn cho đi (có thể là quân úp). Chỉ cảnh báo khi source là ô
-                # bot chắc chắn biết là TRỐNG (không thể track chính xác nếu server
-                # không gửi FEN — nên chỉ log debug).
                 _turn_start = getattr(self, '_turn_started_at', 0.0) or time.time()
                 _remain = MIN_MOVE_SECONDS - (time.time() - _turn_start)
                 if _remain > 0: time.sleep(_remain)
