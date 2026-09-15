@@ -503,11 +503,6 @@ class InboundMessage:
         end = min(self.offset + n, len(self.data))
         return self.data[self.offset:end].hex()
 
-STANDARD_PAWN_POSITIONS = set()
-for _c in [0, 2, 4, 6, 8]:
-    STANDARD_PAWN_POSITIONS.add(6 * 9 + _c)
-    STANDARD_PAWN_POSITIONS.add(3 * 9 + _c)
-
 class XiangqiBoardTracker:
     # CỜ ÚP initial FEN: 'x' (black face-down) / 'X' (red face-down) / 'k','K' (kings)
     INITIAL_FEN = "xxxxkxxxx/9/1x5x1/x1x1x1x1x/9/9/X1X1X1X1X/1X5X1/9/XXXXKXXXX w"
@@ -787,7 +782,6 @@ class PikafishBot:
         self.bet_amts = []
         self._resolved_bet_id = None
         self._bet_amts_loaded = False
-        self.fixed_pawn_positions = set()
         self.last_action_timestamp = time.time()
         self.last_recv_timestamp = time.time()
         self._thinking = False           # đang tính nước -> không kích hoạt luồng thứ hai
@@ -1053,7 +1047,7 @@ class PikafishBot:
             time.sleep(0.02)
         return True
 
-    def get_best_move(self, fen, moves, fixed_positions=None):
+    def get_best_move(self, fen, moves):
         try:
             if not getattr(self, '_engine_proc', None) or self._engine_proc.poll() is not None: return None
             self.multipv.clear() 
@@ -1061,7 +1055,6 @@ class PikafishBot:
             if not self._sync_engine():
                 return None
 
-            if fixed_positions: return self._get_move_avoiding_fixed(fen, moves, fixed_positions)
             pos_cmd = f"position fen {fen}"
             if moves: pos_cmd += " moves " + " ".join(moves)
 
@@ -1102,63 +1095,6 @@ class PikafishBot:
             time.sleep(0.02) # Phản xạ luồng đọc siêu tốc
         return None
 
-    def _get_move_avoiding_fixed(self, fen, moves, fixed_positions):
-        """Tìm nước đi KHÔNG xuất phát từ chốt bị khóa.
-
-        ★ ĐÂY LÀ CHỖ DUY NHẤT CÒN DÙNG MultiPV — và chỉ khi thật sự cần thiết:
-          1. Chạy bình thường (MultiPV hiện tại). Nếu bestmove không dính chốt -> xong.
-          2. Chỉ khi bestmove dính chốt: TẠM bật MultiPV=ENGINE_MULTIPV_FALLBACK,
-             tính lại, rồi lấy nước ứng viên TỐT NHẤT TIẾP THEO theo đúng thứ tự
-             xếp hạng của engine (không dùng heuristic tự chế nào).
-          3. Kết thúc luôn trả MultiPV về giá trị gốc.
-        """
-        def _search(movetime):
-            self._sync_engine()
-            self.multipv.clear()
-            self._latest_bestmove = None
-            self._mate_status = None
-            pos_cmd = f"position fen {fen}"
-            if moves: pos_cmd += " moves " + " ".join(moves)
-            self._fsf_cmd(pos_cmd)
-            self._fsf_cmd(f"go movetime {movetime}")
-            _wait = time.time()
-            while time.time() - _wait < (movetime / 1000.0) + 1.5:
-                if self._latest_bestmove: break
-                time.sleep(0.02)
-            if not self._latest_bestmove:
-                self._fsf_cmd("stop")
-                _t = time.time()
-                while time.time() - _t < 1.5:
-                    if self._latest_bestmove: break
-                    time.sleep(0.02)
-            return self._latest_bestmove
-
-        raw = _search(2500)
-        if not raw:
-            return None
-        parts = raw.split()
-        best_move = parts[1] if len(parts) >= 2 else None
-        if not best_move or best_move in ("(none)", "0000"):
-            return raw
-        if not self._move_hits_fixed_pawn(best_move, fixed_positions):
-            return raw
-
-        # --- Bestmove dính chốt khóa -> mới cần MultiPV ---
-        print(f"[ENGINE] ⚠️ Bestmove {best_move} xuất phát từ chốt bị khóa "
-              f"-> tạm bật MultiPV={ENGINE_MULTIPV_FALLBACK} tìm nước thay thế")
-        self._fsf_cmd(f"setoption name MultiPV value {ENGINE_MULTIPV_FALLBACK}")
-        try:
-            raw2 = _search(2500) or raw
-            for cand in self.multipv.candidates():
-                if not self._move_hits_fixed_pawn(cand, fixed_positions):
-                    print(f"[ENGINE] ✅ Chọn nước thay thế hạng kế tiếp của engine: {cand}")
-                    return f"bestmove {cand}"
-            print("[ENGINE] ⚠️ Mọi nhánh MultiPV đều dính chốt -> giữ bestmove gốc")
-            return raw2
-        finally:
-            # Luôn trả MultiPV về mặc định
-            self._fsf_cmd(f"setoption name MultiPV value {ENGINE_MULTIPV}")
-
     def _next_candidate_excluding(self, fen, moves, excluded):
         """Lấy nước xếp hạng cao nhất của engine mà KHÔNG nằm trong `excluded`.
 
@@ -1189,17 +1125,6 @@ class PikafishBot:
             return None
         finally:
             self._fsf_cmd(f"setoption name MultiPV value {ENGINE_MULTIPV}")
-
-    def _move_hits_fixed_pawn(self, move_str, fixed_positions):
-        """Kiểm tra nước đi có bắt đầu từ vị trí chốt cố định không."""
-        if not fixed_positions or len(move_str) < 4:
-            return False
-        try:
-            # ★ FIX FLIP: đổi UCI -> server pos qua cùng một phép biến đổi với FEN.
-            src_pos, _ = self.board.engine_move_to_pos(move_str)
-            return src_pos in fixed_positions
-        except (ValueError, IndexError):
-            return False
 
     def connect(self):
         import websocket
@@ -1252,7 +1177,6 @@ class PikafishBot:
         self._bet_amts_loaded = False
         self._resolved_bet_id = None
         self.bet_amts = []
-        self.fixed_pawn_positions = set()
         self.board.reset()
 
     def send_message(self, cmd, data=b''):
@@ -1653,7 +1577,6 @@ class PikafishBot:
         self._enter_fail_at = 0.0
         self._sit_alone_since = None
         self.board.reset()
-        self.fixed_pawn_positions.clear()
         self.board.is_playing = True
         self.in_game = True
         self._joining_table = False
@@ -1689,14 +1612,6 @@ class PikafishBot:
                 my_slot_id = self.board.my_slot_id if self.board.my_slot_id >= 0 else first_turn_slot_id
 
             self.board.set_my_slot(my_slot_id, first_turn_slot_id)
-
-            for sid, face, position, is_open in board_pieces:
-                piece_type = int(face[1]) if len(face) > 1 else 0
-                if piece_type == 7 and position not in STANDARD_PAWN_POSITIONS:
-                    self.fixed_pawn_positions.add(position)
-
-            if self.fixed_pawn_positions:
-                print(f"[GAME] 🛡️ Bàn đấu có {len(self.fixed_pawn_positions)} chốt bị liệt/khóa!")
 
             _built_fen = self._build_fen_from_pieces(board_pieces)
             # ★ TỰ KIỂM TRA CHIỀU FEN: nếu tướng sai nửa bàn -> lật lại và dựng lần 2.
@@ -1964,7 +1879,6 @@ class PikafishBot:
             if not victim:
                 print("[KICK] Không xác định được playerId đối phương -> bỏ qua")
 
-        self.fixed_pawn_positions.clear()
         self.board.reset()
         self.board.is_playing = False
         self.board.is_my_turn = False
@@ -2020,13 +1934,12 @@ class PikafishBot:
             if not self.engine: return
 
         fen, moves = self.board.get_current_fen()
-        fixed = self.fixed_pawn_positions if self.fixed_pawn_positions else None
 
         # ★ DEBUG: FEN đầu ván + toàn bộ nước đi (engine tự dựng thế cờ hiện tại)
         print(f"[ENGINE-IN] FEN: {fen}", flush=True)
         print(f"[ENGINE-IN] moves({len(moves)}): {' '.join(moves) if moves else '(chưa có)'}", flush=True)
 
-        raw_bestmove_line = self.get_best_move(fen, moves, fixed_positions=fixed)
+        raw_bestmove_line = self.get_best_move(fen, moves)
         # ★ FALLBACK: engine chết giữa chừng -> restart rồi nạp LẠI ĐÚNG ván này.
         #   (Bản cũ retry bằng FEN ĐẦU VÁN với 0 nước đi => bestmove tính trên bàn
         #    cờ lúc khai cuộc, gửi lên server là 'NoPieceAtSourcePosition'.)
@@ -2053,7 +1966,7 @@ class PikafishBot:
                 self._init_engine()
                 if not self.engine:
                     break
-                raw_bestmove_line = self.get_best_move(fen, moves, fixed_positions=fixed)
+                raw_bestmove_line = self.get_best_move(fen, moves)
                 if raw_bestmove_line:
                     break
         if not raw_bestmove_line:
@@ -2165,7 +2078,6 @@ class PikafishBot:
                     self._bet_amts_loaded = False
                     self._resolved_bet_id = None
                     self.bet_amts = []
-                    self.fixed_pawn_positions = set()
                     self.board.reset()
                     if not self.connect():
                         time.sleep(5); continue
