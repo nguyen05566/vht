@@ -132,9 +132,9 @@ ENGINE_SYNC_TIMEOUT  = 4.0    # chờ 'readyok' khi bắt tay đầu lượt
 ENGINE_STOP_GRACE    = 2.0    # chờ thêm sau khi gửi 'stop'
 TURN_WATCHDOG_SEC    = 12     # mốc watchdog (chỉ để đối chiếu)
 
-ENGINE_MULTIPV = 1
+ENGINE_MULTIPV = 5
 # Số nhánh tạm bật khi cần né chốt cố định.
-ENGINE_MULTIPV_FALLBACK = 1
+ENGINE_MULTIPV_FALLBACK = 3
 
 # Thoi gian TOI THIEU tu luc toi luot den khi gui nuoc di (giay).
 # Engine tim ra nuoc thang/sat cuc se tra loi gan nhu tuc thi; neu di ngay
