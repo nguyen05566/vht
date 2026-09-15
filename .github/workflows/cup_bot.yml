@@ -8,7 +8,7 @@ on:
 jobs:
   run-cup-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 360          # cho phép job sống tối đa 6 giờ
     steps:
       - uses: actions/checkout@v4
 
@@ -57,7 +57,7 @@ jobs:
             -o jieqibox/Jieqibox/Engines/PikaJieQi0111/pikafish.nnue
           ls -la jieqibox/Jieqibox/Engines/PikaJieQi0111/pikafish.nnue
 
-      - name: Chạy cup_bot
+      - name: Chạy cup_bot (1 phiên ~6h)
         env:
           CARO_USER19: nguyen15
           CARO_PASSWD19: nhat123456
@@ -67,7 +67,7 @@ jobs:
           XDG_RUNTIME_DIR: /tmp/xdg-runtime
         run: |
           mkdir -p $WINEPREFIX "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
-          timeout 45m python3 -u cup_bot.py 2>&1 | tee cup_run.log
+          timeout 5h50m python3 -u cup_bot.py 2>&1 | tee cup_run.log
 
       - name: Upload log
         if: always()
