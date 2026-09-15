@@ -1,9 +1,8 @@
-name: cup_bot (cờ úp - mystery_xiangqi)
+name: cup_bot (cờ úp - mystery_xiangqi via wine)
 
 on:
   workflow_dispatch:
   schedule:
-    # Chạy lúc 03:00 UTC = 10:00 Việt Nam
     - cron: '0 3 * * *'
 
 jobs:
@@ -20,25 +19,42 @@ jobs:
       - name: Cài deps
         run: |
           pip install --break-system-packages websocket-client py7zr
+          sudo apt-get update -y && sudo apt-get install -y wine64 unrar-free
 
-      - name: Tải Pikafish Linux + NNUE
+      - name: Tải Jieqibox engines (PKJQ.exe cho cờ úp)
         run: |
-          mkdir -p pikafish-engine
-          # Tải bản universal 2026-09-06 (Pikafish engine cho cờ tướng; thay 'x'→std piece cho cờ úp)
-          curl -sL "https://github.com/official-pikafish/Pikafish/releases/download/Pikafish-2026-09-06/Pikafish.2026-09-06.7z" -o /tmp/pikafish.7z
-          python3 -c "
-          import py7zr
-          with py7zr.SevenZipFile('/tmp/pikafish.7z', 'r') as z:
-              z.extractall('pikafish-engine')
-          "
-          chmod +x pikafish-engine/Pikafish-Linux-x86-64-universal
-          ls -la pikafish-engine/Pikafish-Linux-x86-64-universal pikafish-engine/pikafish.nnue
+          mkdir -p jieqibox
+          # Jieqibox.rar đã có trong repo (commit cũ)
+          if [ -f Jieqibox.rar ]; then
+            unrar x -o+ Jieqibox.rar jieqibox/
+          else
+            curl -sL "https://github.com/nguyen05566/vht/raw/main/Jieqibox.rar" -o Jieqibox.rar
+            unrar x -o+ Jieqibox.rar jieqibox/
+          fi
+          ls -la jieqibox/Jieqibox/Engines/PikaJieQi0111/
+
+      - name: Tải pikafish.nnue (NNUE cho PKJQ)
+        run: |
+          # PKJQ.exe cần pikafish.nnue cùng thư mục — tải từ networks repo
+          curl -sL "https://github.com/official-pikafish/Networks/releases/download/master-net/pikafish.nnue" \
+            -o jieqibox/Jieqibox/Engines/PikaJieQi0111/pikafish.nnue
+          ls -la jieqibox/Jieqibox/Engines/PikaJieQi0111/pikafish.nnue
+
+      - name: Cài wine portable (Kron4ek 9.0)
+        run: |
+          mkdir -p wine-portable
+          curl -sL "https://github.com/Kron4ek/Wine-Builds/releases/download/9.0/wine-9.0-staging-amd64.tar.xz" \
+            -o /tmp/wine.tar.xz
+          tar -xf /tmp/wine.tar.xz -C wine-portable
+          ls wine-portable/wine-9.0-staging-amd64/bin/wine64
 
       - name: Chạy cup_bot
         env:
           CARO_USER19: nguyen15
           CARO_PASSWD19: nhat123456
+          WINEPREFIX: /home/runner/wine-prefix
         run: |
+          mkdir -p $WINEPREFIX
           timeout 45m python3 cup_bot.py 2>&1 | tee cup_run.log
 
       - name: Upload log
