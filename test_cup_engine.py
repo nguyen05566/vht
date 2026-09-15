@@ -64,7 +64,7 @@ allok = True
 for side, side_name in (("w", "ĐỎ"), ("b", "ĐEN")):
     out = run_engine(["uci", "setoption name EvalFile value pikafish.nnue", "isready",
                       f"position fen {BOARD} {BAG} {side} - - 0 1",
-                      "go movetime 2000", "quit"])
+                      "go movetime 3000", "quit"])
     bm = next((l.split()[1] for l in out.splitlines() if l.startswith("bestmove")), None)
     assert bm and bm not in ("(none)", "0000"), f"engine không ra nước cho bên {side}"
     src_rank = int(bm[1])
