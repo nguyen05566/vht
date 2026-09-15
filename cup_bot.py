@@ -120,6 +120,18 @@ PLACE_PATH = 'Lobby.mystery_xiangqi.0'
 # MultiPV = 1: mạnh nhất & nhanh nhất (mặc định).
 # Chỉ khi bàn có chốt bị khóa, bot mới TẠM bật MultiPV để lấy danh sách nước
 # thay thế hợp lệ, xong lại trả về 1.
+# ===================== NGÂN SÁCH THỜI GIAN MỖI LƯỢT =====================
+# Watchdog ở vòng lặp chính bắn khi "tới lượt mà 12s chưa đi được". Tổng thời
+# gian xấu nhất của MỘT lần tính phải NHỎ HƠN mốc đó, nếu không watchdog sẽ bắn
+# ngay giữa lúc engine còn đang nghĩ hợp lệ.
+#   Bản cũ: sync 5.0 + read 6.0 + chờ-sau-stop 1.5 = 12.5s  >  12s  -> va chạm.
+#   Nay:    sync 3.0 + read 4.5 + chờ-sau-stop 1.0 =  8.5s  <  12s.
+ENGINE_MOVETIME_MS   = 2500   # thời gian engine được phép nghĩ
+ENGINE_READ_TIMEOUT  = 4.5    # chờ 'bestmove' (> movetime một chút)
+ENGINE_SYNC_TIMEOUT  = 3.0    # chờ 'readyok' khi bắt tay đầu lượt
+ENGINE_STOP_GRACE    = 1.0    # chờ thêm sau khi gửi 'stop'
+TURN_WATCHDOG_SEC    = 12     # mốc watchdog (chỉ để đối chiếu)
+
 ENGINE_MULTIPV = 1
 # Số nhánh tạm bật khi cần né chốt cố định.
 ENGINE_MULTIPV_FALLBACK = 3
@@ -970,7 +982,11 @@ class PikafishBot:
             self._fsf_cmd("uci")
             # Chừa ít nhất 1 nhân cho luồng WebSocket, nếu không pong/heartbeat bị trễ
             # và server cắt kết nối ngay giữa ván.
-            _threads = max(1, min(4, (os.cpu_count() or 2) - 1))
+            # Giới hạn 2 luồng: PKJQ chạy qua wine trên runner CPU chia sẻ, thêm
+            # luồng chỉ làm tăng tranh chấp chứ gần như không sâu thêm (đo thực tế:
+            # Threads 1..4 cho ra cùng bestmove, chênh lệch depth không đáng kể),
+            # trong khi vẫn phải chừa nhân cho luồng WebSocket giữ heartbeat.
+            _threads = max(1, min(2, (os.cpu_count() or 2) - 1))
             self._fsf_cmd(f"setoption name Threads value {_threads}")
             # Hash nhỏ lại: hộp chạy bot thường chỉ 2GB RAM. 256MB mỗi lần restart
             # rất dễ đẩy máy vào trạng thái hết bộ nhớ.
@@ -1004,7 +1020,7 @@ class PikafishBot:
             self._engine_proc.stdin.write(text + "\n")
             self._engine_proc.stdin.flush()
 
-    def _sync_engine(self, timeout=5.0):
+    def _sync_engine(self, timeout=ENGINE_SYNC_TIMEOUT):
         """Đảm bảo engine RẢNH và đã nuốt hết lệnh cũ trước khi nạp thế cờ mới.
 
         ★ FIX LỖI MẤT LƯỢT ("Engine không trả lời kịp"):
@@ -1027,11 +1043,12 @@ class PikafishBot:
             if self._engine_proc.poll() is not None:
                 return False
             if time.time() - _t0 > timeout:
-                print("[ENGINE] ⚠️  Engine không phản hồi 'readyok' -> khởi động lại", flush=True)
-                try:
-                    self._engine_proc.kill()
-                except Exception:
-                    pass
+                # ★ Dùng _kill_engine() thay cho proc.kill() trần: bản cũ chỉ bắn
+                #   SIGKILL mà không đóng 3 ống pipe và không xoá _engine_proc,
+                #   nên wineserver + PKJQ.exe (~400MB) còn treo lại -> vài lần là
+                #   hết RAM và bị OOM kill (đúng hiện tượng run6).
+                print("[ENGINE] ⚠️  Engine không phản hồi 'readyok' -> dọn và khởi động lại", flush=True)
+                self._kill_engine()
                 return False
             time.sleep(0.02)
         return True
@@ -1056,8 +1073,8 @@ class PikafishBot:
             self._latest_bestmove = None
             self._mate_status = None
             self._fsf_cmd(pos_cmd)
-            self._fsf_cmd("go movetime 3200")
-            return self._read_bestmove(timeout=6.0, reset=False)
+            self._fsf_cmd(f"go movetime {ENGINE_MOVETIME_MS}")
+            return self._read_bestmove(timeout=ENGINE_READ_TIMEOUT, reset=False)
         except Exception as e: print(f"[ENGINE] Lỗi tính toán: {e}")
         return None
 
@@ -1077,7 +1094,7 @@ class PikafishBot:
                 # Chờ lâu hơn sau 'stop': engine cần vài trăm ms để kết thúc và in
                 # bestmove. Bản cũ chỉ chờ 0.1s -> hay bỏ lỡ câu trả lời.
                 _t = time.time()
-                while time.time() - _t < 1.5:
+                while time.time() - _t < ENGINE_STOP_GRACE:
                     if self._latest_bestmove:
                         return self._latest_bestmove
                     time.sleep(0.02)
@@ -2017,14 +2034,25 @@ class PikafishBot:
             # Engine chết HOẶC không kịp trả lời -> khởi động lại (nếu cần) và thử lại
             # tối đa 2 lần với ĐÚNG ván đang chơi. Không bao giờ nạp lại ván khác.
             for _attempt in (1, 2):
-                if self._engine_proc is None or self._engine_proc.poll() is not None:
+                _dead = (self._engine_proc is None or self._engine_proc.poll() is not None)
+                if _dead:
                     print(f"[ENGINE] ⚠️  Engine chết! Khởi động lại (lần {_attempt}) "
                           f"rồi nạp lại đúng ván đang chơi...", flush=True)
-                    self._init_engine()
-                    if not self.engine:
-                        break
                 else:
-                    print(f"[ENGINE] ⚠️  Engine không trả lời kịp -> thử lại (lần {_attempt})", flush=True)
+                    # ★ FIX TREO-NHUNG-CON-SONG:
+                    #   Bản cũ chỉ restart khi poll() != None (tiến trình đã thoát).
+                    #   Nhưng PKJQ qua wine hay rơi vào trạng thái CÒN SỐNG mà KHÔNG
+                    #   trả lời gì nữa (không 'readyok', không 'bestmove'). Khi đó
+                    #   bản cũ gọi lại get_best_move() trên ĐÚNG tiến trình treo đó
+                    #   -> lại chờ hết timeout -> lại trượt. Lặp mãi, sinh đúng cặp log
+                    #   "Không lấy được nước đi" + "12s chưa đi được -> tính lại".
+                    #   Engine đã câm thì phải GIẾT rồi dựng lại, không thử lại suông.
+                    print(f"[ENGINE] ⚠️  Engine treo (còn sống nhưng câm) -> giết và "
+                          f"khởi động lại (lần {_attempt})...", flush=True)
+                    self._kill_engine()
+                self._init_engine()
+                if not self.engine:
+                    break
                 raw_bestmove_line = self.get_best_move(fen, moves, fixed_positions=fixed)
                 if raw_bestmove_line:
                     break
