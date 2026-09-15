@@ -128,19 +128,19 @@ PLACE_PATH = 'Lobby.mystery_xiangqi.0'
 #   Nay:    sync 3.0 + read 4.5 + chờ-sau-stop 1.0 =  8.5s  <  12s.
 ENGINE_MOVETIME_MS   = 2500   # thời gian engine được phép nghĩ
 ENGINE_READ_TIMEOUT  = 4.5    # chờ 'bestmove' (> movetime một chút)
-ENGINE_SYNC_TIMEOUT  = 3.0    # chờ 'readyok' khi bắt tay đầu lượt
-ENGINE_STOP_GRACE    = 1.0    # chờ thêm sau khi gửi 'stop'
+ENGINE_SYNC_TIMEOUT  = 4.0    # chờ 'readyok' khi bắt tay đầu lượt
+ENGINE_STOP_GRACE    = 2.0    # chờ thêm sau khi gửi 'stop'
 TURN_WATCHDOG_SEC    = 12     # mốc watchdog (chỉ để đối chiếu)
 
 ENGINE_MULTIPV = 1
 # Số nhánh tạm bật khi cần né chốt cố định.
-ENGINE_MULTIPV_FALLBACK = 3
+ENGINE_MULTIPV_FALLBACK = 1
 
 # Thoi gian TOI THIEU tu luc toi luot den khi gui nuoc di (giay).
 # Engine tim ra nuoc thang/sat cuc se tra loi gan nhu tuc thi; neu di ngay
 # thi nhip di nhanh bat thuong. Chi bu phan CON THIEU - engine da nghi lau
 # hon MIN_MOVE_SECONDS roi thi di luon, khong cong them.
-MIN_MOVE_SECONDS = 2.0
+MIN_MOVE_SECONDS = 5.0
 
 # Kick đối phương sau khi hết ván (giống nguyen1..nguyen6):
 #   "when_lose" - bot THUA thì kick người thắng (đúng hành vi nguyen1..6, mặc định)
@@ -162,7 +162,7 @@ BOT_BET_MAX = BOT_BET_LEVELS[-1]   # trần: thắng mấy cũng không vượt 
 BOT_BET_XU = 5000
 BOT_USE_CREATE_TABLE = True
 BOT_MATCH_DURATION = '5'
-BOT_TURN_DURATION = '60'
+BOT_TURN_DURATION = '30'
 BOT_ACC_DURATION = '0'
 BOT_BLOCK_SOFTWARE = '0'
 
