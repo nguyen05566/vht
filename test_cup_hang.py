@@ -32,7 +32,7 @@ print(f"   {worst}s < {cup.TURN_WATCHDOG_SEC}s ? {'✅' if good else '❌ VA CH�
 good = cup.ENGINE_READ_TIMEOUT > cup.ENGINE_MOVETIME_MS / 1000.0
 ok &= good
 print(f"   read timeout {cup.ENGINE_READ_TIMEOUT}s > movetime "
-      f"{cup.ENGINE_MOVETIME_MS/1000}s ? {'✅' if good else '❌'}")
+      f"{cup.ENGINE_MOVETIME_MS/3000}s ? {'✅' if good else '❌'}")
 
 # ---------- 2. Engine treo -> phải bị GIẾT rồi dựng lại ----------
 print("\n2. Engine treo (còn sống nhưng câm)")
