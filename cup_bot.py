@@ -120,27 +120,15 @@ PLACE_PATH = 'Lobby.mystery_xiangqi.0'
 # MultiPV = 1: mạnh nhất & nhanh nhất (mặc định).
 # Chỉ khi bàn có chốt bị khóa, bot mới TẠM bật MultiPV để lấy danh sách nước
 # thay thế hợp lệ, xong lại trả về 1.
-# ===================== NGÂN SÁCH THỜI GIAN MỖI LƯỢT =====================
-# Watchdog ở vòng lặp chính bắn khi "tới lượt mà 12s chưa đi được". Tổng thời
-# gian xấu nhất của MỘT lần tính phải NHỎ HƠN mốc đó, nếu không watchdog sẽ bắn
-# ngay giữa lúc engine còn đang nghĩ hợp lệ.
-#   Bản cũ: sync 5.0 + read 6.0 + chờ-sau-stop 1.5 = 12.5s  >  12s  -> va chạm.
-#   Nay:    sync 3.0 + read 4.5 + chờ-sau-stop 1.0 =  8.5s  <  12s.
-ENGINE_MOVETIME_MS   = 2500   # thời gian engine được phép nghĩ
-ENGINE_READ_TIMEOUT  = 4.5    # chờ 'bestmove' (> movetime một chút)
-ENGINE_SYNC_TIMEOUT  = 4.0    # chờ 'readyok' khi bắt tay đầu lượt
-ENGINE_STOP_GRACE    = 1.0    # chờ thêm sau khi gửi 'stop'
-TURN_WATCHDOG_SEC    = 12     # mốc watchdog (chỉ để đối chiếu)
-
-ENGINE_MULTIPV = 5
+ENGINE_MULTIPV = 1
 # Số nhánh tạm bật khi cần né chốt cố định.
-ENGINE_MULTIPV_FALLBACK = 5
+ENGINE_MULTIPV_FALLBACK = 3
 
 # Thoi gian TOI THIEU tu luc toi luot den khi gui nuoc di (giay).
 # Engine tim ra nuoc thang/sat cuc se tra loi gan nhu tuc thi; neu di ngay
 # thi nhip di nhanh bat thuong. Chi bu phan CON THIEU - engine da nghi lau
 # hon MIN_MOVE_SECONDS roi thi di luon, khong cong them.
-MIN_MOVE_SECONDS = 5.0
+MIN_MOVE_SECONDS = 2.0
 
 # Kick đối phương sau khi hết ván (giống nguyen1..nguyen6):
 #   "when_lose" - bot THUA thì kick người thắng (đúng hành vi nguyen1..6, mặc định)
@@ -150,19 +138,10 @@ MIN_MOVE_SECONDS = 5.0
 KICK_MODE = "when_lose"
 KICK_DELAY = 5.0
 
-# ============================ MỨC CƯỢC ============================
-# Thang cược bot dùng (xu). Server cờ úp hỗ trợ: 100, 200, 500, 1000, 2000,
-# 5000, 10000, 20000, 50000, 100000, 200000, 500000, 1000000, 2000000.
-# Bot CHỈ chơi trong 4 mức dưới đây — không bao giờ tụt xuống 500/200/100 nữa.
-BOT_BET_LEVELS = [5000]
-BOT_BET_MIN = BOT_BET_LEVELS[0]    # sàn: thua mấy cũng không xuống dưới mức này
-BOT_BET_MAX = BOT_BET_LEVELS[-1]   # trần: thắng mấy cũng không vượt mức này
-
-# Mức khởi đầu mỗi lần chạy bot.
-BOT_BET_XU = 5000
+BOT_BET_XU = 1000  # cờ úp không có 400 — 1000 xu là mức thấp nhất hợp lý (id=3)
 BOT_USE_CREATE_TABLE = True
 BOT_MATCH_DURATION = '5'
-BOT_TURN_DURATION = '30'
+BOT_TURN_DURATION = '60'
 BOT_ACC_DURATION = '0'
 BOT_BLOCK_SOFTWARE = '0'
 
@@ -503,6 +482,11 @@ class InboundMessage:
         end = min(self.offset + n, len(self.data))
         return self.data[self.offset:end].hex()
 
+STANDARD_PAWN_POSITIONS = set()
+for _c in [0, 2, 4, 6, 8]:
+    STANDARD_PAWN_POSITIONS.add(6 * 9 + _c)
+    STANDARD_PAWN_POSITIONS.add(3 * 9 + _c)
+
 class XiangqiBoardTracker:
     # CỜ ÚP initial FEN: 'x' (black face-down) / 'X' (red face-down) / 'k','K' (kings)
     INITIAL_FEN = "xxxxkxxxx/9/1x5x1/x1x1x1x1x/9/9/X1X1X1X1X/1X5X1/9/XXXXKXXXX w"
@@ -782,6 +766,7 @@ class PikafishBot:
         self.bet_amts = []
         self._resolved_bet_id = None
         self._bet_amts_loaded = False
+        self.fixed_pawn_positions = set()
         self.last_action_timestamp = time.time()
         self.last_recv_timestamp = time.time()
         self._thinking = False           # đang tính nước -> không kích hoạt luồng thứ hai
@@ -976,22 +961,17 @@ class PikafishBot:
             self._fsf_cmd("uci")
             # Chừa ít nhất 1 nhân cho luồng WebSocket, nếu không pong/heartbeat bị trễ
             # và server cắt kết nối ngay giữa ván.
-            # Giới hạn 2 luồng: PKJQ chạy qua wine trên runner CPU chia sẻ, thêm
-            # luồng chỉ làm tăng tranh chấp chứ gần như không sâu thêm (đo thực tế:
-            # Threads 1..4 cho ra cùng bestmove, chênh lệch depth không đáng kể),
-            # trong khi vẫn phải chừa nhân cho luồng WebSocket giữ heartbeat.
-            _threads = max(1, min(2, (os.cpu_count() or 2) - 1))
+            _threads = max(1, min(4, (os.cpu_count() or 2) - 1))
             self._fsf_cmd(f"setoption name Threads value {_threads}")
             # Hash nhỏ lại: hộp chạy bot thường chỉ 2GB RAM. 256MB mỗi lần restart
             # rất dễ đẩy máy vào trạng thái hết bộ nhớ.
-            self._fsf_cmd("setoption name Hash value 256")
+            self._fsf_cmd("setoption name Hash value 64")
             self._fsf_cmd(f"setoption name MultiPV value {ENGINE_MULTIPV}")
             # EvalFile: dùng pikafish.nnue ở cùng thư mục với PKJQ.exe (cwd đã set)
             self._fsf_cmd("setoption name EvalFile value pikafish.nnue")
             # ★ CHỜ 'readyok' THẬT SỰ thay vì sleep(1) đoán mò.
             #   Nạp NNUE 50MB qua wine có khi mất vài giây; bản cũ chỉ ngủ 1s rồi
             #   bắn 'go' ngay -> engine chưa sẵn sàng, lượt đó mất trắng.
-            self._fsf_cmd("setoption name Contempt value 0")
             self._readyok = False
             self._fsf_cmd("isready")
             _t0 = time.time()
@@ -1015,7 +995,7 @@ class PikafishBot:
             self._engine_proc.stdin.write(text + "\n")
             self._engine_proc.stdin.flush()
 
-    def _sync_engine(self, timeout=ENGINE_SYNC_TIMEOUT):
+    def _sync_engine(self, timeout=5.0):
         """Đảm bảo engine RẢNH và đã nuốt hết lệnh cũ trước khi nạp thế cờ mới.
 
         ★ FIX LỖI MẤT LƯỢT ("Engine không trả lời kịp"):
@@ -1038,17 +1018,16 @@ class PikafishBot:
             if self._engine_proc.poll() is not None:
                 return False
             if time.time() - _t0 > timeout:
-                # ★ Dùng _kill_engine() thay cho proc.kill() trần: bản cũ chỉ bắn
-                #   SIGKILL mà không đóng 3 ống pipe và không xoá _engine_proc,
-                #   nên wineserver + PKJQ.exe (~400MB) còn treo lại -> vài lần là
-                #   hết RAM và bị OOM kill (đúng hiện tượng run6).
-                print("[ENGINE] ⚠️  Engine không phản hồi 'readyok' -> dọn và khởi động lại", flush=True)
-                self._kill_engine()
+                print("[ENGINE] ⚠️  Engine không phản hồi 'readyok' -> khởi động lại", flush=True)
+                try:
+                    self._engine_proc.kill()
+                except Exception:
+                    pass
                 return False
             time.sleep(0.02)
         return True
 
-    def get_best_move(self, fen, moves):
+    def get_best_move(self, fen, moves, fixed_positions=None):
         try:
             if not getattr(self, '_engine_proc', None) or self._engine_proc.poll() is not None: return None
             self.multipv.clear() 
@@ -1056,6 +1035,7 @@ class PikafishBot:
             if not self._sync_engine():
                 return None
 
+            if fixed_positions: return self._get_move_avoiding_fixed(fen, moves, fixed_positions)
             pos_cmd = f"position fen {fen}"
             if moves: pos_cmd += " moves " + " ".join(moves)
 
@@ -1067,8 +1047,8 @@ class PikafishBot:
             self._latest_bestmove = None
             self._mate_status = None
             self._fsf_cmd(pos_cmd)
-            self._fsf_cmd(f"go movetime {ENGINE_MOVETIME_MS}")
-            return self._read_bestmove(timeout=ENGINE_READ_TIMEOUT, reset=False)
+            self._fsf_cmd("go movetime 3200")
+            return self._read_bestmove(timeout=6.0, reset=False)
         except Exception as e: print(f"[ENGINE] Lỗi tính toán: {e}")
         return None
 
@@ -1088,13 +1068,70 @@ class PikafishBot:
                 # Chờ lâu hơn sau 'stop': engine cần vài trăm ms để kết thúc và in
                 # bestmove. Bản cũ chỉ chờ 0.1s -> hay bỏ lỡ câu trả lời.
                 _t = time.time()
-                while time.time() - _t < ENGINE_STOP_GRACE:
+                while time.time() - _t < 1.5:
                     if self._latest_bestmove:
                         return self._latest_bestmove
                     time.sleep(0.02)
                 break
             time.sleep(0.02) # Phản xạ luồng đọc siêu tốc
         return None
+
+    def _get_move_avoiding_fixed(self, fen, moves, fixed_positions):
+        """Tìm nước đi KHÔNG xuất phát từ chốt bị khóa.
+
+        ★ ĐÂY LÀ CHỖ DUY NHẤT CÒN DÙNG MultiPV — và chỉ khi thật sự cần thiết:
+          1. Chạy bình thường (MultiPV hiện tại). Nếu bestmove không dính chốt -> xong.
+          2. Chỉ khi bestmove dính chốt: TẠM bật MultiPV=ENGINE_MULTIPV_FALLBACK,
+             tính lại, rồi lấy nước ứng viên TỐT NHẤT TIẾP THEO theo đúng thứ tự
+             xếp hạng của engine (không dùng heuristic tự chế nào).
+          3. Kết thúc luôn trả MultiPV về giá trị gốc.
+        """
+        def _search(movetime):
+            self._sync_engine()
+            self.multipv.clear()
+            self._latest_bestmove = None
+            self._mate_status = None
+            pos_cmd = f"position fen {fen}"
+            if moves: pos_cmd += " moves " + " ".join(moves)
+            self._fsf_cmd(pos_cmd)
+            self._fsf_cmd(f"go movetime {movetime}")
+            _wait = time.time()
+            while time.time() - _wait < (movetime / 1000.0) + 1.5:
+                if self._latest_bestmove: break
+                time.sleep(0.02)
+            if not self._latest_bestmove:
+                self._fsf_cmd("stop")
+                _t = time.time()
+                while time.time() - _t < 1.5:
+                    if self._latest_bestmove: break
+                    time.sleep(0.02)
+            return self._latest_bestmove
+
+        raw = _search(2500)
+        if not raw:
+            return None
+        parts = raw.split()
+        best_move = parts[1] if len(parts) >= 2 else None
+        if not best_move or best_move in ("(none)", "0000"):
+            return raw
+        if not self._move_hits_fixed_pawn(best_move, fixed_positions):
+            return raw
+
+        # --- Bestmove dính chốt khóa -> mới cần MultiPV ---
+        print(f"[ENGINE] ⚠️ Bestmove {best_move} xuất phát từ chốt bị khóa "
+              f"-> tạm bật MultiPV={ENGINE_MULTIPV_FALLBACK} tìm nước thay thế")
+        self._fsf_cmd(f"setoption name MultiPV value {ENGINE_MULTIPV_FALLBACK}")
+        try:
+            raw2 = _search(2500) or raw
+            for cand in self.multipv.candidates():
+                if not self._move_hits_fixed_pawn(cand, fixed_positions):
+                    print(f"[ENGINE] ✅ Chọn nước thay thế hạng kế tiếp của engine: {cand}")
+                    return f"bestmove {cand}"
+            print("[ENGINE] ⚠️ Mọi nhánh MultiPV đều dính chốt -> giữ bestmove gốc")
+            return raw2
+        finally:
+            # Luôn trả MultiPV về mặc định
+            self._fsf_cmd(f"setoption name MultiPV value {ENGINE_MULTIPV}")
 
     def _next_candidate_excluding(self, fen, moves, excluded):
         """Lấy nước xếp hạng cao nhất của engine mà KHÔNG nằm trong `excluded`.
@@ -1126,6 +1163,17 @@ class PikafishBot:
             return None
         finally:
             self._fsf_cmd(f"setoption name MultiPV value {ENGINE_MULTIPV}")
+
+    def _move_hits_fixed_pawn(self, move_str, fixed_positions):
+        """Kiểm tra nước đi có bắt đầu từ vị trí chốt cố định không."""
+        if not fixed_positions or len(move_str) < 4:
+            return False
+        try:
+            # ★ FIX FLIP: đổi UCI -> server pos qua cùng một phép biến đổi với FEN.
+            src_pos, _ = self.board.engine_move_to_pos(move_str)
+            return src_pos in fixed_positions
+        except (ValueError, IndexError):
+            return False
 
     def connect(self):
         import websocket
@@ -1178,6 +1226,7 @@ class PikafishBot:
         self._bet_amts_loaded = False
         self._resolved_bet_id = None
         self.bet_amts = []
+        self.fixed_pawn_positions = set()
         self.board.reset()
 
     def send_message(self, cmd, data=b''):
@@ -1205,24 +1254,15 @@ class PikafishBot:
     def send_list_bet_amt(self): self.send_message("LIST_BET_AMT")
 
     
-    def get_target_bet_objs(self):
-        """Các mức cược bot chấp nhận dò bàn: đúng thang BOT_BET_LEVELS.
-
-        ★ SỬA: bản cũ chỉ lọc 5000..10000 nên bỏ sót 20000 và 50000.
-        Ưu tiên mức đang dùng (BOT_BET_XU) lên đầu, phần còn lại xáo ngẫu nhiên.
-        """
+    def get_1k_to_5k_bet_objs(self):
+        """Trả về danh sách cược trong khoảng 500-10000xu, xáo trộn ngẫu nhiên."""
         if not self.bet_amts:
             return []
-        valid = [ba for ba in self.bet_amts if ba["value"] in BOT_BET_LEVELS]
+        valid = [ba for ba in self.bet_amts if 5000 <= ba["value"] <= 10000]
         if valid:
-            cur = [ba for ba in valid if ba["value"] == BOT_BET_XU]
-            rest = [ba for ba in valid if ba["value"] != BOT_BET_XU]
-            random.shuffle(rest)
-            return cur + rest
+            random.shuffle(valid)
+            return valid
         return [self.bet_amts[0]] if self.bet_amts else []
-
-    # Giữ tên cũ để không vỡ chỗ gọi khác (nếu có)
-    get_1k_to_5k_bet_objs = get_target_bet_objs
 
     def is_family_bot(self, name):
         """Nhận diện bot đồng đội: tên hiển thị chứa dấu chấm '.' (do chính bot đặt)."""
@@ -1231,11 +1271,11 @@ class PikafishBot:
         return "." in name
 
     def leave_table(self):
-        """Rời bàn hiện tại và quay về sảnh để tiếp tục dò bàn trong thang cược."""
+        """Rời bàn hiện tại và quay về sảnh để tiếp tục dò bàn 500-10k."""
         if self.board.is_playing:
             print("[TABLE] ⚠️ Đang trong ván đấu -> Khóa không rời bàn cho đến khi GAMEOVER!")
             return
-        print(f"[TABLE] 🚪 Rời bàn, về sảnh dò bàn mức {BOT_BET_XU} xu...")
+        print("[TABLE] 🚪 Rời bàn chơi, quay lại sảnh tiếp tục dò tìm bàn 500-10k...")
         if getattr(self, '_table_path', None):
             unregister_bot_table(self._table_path)
         self.in_game = False
@@ -1251,71 +1291,43 @@ class PikafishBot:
         self._enter_fail_at = 0.0
         self.send_enter_place(PLACE_PATH)
 
-    def _set_bet_level(self, new_bet, reason=""):
-        """Đổi mức cược sang new_bet (đã kẹp trong thang BOT_BET_LEVELS)."""
+    def _lower_bet_level(self):
+        """Giảm mức cược xuống 1 bậc rồi tạo bàn mới. Nếu đã ở mức thấp nhất thì giữ nguyên."""
         global BOT_BET_XU
-        old = BOT_BET_XU
-        BOT_BET_XU = new_bet
-        if new_bet != old:
-            arrow = "📈 Tăng" if new_bet > old else "📉 Giảm"
-            print(f"[BET] {arrow} mức cược: {old} -> {new_bet} xu {reason}")
+        if not self.bet_amts:
+            print("[BET] ⚠️ Chưa có danh sách mức cược, gửi yêu cầu lấy lại...")
+            self._bet_amts_loaded = False
+            self.send_list_bet_amt()
+            return
+        current = BOT_BET_XU
+        all_values = sorted(set(ba['value'] for ba in self.bet_amts if ba['value'] > 0))
+        lower_options = [v for v in all_values if v < current]
+        if lower_options:
+            new_bet = max(lower_options)
+            print(f"[BET] 📉 Giảm mức cược: {current} -> {new_bet}")
+            BOT_BET_XU = new_bet
+            self._resolved_bet_id = self.resolve_bet_amt_id()
         else:
-            print(f"[BET] 🔒 Giữ nguyên mức cược {old} xu {reason}")
-        self._resolved_bet_id = self.resolve_bet_amt_id()
-        # Nạp lại danh sách để lấy đúng bet_amt_id trước khi tạo bàn mới
+            print(f"[BET] ⚠️ Đã ở mức cược thấp nhất ({current}), giữ nguyên.")
+            self._resolved_bet_id = self.resolve_bet_amt_id()
         self._bet_amts_loaded = False
         self.send_list_bet_amt()
 
-    def _raise_bet_level(self):
-        """THẮNG -> leo lên 1 bậc trong thang, chạm trần thì giữ nguyên.
-
-        Thang: 5000 -> 10000 -> 20000 -> 50000 (trần).
-        """
-        higher = [v for v in BOT_BET_LEVELS if v > BOT_BET_XU]
-        if higher:
-            self._set_bet_level(min(higher), "(thắng ván trước)")
-        else:
-            self._set_bet_level(BOT_BET_MAX, f"(đã ở mức cao nhất {BOT_BET_MAX})")
-
-    def _lower_bet_level(self):
-        """THUA -> lùi xuống 1 bậc trong thang, chạm SÀN thì giữ nguyên.
-
-        ★ SỬA: bản cũ lấy mức thấp hơn từ TOÀN BỘ danh sách server nên bot cứ
-          thua là tụt dần 1000 -> 500 -> 200 -> 100 xu (thấy rõ trong log cũ).
-          Nay chỉ lùi trong thang BOT_BET_LEVELS và không bao giờ xuống dưới
-          BOT_BET_MIN (5000).
-        """
-        lower = [v for v in BOT_BET_LEVELS if v < BOT_BET_XU]
-        if lower:
-            self._set_bet_level(max(lower), "(thua ván trước)")
-        else:
-            self._set_bet_level(BOT_BET_MIN, f"(đã ở mức sàn {BOT_BET_MIN})")
-
     def resolve_bet_amt_id(self):
-        """Tìm bet_amt_id khớp với BOT_BET_XU, LUÔN nằm trong thang BOT_BET_LEVELS.
-
-        ★ SỬA: fallback cũ là `self.bet_amts[-1]` — phần tử cuối danh sách server
-          lại là mức 0 xu (id=14). Nếu rơi vào nhánh đó, bot tạo bàn 0 xu, chơi
-          xong chẳng ăn thua gì. Nay mọi nhánh dự phòng đều kẹp trong thang cược.
-        """
+        """Tìm bet_amt_id khớp với BOT_BET_XU. Nếu không thấy chính xác,
+        lấy mức thấp nhất ≥ BOT_BET_XU; nếu vẫn không có, lấy mức cao nhất."""
         if not self.bet_amts: return None
-
-        # Chỉ xét các mức nằm trong thang bot được phép chơi
-        allowed = [ba for ba in self.bet_amts if ba["value"] in BOT_BET_LEVELS]
-        if not allowed:
-            print(f"[BET] ⚠️ Server không có mức nào thuộc {BOT_BET_LEVELS}!", flush=True)
-            valid = [ba for ba in self.bet_amts if ba["value"] > 0]
-            return min(valid, key=lambda x: x["value"])['id'] if valid else None
-
-        # Mức chính xác
-        exact = [ba for ba in allowed if ba["value"] == BOT_BET_XU]
+        # Tìm mức chính xác
+        exact = [ba for ba in self.bet_amts if ba["value"] == BOT_BET_XU]
         if exact:
             return exact[0]['id']
-        # Không khớp -> lấy mức gần nhất TRONG THANG (ưu tiên thấp hơn cho an toàn)
-        below = [ba for ba in allowed if ba["value"] <= BOT_BET_XU]
-        if below:
-            return max(below, key=lambda x: x["value"])['id']
-        return min(allowed, key=lambda x: x["value"])['id']
+        # Mức thấp nhất >= BOT_BET_XU
+        above = [ba for ba in self.bet_amts if ba["value"] >= BOT_BET_XU]
+        if above:
+            chosen = min(above, key=lambda x: x['value'])
+            return chosen['id']
+        # Fallback: mức cao nhất có
+        return self.bet_amts[-1]['id'] if self.bet_amts else 0
 
     def send_create_table(self, bet_amt_id=None):
         now = time.time()
@@ -1492,8 +1504,6 @@ class PikafishBot:
         self.bet_amts = [{"id": i, "value": msg.read_int()} for i in range(count)]
         self._resolved_bet_id = self.resolve_bet_amt_id()
         self._bet_amts_loaded = True
-        print("[BET] 📋 Các mức cược server hỗ trợ: "
-              + ", ".join(f"{ba['value']}(id={ba['id']})" for ba in self.bet_amts), flush=True)
 
     def _handle_create_rule_response(self, msg):
         status = msg.read_byte()
@@ -1578,6 +1588,7 @@ class PikafishBot:
         self._enter_fail_at = 0.0
         self._sit_alone_since = None
         self.board.reset()
+        self.fixed_pawn_positions.clear()
         self.board.is_playing = True
         self.in_game = True
         self._joining_table = False
@@ -1613,6 +1624,14 @@ class PikafishBot:
                 my_slot_id = self.board.my_slot_id if self.board.my_slot_id >= 0 else first_turn_slot_id
 
             self.board.set_my_slot(my_slot_id, first_turn_slot_id)
+
+            for sid, face, position, is_open in board_pieces:
+                piece_type = int(face[1]) if len(face) > 1 else 0
+                if piece_type == 7 and position not in STANDARD_PAWN_POSITIONS:
+                    self.fixed_pawn_positions.add(position)
+
+            if self.fixed_pawn_positions:
+                print(f"[GAME] 🛡️ Bàn đấu có {len(self.fixed_pawn_positions)} chốt bị liệt/khóa!")
 
             _built_fen = self._build_fen_from_pieces(board_pieces)
             # ★ TỰ KIỂM TRA CHIỀU FEN: nếu tướng sai nửa bàn -> lật lại và dựng lần 2.
@@ -1880,6 +1899,7 @@ class PikafishBot:
             if not victim:
                 print("[KICK] Không xác định được playerId đối phương -> bỏ qua")
 
+        self.fixed_pawn_positions.clear()
         self.board.reset()
         self.board.is_playing = False
         self.board.is_my_turn = False
@@ -1905,16 +1925,8 @@ class PikafishBot:
                 time.sleep(1.0)
                 self.leave_table()
                 self._lower_bet_level()
-            elif bot_won and BOT_BET_XU < BOT_BET_MAX:
-                # ★ THẮNG -> leo lên bậc cược cao hơn. Mức cược gắn với BÀN, nên
-                #   muốn đổi mức thì phải rời bàn cũ và tạo bàn mới.
-                print(f"[GAME] ✅ Thắng -> Leo bậc cược (đang {BOT_BET_XU} xu) -> tạo bàn mới...")
-                time.sleep(1.0)
-                self.leave_table()
-                self._raise_bet_level()
             else:
-                # Hoà, hoặc thắng khi đã ở mức trần -> ở lại bàn cho nhanh
-                print(f"[GAME] ✅ Thắng/Hoà (mức cược {BOT_BET_XU} xu) -> Ở lại bàn, sẵn sàng ván tiếp...")
+                print("[GAME] ✅ Thắng/Hoà -> Ở lại bàn, sẵn sàng ván tiếp...")
                 time.sleep(3.0)
                 self.send_ready(1)
         threading.Thread(target=after_gameover, daemon=True).start()
@@ -1935,12 +1947,13 @@ class PikafishBot:
             if not self.engine: return
 
         fen, moves = self.board.get_current_fen()
+        fixed = self.fixed_pawn_positions if self.fixed_pawn_positions else None
 
         # ★ DEBUG: FEN đầu ván + toàn bộ nước đi (engine tự dựng thế cờ hiện tại)
         print(f"[ENGINE-IN] FEN: {fen}", flush=True)
         print(f"[ENGINE-IN] moves({len(moves)}): {' '.join(moves) if moves else '(chưa có)'}", flush=True)
 
-        raw_bestmove_line = self.get_best_move(fen, moves)
+        raw_bestmove_line = self.get_best_move(fen, moves, fixed_positions=fixed)
         # ★ FALLBACK: engine chết giữa chừng -> restart rồi nạp LẠI ĐÚNG ván này.
         #   (Bản cũ retry bằng FEN ĐẦU VÁN với 0 nước đi => bestmove tính trên bàn
         #    cờ lúc khai cuộc, gửi lên server là 'NoPieceAtSourcePosition'.)
@@ -1948,26 +1961,15 @@ class PikafishBot:
             # Engine chết HOẶC không kịp trả lời -> khởi động lại (nếu cần) và thử lại
             # tối đa 2 lần với ĐÚNG ván đang chơi. Không bao giờ nạp lại ván khác.
             for _attempt in (1, 2):
-                _dead = (self._engine_proc is None or self._engine_proc.poll() is not None)
-                if _dead:
+                if self._engine_proc is None or self._engine_proc.poll() is not None:
                     print(f"[ENGINE] ⚠️  Engine chết! Khởi động lại (lần {_attempt}) "
                           f"rồi nạp lại đúng ván đang chơi...", flush=True)
+                    self._init_engine()
+                    if not self.engine:
+                        break
                 else:
-                    # ★ FIX TREO-NHUNG-CON-SONG:
-                    #   Bản cũ chỉ restart khi poll() != None (tiến trình đã thoát).
-                    #   Nhưng PKJQ qua wine hay rơi vào trạng thái CÒN SỐNG mà KHÔNG
-                    #   trả lời gì nữa (không 'readyok', không 'bestmove'). Khi đó
-                    #   bản cũ gọi lại get_best_move() trên ĐÚNG tiến trình treo đó
-                    #   -> lại chờ hết timeout -> lại trượt. Lặp mãi, sinh đúng cặp log
-                    #   "Không lấy được nước đi" + "12s chưa đi được -> tính lại".
-                    #   Engine đã câm thì phải GIẾT rồi dựng lại, không thử lại suông.
-                    print(f"[ENGINE] ⚠️  Engine treo (còn sống nhưng câm) -> giết và "
-                          f"khởi động lại (lần {_attempt})...", flush=True)
-                    self._kill_engine()
-                self._init_engine()
-                if not self.engine:
-                    break
-                raw_bestmove_line = self.get_best_move(fen, moves)
+                    print(f"[ENGINE] ⚠️  Engine không trả lời kịp -> thử lại (lần {_attempt})", flush=True)
+                raw_bestmove_line = self.get_best_move(fen, moves, fixed_positions=fixed)
                 if raw_bestmove_line:
                     break
         if not raw_bestmove_line:
@@ -2079,6 +2081,7 @@ class PikafishBot:
                     self._bet_amts_loaded = False
                     self._resolved_bet_id = None
                     self.bet_amts = []
+                    self.fixed_pawn_positions = set()
                     self.board.reset()
                     if not self.connect():
                         time.sleep(5); continue
@@ -2109,7 +2112,7 @@ class PikafishBot:
                             else:
                                 elapsed = time.time() - self._sit_alone_since
                                 if elapsed >= 30.0:
-                                    print(f"[TABLE] ⏱️ Đã chờ {int(elapsed)}s không có người chơi -> Rời bàn, tìm bàn mức {BOT_BET_XU} xu")
+                                    print(f"[TABLE] ⏱️ Đã chờ {int(elapsed)}s không có người chơi -> Rời bàn tiếp tục tìm bàn 500-10k")
                                     self.leave_table()
                         else:
                             self._sit_alone_since = None
@@ -2134,7 +2137,7 @@ class PikafishBot:
                             print(f"[CREATE] 🪑 Tạo bàn cờ úp {BOT_BET_XU} xu (bet_amt_id={bid})...")
                             self.send_create_table(bet_amt_id=bid)
                         else:
-                            valid_bets = self.get_target_bet_objs()
+                            valid_bets = self.get_1k_to_5k_bet_objs()
                             if valid_bets:
                                 bet_obj = random.choice(valid_bets)
                                 room = random.choice(self.ROOM_LIST)
@@ -2142,7 +2145,7 @@ class PikafishBot:
                                 self.send_quick_play(room_id=room, bet_amt_id=bet_obj['id'])
                                 self._quick_play_attempts += 1
                             else:
-                                print(f"[SEARCH] ❌ Không thấy bàn ở mức {BOT_BET_LEVELS} -> TẠO BÀN MỚI")
+                                print(f"[SEARCH] ❌ Không tìm thấy mức cược 500-10k -> TẠO BÀN MỚI")
                                 self.send_create_table()
                                 self._quick_play_attempts = 0
                 time.sleep(1)
