@@ -17,6 +17,8 @@ Các fix quan trọng đã áp dụng:
   7. Reconnect: exponential backoff, tránh spam server.
   8. Single-instance lock theo USER.
   9. Không RAM-learn: dùng thẳng bestmove của PKJQ.
+ 10. record_move TỰ ĐỘNG trừ BAG khi nước đi có lật quân (fix test_cup_flip).
+     _handle_move chỉ append thủ công khi quân đi KHÔNG úp mà có quân bị ăn.
 """
 
 import struct
@@ -502,10 +504,26 @@ class XiangqiBoardTracker:
         self.dark_positions.clear()
 
     def record_move(self, mv, revealed_char=None):
+        """Ghi 1 nước đi.
+
+        Args:
+            mv:            nước UCI, vd 'e3e4'
+            revealed_char: chữ cái quân VỪA LẬT (nếu có). Với nước đi làm lật
+                           quân (quân úp di chuyển), engine cần hậu tố chữ cái
+                           này trong chuỗi 'moves'. Với quân bị ăn lật ra mà
+                           quân đi không úp -> KHÔNG truyền vào đây.
+
+        ★ Tự động trừ BAG: mỗi chữ cái được truyền vào sẽ append một lần vào
+          `revealed_chars` (dùng cho bag_string). Điều này khiến
+          `record_move("e3e4", "P")` ngay lập tức phản ánh vào BAG (P5 -> P4)
+          mà không cần append thủ công từ _handle_move.
+        """
         self.move_history.append(mv)
         self.moves_since_base.append(mv)
         uci = mv + (revealed_char or "")
         self.uci_moves.append(uci)
+        if revealed_char:
+            self.revealed_chars.append(revealed_char)
         return uci
 
     def set_my_slot(self, slot_id, first_turn_slot_id):
@@ -1435,6 +1453,10 @@ class PikafishBot:
           Hậu tố chữ cái CHỈ được thêm khi quân ĐI là quân ÚP (src in dark_positions).
           Nếu quân ngửa ăn quân úp -> quân úp lật ra nhưng KHÔNG thêm hậu tố vào
           nước đi (sẽ làm engine hiểu sai quân đi).
+
+        ★ BAG: `record_move` tự append `revealed_chars` khi `move_suffix != None`.
+          Nếu quân đi KHÔNG úp nhưng có quân bị ăn lật ra -> append thủ công
+          (tránh double-append khi quân đi úp).
         """
         try:
             source_pos = msg.read_byte()
@@ -1463,8 +1485,9 @@ class PikafishBot:
             move_suffix = revealed_char if is_dark_move else None
             uci = self.board.record_move(engine_move, move_suffix)
 
-            # Trừ BAG nếu có quân lật (dù do đi hay do bị ăn)
-            if revealed_char:
+            # ★ record_move đã tự append revealed_chars khi move_suffix != None.
+            #   Trường hợp quân đi KHÔNG úp nhưng có quân bị ăn lật ra -> append thủ công.
+            if revealed_char and not is_dark_move:
                 self.board.revealed_chars.append(revealed_char)
 
             self._played_this_turn = False
