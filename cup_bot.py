@@ -5,20 +5,18 @@ cup_bot.py — Cờ Úp Bot (gamevh.net / mystery_xiangqi) — engine PKJQ.exe q
 Engine: PKJQ.exe (Pikafish Cờ Úp) chạy qua wine.
 
 Các fix quan trọng đã áp dụng:
-  1. FEN quân úp: phân định màu theo `sid` (ô xuất phát), KHÔNG theo `face`
-     — vì `face` của quân úp là rác.
-  2. Hậu tố nước đi: CHỈ thêm khi quân ĐI đang ÚP. Quân ngửa ăn quân úp
-     không được thêm hậu tố (nếu không engine hiểu sai -> NoPieceAtSource).
-  3. Track `dark_positions` (ô server 0..89 đang có quân úp) để quyết định
-     hậu tố chính xác.
-  4. FEN hướng: dò từ vị trí TƯỚNG (detect_flip), không đoán theo màu bot.
-  5. Sanity check FEN 2 lớp — nếu sai thì tự lật.
-  6. Anti-loop: cấm nước server đã từ chối, dùng MultiPV lấy nước kế tiếp.
-  7. Reconnect: exponential backoff, tránh spam server.
-  8. Single-instance lock theo USER.
-  9. Không RAM-learn: dùng thẳng bestmove của PKJQ.
- 10. record_move TỰ ĐỘNG trừ BAG khi nước đi có lật quân (fix test_cup_flip).
-     _handle_move chỉ append thủ công khi quân đi KHÔNG úp mà có quân bị ăn.
+  1. FEN quân úp: phân định màu theo `sid` (ô xuất phát), KHÔNG theo `face`.
+  2. Hậu tố nước đi: CHỈ thêm khi quân ĐI đang ÚP.
+  3. Track `dark_positions` (ô server 0..89 đang có quân úp).
+  4. FEN hướng: dò từ vị trí TƯỚNG (detect_flip), có sanity check 2 lớp.
+  5. Anti-loop: cấm nước server đã từ chối, dùng MultiPV lấy nước kế tiếp.
+  6. Reconnect: exponential backoff.
+  7. Single-instance lock theo USER.
+  8. KHÔNG RAM-learn: dùng thẳng bestmove của PKJQ.
+  9. record_move TỰ ĐỘNG trừ BAG + CHỐNG DOUBLE-APPEND (dedup uci).
+ 10. Validate BAG vs moves trước khi nạp engine — tự tính lại BAG nếu lệch.
+ 11. Fallback FEN trần khi engine crash loop >= 2 lần cho cùng thế cờ.
+ 12. Bỏ lượt an toàn khi chuỗi moves quá dài (>40) — tránh PKJQ crash.
 """
 
 import struct
@@ -37,8 +35,10 @@ import random
 import urllib.request, urllib.parse, http.cookiejar
 
 
+# ============================================================================
+# HTTP SESSION (urllib shim giống requests.Session)
+# ============================================================================
 class _UrllibSession:
-    """Wrapper cho urllib opener có API giống requests.Session (get/post/url/text)."""
     def __init__(self):
         self.cj = http.cookiejar.CookieJar()
         self.op = urllib.request.build_opener(
@@ -119,6 +119,11 @@ ENGINE_MULTIPV = 1
 ENGINE_MULTIPV_FALLBACK = 3
 MIN_MOVE_SECONDS = 2.0
 
+# ★ Giới hạn an toàn cho chuỗi moves gửi PKJQ. Vượt ngưỡng này PKJQ có
+#   xu hướng crash (assert BAG không khớp). Khi vượt, bot bỏ lượt để tránh
+#   crash loop làm mất bàn.
+MAX_SAFE_MOVES = 40
+
 KICK_MODE = "when_lose"
 KICK_DELAY = 5.0
 
@@ -134,10 +139,6 @@ VN_TEN_DAU = [
     "Sơn", "Hải", "Phong", "Thắng", "Trung", "Kiên", "Quân", "Thanh", "Đạt", "Khoa",
     "Phúc", "Nghĩa", "Trọng", "Quang", "Bảo", "Khánh", "Hiếu", "Lâm", "Trí", "Thịnh",
     "Lộc", "Phát", "Tiến", "Việt", "Duy", "Vĩnh", "Phước", "Bình", "Đăng", "Tùng",
-    "Vũ", "An", "Bách", "Công", "Đại", "Hiệp", "Hòa", "Khai", "Khang", "Khôi",
-    "Mạnh", "Nhật", "Phi", "Phú", "Sang", "Tài", "Tâm", "Thái", "Thuận", "Toàn",
-    "Triết", "Từ", "Linh", "Trang", "Lan", "Mai", "Hương", "Ngọc", "Thảo", "Vy",
-    "Hân", "Châu", "Nhi", "Yến", "Quỳnh", "Ngân", "Trâm", "Phương", "Huyền", "Thủy",
 ]
 
 VN_TEN_KHONG_DAU = [
@@ -413,6 +414,11 @@ for _c in [0, 2, 4, 6, 8]:
     STANDARD_PAWN_POSITIONS.add(3 * 9 + _c)
 
 
+# BAG chuẩn của cờ úp (không tính 2 tướng lộ sẵn)
+INITIAL_BAG = {'A':2,'B':2,'N':2,'R':2,'C':2,'P':5,
+               'a':2,'b':2,'n':2,'r':2,'c':2,'p':5}
+
+
 class XiangqiBoardTracker:
     """
     Theo dõi bàn cờ úp.
@@ -435,18 +441,14 @@ class XiangqiBoardTracker:
         self.moves_since_base = []
         self.start_fen = self.INITIAL_FEN.split(' ')[0]
         self.start_side = 'w'
-        self.uci_moves = []            # nước cho engine, vd 'e3e4P' (P = quân vừa lật)
+        self.uci_moves = []
         self.my_slot_id = -1
         self.first_turn_slot_id = 0
         self.is_my_turn = False
         self.is_playing = False
         self.is_red = None
-        # Danh sách chữ cái quân ĐÃ LẬT trong ván (để trừ BAG).
         self.revealed_chars = []
-        # ★ Ô server (0..89) đang có quân ÚP. Dùng để quyết định có thêm hậu tố
-        #   chữ cái vào nước đi hay không (chỉ khi quân ĐI là quân úp).
         self.dark_positions = set()
-        # Hướng bàn cờ: True = server row 0 là phía ĐỎ
         self.flip = False
         self.flip_known = False
 
@@ -472,22 +474,40 @@ class XiangqiBoardTracker:
                 self.rc_to_pos(9 - t_rank, t_col))
 
     def bag_string(self):
-        bag = {'A': 2, 'B': 2, 'N': 2, 'R': 2, 'C': 2, 'P': 5,
-               'a': 2, 'b': 2, 'n': 2, 'r': 2, 'c': 2, 'p': 5}
+        bag = dict(INITIAL_BAG)
         for ch in self.revealed_chars:
             if ch in bag:
                 bag[ch] = max(0, bag[ch] - 1)
         out = "".join(f"{k}{v}" for k, v in bag.items() if v > 0)
         return out or "-"
 
+    def bag_from_moves(self):
+        """★ Tính BAG CHỈ từ hậu tố chữ cái trong uci_moves (nguồn sự thật đáng
+        tin hơn revealed_chars vì engine phải apply cùng chuỗi này)."""
+        bag = dict(INITIAL_BAG)
+        for uci in self.uci_moves:
+            if len(uci) == 5 and uci[4].isalpha():
+                ch = uci[4]
+                if ch in bag:
+                    bag[ch] = max(0, bag[ch] - 1)
+        out = "".join(f"{k}{v}" for k, v in bag.items() if v > 0)
+        return out or "-"
+
+    def bag_consistency_ok(self):
+        """★ Kiểm tra BAG từ revealed_chars có khớp BAG từ uci_moves không.
+        Lệch nghĩa là bot đã miss một số MOVE packet — engine sẽ crash nếu nạp
+        BAG sai với chuỗi moves.
+        """
+        return self.bag_string() == self.bag_from_moves()
+
     def get_current_fen(self):
         """Trả về (fen_đầu_ván, danh_sách_nước).
 
-        ★ Nạp FEN ĐẦU VÁN + toàn bộ nước đi (kèm hậu tố chữ cái khi có lật).
-          PKJQ không parse được FEN có quân úp rời ô xuất phát — phải để engine
-          tự cập nhật thế cờ qua 'moves'.
+        ★ Nếu BAG không khớp giữa 2 nguồn, ưu tiên BAG TÍNH TỪ MOVES (khớp
+          với chuỗi moves engine sẽ apply).
         """
-        fen = f"{self.start_fen} {self.bag_string()} {self.start_side} - - 0 1"
+        bag = self.bag_from_moves() if not self.bag_consistency_ok() else self.bag_string()
+        fen = f"{self.start_fen} {bag} {self.start_side} - - 0 1"
         return fen, list(self.uci_moves)
 
     def set_base(self, board_fen, side='w'):
@@ -508,19 +528,18 @@ class XiangqiBoardTracker:
 
         Args:
             mv:            nước UCI, vd 'e3e4'
-            revealed_char: chữ cái quân VỪA LẬT (nếu có). Với nước đi làm lật
-                           quân (quân úp di chuyển), engine cần hậu tố chữ cái
-                           này trong chuỗi 'moves'. Với quân bị ăn lật ra mà
-                           quân đi không úp -> KHÔNG truyền vào đây.
+            revealed_char: chữ cái quân VỪA LẬT (nếu có)
 
-        ★ Tự động trừ BAG: mỗi chữ cái được truyền vào sẽ append một lần vào
-          `revealed_chars` (dùng cho bag_string). Điều này khiến
-          `record_move("e3e4", "P")` ngay lập tức phản ánh vào BAG (P5 -> P4)
-          mà không cần append thủ công từ _handle_move.
+        ★ Tự động trừ BAG: append `revealed_char` vào `revealed_chars`.
+        ★ CHỐNG DOUBLE-APPEND: nếu uci giống hệt cái vừa append -> bỏ qua
+          (chống trường hợp server gửi lại cùng MOVE packet 2 lần).
         """
+        uci = mv + (revealed_char or "")
+        # Chống double-append
+        if self.uci_moves and self.uci_moves[-1] == uci:
+            return uci
         self.move_history.append(mv)
         self.moves_since_base.append(mv)
-        uci = mv + (revealed_char or "")
         self.uci_moves.append(uci)
         if revealed_char:
             self.revealed_chars.append(revealed_char)
@@ -654,6 +673,9 @@ class PikafishBot:
         self._readyok = False
         self._last_sent_move = None
         self._rejected_moves = set()
+        # ★ Đếm số lần engine crash cho CÙNG một chuỗi moves để bật fallback
+        self._engine_crash_fingerprint = None
+        self._engine_crash_count = 0
         self._mate_regex = re.compile(r"score mate (-?\d+)")
         self._score_regex = re.compile(r"depth (\d+).*score (cp|mate) (-?\d+)")
         self._last_score = "?"
@@ -1201,7 +1223,6 @@ class PikafishBot:
             self._resolved_bet_id = None
             self.send_list_bet_amt()
         else:
-            # Gói 401 ngẫu nhiên khi bot đang trong bàn -> bỏ qua
             pass
 
     def _handle_quick_play_response(self, msg):
@@ -1308,6 +1329,8 @@ class PikafishBot:
         self._reconnect_streak = 0
         self._enter_fail_at = 0.0
         self._sit_alone_since = None
+        self._engine_crash_fingerprint = None
+        self._engine_crash_count = 0
         self.board.reset()
         self.fixed_pawn_positions.clear()
         self.board.is_playing = True
@@ -1339,7 +1362,6 @@ class PikafishBot:
             # Dò hướng bàn cờ từ vị trí tướng + dựng FEN
             _built_fen = self._build_fen_from_pieces(board_pieces)
 
-            # Sanity check 2 lớp
             _ok, _why = self.board.sanity_check_fen(_built_fen)
             if not _ok:
                 print(f"[FEN] ⚠️ FEN sai chiều ({_why}) -> tự lật")
@@ -1355,7 +1377,6 @@ class PikafishBot:
 
             self.board.set_base(_built_fen, 'w')
 
-            # Nạp lại dark_positions sau set_base (vì set_base clear nó)
             for sid, face, position, is_open in board_pieces:
                 if not is_open and 0 <= position < 90:
                     self.board.dark_positions.add(position)
@@ -1368,7 +1389,7 @@ class PikafishBot:
 
             self.board.revealed_chars = []
             print(f"[FEN] 📋 base = {self.board.base_fen}")
-            print(f"[START_MATCH] BAG = {self.board.bag_string()}")
+            print(f"[START_MATCH] BAG đầu = {self.board.bag_string()}")
             print(f"[START_MATCH] dark_positions = {len(self.board.dark_positions)} ô")
 
             if my_slot_id == first_turn_slot_id:
@@ -1379,30 +1400,15 @@ class PikafishBot:
             print(f"[START_MATCH ERROR] {e}")
 
     # ---------------------------------------------------------------
-    # ★ DỰNG FEN CỜ ÚP — 2 method cho tương thích + rõ ràng
+    # ★ DỰNG FEN CỜ ÚP
     # ---------------------------------------------------------------
     def _build_fen_from_pieces(self, pieces):
-        """Dựng FEN cờ úp từ danh sách (sid, face, position, is_open).
-
-        ★ Wrapper giữ API tương thích test_cup_flip.py:
-          1. Dò hướng bàn cờ từ vị trí TƯỚNG (board.detect_flip)
-          2. Gọi _rebuild_fen_with_current_flip để dựng chuỗi FEN
-
-        Test gọi method này với cả 4 tổ hợp (đỏ trên/dưới × bot đỏ/đen) và
-        yêu cầu FEN luôn có 'K' ở nửa dưới, 'k' ở nửa trên.
-        """
+        """Wrapper cho test_cup_flip.py: detect_flip + rebuild."""
         self.board.detect_flip(pieces)
         return self._rebuild_fen_with_current_flip(pieces)
 
     def _rebuild_fen_with_current_flip(self, pieces):
-        """Dựng FEN cờ úp.
-
-        ★ QUAN TRỌNG:
-          - Quân NGỬA: dùng `face` (color + type) -> 'K','A','B','R','C','N','P'
-            cho đỏ, chữ thường cho đen.
-          - Quân ÚP: dùng `sid` (ô xuất phát) để phân định màu -> 'X' (đỏ) / 'x' (đen).
-            KHÔNG dùng `face` vì byte face của quân úp là rác (thường = 0).
-        """
+        """Dựng FEN cờ úp."""
         board = [['.' for _ in range(9)] for _ in range(10)]
         for sid, face, position, is_open in pieces:
             if position < 0 or position >= 90: continue
@@ -1415,7 +1421,6 @@ class PikafishBot:
                 fen_char = type_to_fen.get(piece_type, '?')
                 if color == 'r': fen_char = fen_char.upper()
             else:
-                # ★ FIX: quân úp phân định màu theo sid (ô xuất phát), KHÔNG theo face
                 fen_char = 'X' if sid.startswith('r') else 'x'
 
             board[fen_row][col] = fen_char
@@ -1447,16 +1452,13 @@ class PikafishBot:
         """Xử lý MOVE: src(u8) tgt(u8) [reveal_count(u8) sid(u8) face(u8)]
 
         ★ FIX CỐT TỬ:
-          - `rest[1]` = sid  (định danh ô xuất phát, KHÔNG dùng làm quân lật)
-          - `rest[2]` = face (mặt thật vừa lật — DÙNG CÁI NÀY cho chữ cái)
+          - `rest[1]` = sid  (định danh ô xuất phát, KHÔNG dùng)
+          - `rest[2]` = face (mặt thật vừa lật — DÙNG CÁI NÀY)
 
-          Hậu tố chữ cái CHỈ được thêm khi quân ĐI là quân ÚP (src in dark_positions).
-          Nếu quân ngửa ăn quân úp -> quân úp lật ra nhưng KHÔNG thêm hậu tố vào
-          nước đi (sẽ làm engine hiểu sai quân đi).
+          Hậu tố chữ cái CHỈ thêm khi quân ĐI là quân ÚP.
 
-        ★ BAG: `record_move` tự append `revealed_chars` khi `move_suffix != None`.
-          Nếu quân đi KHÔNG úp nhưng có quân bị ăn lật ra -> append thủ công
-          (tránh double-append khi quân đi úp).
+        ★ CHỐNG DOUBLE-APPEND: nếu uci giống hệt cái vừa append -> bỏ qua (server
+          gửi lại cùng MOVE packet khi mạng lag).
         """
         try:
             source_pos = msg.read_byte()
@@ -1467,26 +1469,35 @@ class PikafishBot:
             rest = list(msg.data[msg.offset:]) if msg.offset < len(msg.data) else []
             rest_hex = bytes(rest).hex()
 
-            # Trích xuất chữ cái của quân VỪA LẬT (nếu có) — dùng cho BAG
+            # Trích xuất chữ cái quân VỪA LẬT
             revealed_char = None
             if rest and rest[0] > 0 and len(rest) >= 3:
                 cand = self._sid_to_fen_char(rest[2])
                 if cand and cand not in ('k', 'K'):
                     revealed_char = cand
+                else:
+                    # Fallback: thử decode rest[1] (một số protocol khác)
+                    cand2 = self._sid_to_fen_char(rest[1])
+                    if cand2 and cand2 not in ('k', 'K'):
+                        revealed_char = cand2
 
-            # ★ Quyết định hậu tố: CHỈ khi quân ĐI đang úp
             is_dark_move = source_pos in self.board.dark_positions
 
-            # Cập nhật dark_positions: ô nguồn mất úp, ô đích mất úp (bị ăn hoặc thành ngửa)
             self.board.dark_positions.discard(source_pos)
             self.board.dark_positions.discard(target_pos)
 
-            # Hậu tố CHỈ thêm nếu quân đi là quân úp
             move_suffix = revealed_char if is_dark_move else None
+
+            # ★ CHỐNG DOUBLE-APPEND: kiểm tra uci dự kiến trước
+            expected_uci = engine_move + (move_suffix or "")
+            if self.board.uci_moves and self.board.uci_moves[-1] == expected_uci:
+                print(f"[MOVE] ⚠️ Bỏ qua MOVE trùng lặp: {expected_uci}", flush=True)
+                return
+
             uci = self.board.record_move(engine_move, move_suffix)
 
-            # ★ record_move đã tự append revealed_chars khi move_suffix != None.
-            #   Trường hợp quân đi KHÔNG úp nhưng có quân bị ăn lật ra -> append thủ công.
+            # record_move đã tự append revealed_chars khi move_suffix != None.
+            # Nếu quân đi KHÔNG úp nhưng có quân bị ăn lật ra -> append thủ công.
             if revealed_char and not is_dark_move:
                 self.board.revealed_chars.append(revealed_char)
 
@@ -1494,6 +1505,10 @@ class PikafishBot:
             print(f"[MOVE] {engine_move} (src={source_pos} tgt={target_pos})"
                   + (f" 🔓 '{revealed_char}' (dark_move={is_dark_move})" if revealed_char else "")
                   + f" -> engine '{uci}'  [raw {rest_hex}]", flush=True)
+
+            # ★ CẢNH BÁO SỚM: nếu BAG lệch, log để debug
+            if not self.board.bag_consistency_ok():
+                print(f"[BAG] ⚠️ BAG LỆCH: revealed={self.board.bag_string()} vs moves={self.board.bag_from_moves()}", flush=True)
         except Exception as e:
             print(f"[MOVE ERROR] {e}")
 
@@ -1589,6 +1604,8 @@ class PikafishBot:
         self.in_game = True
         self._joining_table = False
         self.last_action_timestamp = time.time()
+        self._engine_crash_fingerprint = None
+        self._engine_crash_count = 0
 
         if getattr(self, '_engine_proc', None) and self._engine_proc.poll() is None:
             self._fsf_cmd("ucinewgame")
@@ -1635,20 +1652,54 @@ class PikafishBot:
         print(f"[ENGINE-IN] FEN: {fen}", flush=True)
         print(f"[ENGINE-IN] moves({len(moves)}): {' '.join(moves) if moves else '(chưa có)'}", flush=True)
 
+        # ★ BẢO VỆ 1: nếu chuỗi moves quá dài, PKJQ dễ crash -> bỏ lượt
+        if len(moves) > MAX_SAFE_MOVES:
+            print(f"[ENGINE] ⚠️ Chuỗi moves quá dài ({len(moves)} > {MAX_SAFE_MOVES}) "
+                  f"-> bỏ lượt để tránh crash loop", flush=True)
+            return
+
+        # ★ BẢO VỆ 2: kiểm tra BAG khớp với chuỗi moves
+        if not self.board.bag_consistency_ok():
+            print(f"[ENGINE] ⚠️ BAG không khớp giữa 2 nguồn — dùng BAG từ moves "
+                  f"({self.board.bag_from_moves()})", flush=True)
+
         raw_bestmove_line = self.get_best_move(fen, moves, fixed_positions=fixed)
+
+        # ★ FALLBACK: engine chết / không trả lời
         if not raw_bestmove_line:
-            for _attempt in (1, 2):
-                if self._engine_proc is None or self._engine_proc.poll() is not None:
-                    print(f"[ENGINE] ⚠️ Engine chết -> restart (lần {_attempt})")
-                    self._init_engine()
-                    if not self.engine: break
+            # Đếm số lần crash cho CÙNG chuỗi moves
+            fp = (fen, tuple(moves))
+            if fp == self._engine_crash_fingerprint:
+                self._engine_crash_count += 1
+            else:
+                self._engine_crash_fingerprint = fp
+                self._engine_crash_count = 1
+
+            if self._engine_crash_count >= 2:
+                # Đã crash 2+ lần cho cùng thế cờ -> fallback
+                print(f"[ENGINE] 🔄 Crash {self._engine_crash_count} lần cho cùng thế cờ "
+                      f"-> FALLBACK về FEN trần + moves rỗng", flush=True)
+                fallback_fen = f"{self.board.start_fen} {self.board.bag_string()} w - - 0 1"
+                raw_bestmove_line = self.get_best_move(fallback_fen, [], fixed_positions=None)
+                if raw_bestmove_line:
+                    print(f"[ENGINE] ✅ Fallback OK: {raw_bestmove_line}", flush=True)
                 else:
-                    print(f"[ENGINE] ⚠️ Không trả lời -> thử lại (lần {_attempt})")
-                raw_bestmove_line = self.get_best_move(fen, moves, fixed_positions=fixed)
-                if raw_bestmove_line: break
+                    print("[ENGINE] ❌ Fallback cũng fail -> bỏ lượt", flush=True)
+                    return
+            else:
+                # Thử restart engine 2 lần
+                for _attempt in (1, 2):
+                    if self._engine_proc is None or self._engine_proc.poll() is not None:
+                        print(f"[ENGINE] ⚠️ Engine chết -> restart (lần {_attempt})", flush=True)
+                        self._init_engine()
+                        if not self.engine: break
+                    else:
+                        print(f"[ENGINE] ⚠️ Không trả lời -> thử lại (lần {_attempt})", flush=True)
+                    raw_bestmove_line = self.get_best_move(fen, moves, fixed_positions=fixed)
+                    if raw_bestmove_line: break
 
         if not raw_bestmove_line:
-            print("[ENGINE] ❌ Không lấy được nước đi", flush=True)
+            print("[ENGINE] ❌ Không lấy được nước đi -> bỏ lượt tính này", flush=True)
             return
 
         parts = raw_bestmove_line.split()
@@ -1656,7 +1707,6 @@ class PikafishBot:
         best_move = parts[1]
         print(f"[ENGINE-OUT] bestmove: {best_move}", flush=True)
 
-        # Chỉ dùng MultiPV khi nước đã bị server từ chối
         if best_move in self._rejected_moves:
             print(f"[ENGINE] ⚠️ '{best_move}' đã bị từ chối -> tìm nước khác")
             alt = self._next_candidate_excluding(fen, moves, self._rejected_moves)
@@ -1683,10 +1733,6 @@ class PikafishBot:
                 print(f"[BOT ERROR] Dịch tọa độ lỗi: {e}")
 
     def _decode_piece_id(self, encoded_id):
-        """Decode encoded_id thành "{color}{type}{instance}".
-
-        CỜ ÚP trên gamevh.net: encoding giống cờ tướng (positive=red, negative=black).
-        """
         color = 'r'
         if encoded_id < 0: encoded_id = -encoded_id; color = 'b'
         return f"{color}{encoded_id >> 3}{'' if (encoded_id & 7) == 0 else (encoded_id & 7)}"
@@ -1803,7 +1849,6 @@ class PikafishBot:
 
 
 def acquire_single_instance_lock():
-    """Chặn 2 tiến trình bot cùng tài khoản (server chỉ cho 1 phiên)."""
     try:
         import fcntl
         path = os.path.join(tempfile.gettempdir(), f"xiangqi_bot_{USER}.lock")
