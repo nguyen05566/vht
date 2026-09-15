@@ -21,3 +21,11 @@ batch_run.log
 # Wine portable + prefix
 wine-portable/
 .wine/
+
+# Engine giải nén + log chạy (không commit)
+Jieqibox/
+jieqibox/
+*.nnue
+cup_bot_run*.log
+.winepfx/
+.wine/

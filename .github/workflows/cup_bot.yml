@@ -20,6 +20,9 @@ jobs:
         run: |
           pip install --break-system-packages websocket-client
 
+      - name: Kiểm tra logic flip FEN (offline, không cần engine)
+        run: python3 test_cup_flip.py
+
       - name: Cài wine portable (Kron4ek 9.0)
         run: |
           mkdir -p wine-portable
@@ -61,8 +64,9 @@ jobs:
           WINEPREFIX: /home/runner/work/vht/vht/.wine
           WINEDEBUG: "-all"
           DISPLAY: ""
+          XDG_RUNTIME_DIR: /tmp/xdg-runtime
         run: |
-          mkdir -p $WINEPREFIX
+          mkdir -p $WINEPREFIX "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
           timeout 45m python3 -u cup_bot.py 2>&1 | tee cup_run.log
 
       - name: Upload log
