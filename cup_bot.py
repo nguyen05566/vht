@@ -2,7 +2,24 @@
 """
 cup_bot.py — Cờ Úp Bot (gamevh.net / mystery_xiangqi) — engine PKJQ.exe qua wine
 ================================================================================
-v6.6 — FIXED ENGINE HANG ISSUE: Corrected _stop_engine_search timeout logic
+★ v6.7 — FIX 3 LỖI GỐC RỄ LÀM ENGINE CRASH GIỮA VÁN
+
+LỖI 1 (FATAL): revealed_chars bị append 2 LẦN (trong _handle_move VÀ record_move)
+      → BAG giảm gấp đôi tốc độ → về A0B0N0R0C0P0a0b0n0r0c0p0 (toàn 0)
+      → PKJQ.exe crash khi nhận thế cờ vô lý (quân úp còn trên bàn, BAG rỗng).
+      FIX: CHỈ append trong record_move (một nguồn duy nhất).
+
+LỖI 2: MOVE trễ (đến sau GAMEOVER) vẫn được ghi vào bàn đã reset
+      → uci_moves của ván mới bị nhiễm nước của ván cũ.
+      FIX: guard `not self.board.is_playing` -> bỏ qua.
+
+LỖI 3: Tọa độ pos=-1 (byte 0xFF) sinh UCI rác "i10i10" (rank 10 không tồn tại)
+      → chuỗi rác nằm trong `moves` gửi engine → PKJQ crash khi parse.
+      FIX: guard tọa độ 0..89 + validate format UCI ^[a-i]\\d[a-i]\\d$ + lọc
+      moves trước khi gửi engine.
+
+LỖI 4: safe_mode dùng movetime_ms trước khi định nghĩa → NameError.
+      FIX: tính movetime TRƯỚC, áp safe_mode SAU.
 """
 
 import struct
@@ -18,6 +35,7 @@ import tempfile
 import json
 import random
 import traceback
+
 import urllib.request, urllib.parse, http.cookiejar
 
 
@@ -31,13 +49,14 @@ class _UrllibSession:
             urllib.request.HTTPCookieProcessor(self.cj),
             urllib.request.HTTPRedirectHandler()
         )
+
         class _Headers:
-            def __init__(self):
-                self.d = {}
+            def __init__(self): self.d = {}
             def update(self, items): self.d.update(items)
             def __setitem__(self, k, v): self.d[k] = v
             def __getitem__(self, k): return self.d[k]
             def __contains__(self, k): return k in self.d
+
         self.headers = _Headers()
         self.headers.update({
             "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -55,10 +74,13 @@ class _UrllibSession:
             for k, v in kw['headers'].items(): h.append((k, v))
         req = urllib.request.Request(url, headers=dict(h))
         r = self.op.open(req, timeout=timeout)
+        self.last_url = r.geturl()
+
         class R:
             def __init__(self, r):
                 self.text = r.read().decode("utf-8", "replace")
                 self.url = r.geturl()
+
         return R(r)
 
     def post(self, url, data=None, timeout=20, headers=None, allow_redirects=True, **kw):
@@ -68,15 +90,19 @@ class _UrllibSession:
             for k, v in headers.items(): h[k] = v
         req = urllib.request.Request(url, data=body, headers=h)
         r = self.op.open(req, timeout=timeout)
+        self.last_url = r.geturl()
+
         class R:
             def __init__(self, r):
                 self.text = r.read().decode("utf-8", "replace")
                 self.url = r.geturl()
+
         return R(r)
 
 
 requests = type('R', (), {'Session': _UrllibSession})()
 
+# ==================== TÀI KHOẢN ====================
 CARO_USER_DIRECT = "nguyen15"
 CARO_PASSWD_DIRECT = "nhat123456"
 
@@ -116,7 +142,7 @@ MOVE_DEADLINE_SECONDS = 25.0
 MAX_SAFE_MOVES = 250
 TRUST_ENGINE_AFTER = 100
 
-MAX_ENGINE_RESTARTS_PER_GAME = 5  # Increased from 2 to 5
+MAX_ENGINE_RESTARTS_PER_GAME = 5
 
 MOVE_DEDUP_WINDOW = 0.1
 
@@ -224,7 +250,7 @@ def is_block_software_message(raw_bytes):
     try:
         idx = raw_bytes.find(b"blockSoftware")
         if idx != -1:
-            snippet = raw_bytes[idx:idx+40]
+            snippet = raw_bytes[idx:idx + 40]
             if b"1" in snippet or b"true" in snippet.lower():
                 return True
     except Exception:
@@ -340,11 +366,14 @@ class Conn:
             result.extend(struct.pack('>H', cmd))
         result.extend(data)
         return bytes(result)
+
     def pack_byte(self, value): return struct.pack('>b', value)
     def pack_int(self, value): return struct.pack('>i', value)
+
     def pack_ascii(self, value):
         encoded = value.encode('ascii')[:255]
         return struct.pack('>b', len(encoded)) + encoded
+
     def pack_string(self, value):
         encoded = value.encode('utf-16-be')
         return struct.pack('>h', len(encoded) // 2) + encoded
@@ -355,6 +384,7 @@ class InboundMessage:
         self.data = bytes(data)
         self.offset = 0
         self.command = self._parse_command()
+
     def _parse_command(self):
         length = self.read_byte()
         if length < 0:
@@ -365,27 +395,40 @@ class InboundMessage:
             next_byte = self.data[self.offset] & 0xFF
             self.offset += 1
             return CMD_NAMES.get((length << 8) | next_byte, str((length << 8) | next_byte))
+
     def read_byte(self):
         val = struct.unpack_from('>b', self.data, self.offset)[0]
-        self.offset += 1; return val
+        self.offset += 1
+        return val
+
     def read_short(self):
         val = struct.unpack_from('>h', self.data, self.offset)[0]
-        self.offset += 2; return val
+        self.offset += 2
+        return val
+
     def read_int(self):
         val = struct.unpack_from('>i', self.data, self.offset)[0]
-        self.offset += 4; return val
+        self.offset += 4
+        return val
+
     def read_long(self):
         val = struct.unpack_from('>q', self.data, self.offset)[0]
-        self.offset += 8; return val
+        self.offset += 8
+        return val
+
     def read_ascii(self):
         length = self.read_byte()
         if length < 0: length += 256
         s = self.data[self.offset:self.offset + length].decode('ascii', errors='replace')
-        self.offset += length; return s
+        self.offset += length
+        return s
+
     def read_string(self):
         char_count = self.read_short()
         s = self.data[self.offset:self.offset + char_count * 2].decode('utf-16-be', errors='replace')
-        self.offset += char_count * 2; return s
+        self.offset += char_count * 2
+        return s
+
     def rem(self):
         return len(self.data) - self.offset
 
@@ -396,9 +439,14 @@ for _c in [0, 2, 4, 6, 8]:
     STANDARD_PAWN_POSITIONS.add(3 * 9 + _c)
 
 
+# ★ BAG chuẩn Pikafish cờ úp — thứ tự A,B,N,R,C,P (khớp test_cup_engine.py)
 INITIAL_BAG = {'A': 2, 'B': 2, 'N': 2, 'R': 2, 'C': 2, 'P': 5,
                'a': 2, 'b': 2, 'n': 2, 'r': 2, 'c': 2, 'p': 5}
 BAG_ORDER = ['A', 'B', 'N', 'R', 'C', 'P', 'a', 'b', 'n', 'r', 'c', 'p']
+
+# ★ Format UCI hợp lệ: 4 ký tự tọa độ + tùy chọn 1 ký tự lật quân
+UCI_MOVE_RE = re.compile(r'^[a-i]\d[a-i]\d$')
+UCI_MOVE_WITH_SUFFIX_RE = re.compile(r'^[a-i]\d[a-i]\d[\w?]?$')
 
 
 class XiangqiBoardTracker:
@@ -444,6 +492,7 @@ class XiangqiBoardTracker:
                 self.rc_to_pos(9 - t_rank, t_col))
 
     def bag_string(self):
+        """BAG đủ 12 entries. Mỗi char lật chỉ trừ 1 lần (append duy nhất ở record_move)."""
         bag = dict(INITIAL_BAG)
         for ch in self.revealed_chars:
             if ch in bag:
@@ -452,7 +501,9 @@ class XiangqiBoardTracker:
 
     def get_current_fen(self):
         fen = f"{self.start_fen} {self.bag_string()} {self.start_side} - - 0 1"
-        return fen, list(self.uci_moves)
+        # ★ v6.7: lọc nước sai format trước khi trả về (phòng thủ)
+        moves = [m for m in self.uci_moves if UCI_MOVE_WITH_SUFFIX_RE.match(m)]
+        return fen, moves
 
     def set_base(self, board_fen, side='w'):
         board_fen = board_fen.split(' ')[0] if ' ' in board_fen else board_fen
@@ -464,6 +515,7 @@ class XiangqiBoardTracker:
         self.dark_positions.clear()
 
     def record_move(self, mv, revealed_char=None):
+        """★ v6.7: NGUỒN DUY NHẤT append revealed_chars (fix double-append)."""
         uci = mv + (revealed_char or "")
         self.uci_moves.append(uci)
         if revealed_char:
@@ -531,14 +583,17 @@ class MultiPVCollector:
     _re = re.compile(
         r"info\b.*?\bdepth (\d+).*?\bmultipv (\d+).*?\bscore (cp|mate) (-?\d+).*?\bpv ([a-i]\d[a-i]\d(?:\s+\S+)*)"
     )
+
     def __init__(self):
         self.lines = {}
         self._best_depth = -1
         self.lock = threading.Lock()
+
     def clear(self):
         with self.lock:
             self.lines.clear()
             self._best_depth = -1
+
     def parse_line(self, line_str):
         m = self._re.search(line_str)
         if not m: return
@@ -553,6 +608,7 @@ class MultiPVCollector:
                 return
             self.lines[rank] = {"move": move, "score": score,
                                 "is_mate": is_mate, "depth": depth}
+
     def candidates(self):
         with self.lock:
             return [self.lines[r]["move"] for r in sorted(self.lines)]
@@ -745,44 +801,33 @@ class PikafishBot:
                          daemon=True).start()
 
         def consume_stdout(proc):
-            """Robust stdout consumer that handles exceptions gracefully."""
             try:
                 while proc.poll() is None:
                     try:
                         line = proc.stdout.readline()
                         if not line:
-                            print("[ENGINE-STDOUT] EOF")
                             break
                         line_str = line.strip()
                         if not line_str:
                             continue
-                        
                         self.multipv.parse_line(line_str)
-                        
                         m = self._score_regex.search(line_str)
                         if m:
                             self._last_depth = m.group(1)
                             self._last_score = ("mate " + m.group(3)) if m.group(2) == "mate" else f"{int(m.group(3)):+d}"
-                        
                         if "score mate" in line_str:
                             mm = self._mate_regex.search(line_str)
                             if mm:
                                 val = int(mm.group(1))
                                 self._mate_status = f"WIN_{val}" if val > 0 else f"LOSE_{abs(val)}"
-                        
                         if line_str == "readyok":
                             self._readyok = True
-                        
                         if line_str.startswith("bestmove"):
                             self._latest_bestmove = line_str
-                    
-                    except Exception as e:
-                        print(f"[ENGINE-STDOUT] Line error: {e}")
-                        break  # Exit thread on error
-            except Exception as e:
-                print(f"[ENGINE-STDOUT] FATAL: {e}")
-            finally:
-                print("[ENGINE-STDOUT] Thread exit")
+                    except Exception:
+                        break
+            except Exception:
+                pass
 
         threading.Thread(target=consume_stdout, args=(self._engine_proc,),
                          daemon=True).start()
@@ -792,24 +837,24 @@ class PikafishBot:
                 self._fsf_cmd_unlocked("uci")
                 _threads = max(1, min(4, (os.cpu_count() or 2) - 1))
                 self._fsf_cmd_unlocked(f"setoption name Threads value {_threads}")
-                self._fsf_cmd_unlocked(f"setoption name Hash value 64")
+                self._fsf_cmd_unlocked("setoption name Hash value 64")
                 self._fsf_cmd_unlocked(f"setoption name MultiPV value {ENGINE_MULTIPV}")
-                self._fsf_cmd_unlocked(f"setoption name EvalFile value pikafish.nnue")
+                self._fsf_cmd_unlocked("setoption name EvalFile value pikafish.nnue")
                 self._readyok = False
                 self._fsf_cmd_unlocked("isready")
-            
+
             _t0 = time.time()
             while not self._readyok and time.time() - _t0 < 20:
                 if self._engine_proc.poll() is not None:
                     print("[ENGINE] ❌ Process exit before ready")
                     return
                 time.sleep(0.1)
-            
+
             if not self._readyok:
-                print("[ENGINE] ⚠️ 20s timeout ready - engine HUNG -> killing")
+                print("[ENGINE] ⚠️ 20s timeout ready")
                 self._kill_engine()
                 return
-            
+
             self.engine = True
             print(f"[ENGINE] ✅ Ready (Threads={_threads})")
         except Exception as e:
@@ -834,14 +879,10 @@ class PikafishBot:
 
     def _wait_ready(self, timeout=5.0):
         self._readyok = False
+        if not self._engine_alive():
+            return False
         with self._engine_lock:
-            try:
-                self._fsf_cmd_unlocked("isready")
-            except Exception as e:
-                print(f"[ENGINE] ⚠️ Send isready error: {e}")
-                self._kill_engine()
-                return False
-        
+            self._fsf_cmd_unlocked("isready")
         _t0 = time.time()
         while time.time() - _t0 < timeout:
             if not self._engine_alive():
@@ -850,37 +891,22 @@ class PikafishBot:
             if self._readyok:
                 return True
             time.sleep(0.05)
-        
-        # If we timeout, the engine is hung - kill and restart
-        print(f"[ENGINE] ⚠️ Timeout {timeout}s ready -> engine HUNG")
-        print("[ENGINE] → Killing + restarting...")
-        self._kill_engine()
-        self._init_engine()
-        return self._engine_alive() and self.engine
+        print(f"[ENGINE] ⚠️ Timeout {timeout}s ready")
+        return False
 
     def _stop_engine_search(self, timeout=0.5):
-        """FIXED: Only wait briefly for a bestmove after stop command.
-        If engine wasn't searching, no bestmove will come - that's OK."""
+        """v6.6: chỉ đợi NGẮN bestmove sau stop — engine không search thì không có bestmove, cứ tiếp tục."""
         if not self._engine_alive():
             return
-        
         with self._engine_lock:
-            try:
-                self._fsf_cmd_unlocked("stop")
-            except Exception as e:
-                print(f"[ENGINE] ⚠️ Lỗi gửi stop: {e}")
-                self._kill_engine()
-                return
-        
-        # Wait briefly for a bestmove (in case engine was searching)
+            self._fsf_cmd_unlocked("stop")
         _t0 = time.time()
         while time.time() - _t0 < timeout:
             if self._latest_bestmove is not None:
-                # Consume the bestmove from previous search
                 self._latest_bestmove = None
                 return
             time.sleep(0.01)
-        # If no bestmove came, engine wasn't searching or is slow - we'll proceed anyway
+        # Không có bestmove = engine không đang search → OK, tiếp tục
 
     def _wait_bestmove(self, timeout):
         self._latest_bestmove = None
@@ -893,42 +919,24 @@ class PikafishBot:
             time.sleep(0.02)
         return None
 
-    def get_best_move(self, fen, moves, fixed_positions=None,
-                      movetime_ms=3000, hard_timeout=6.0):
+    def get_best_move(self, fen, moves, movetime_ms=3000, hard_timeout=6.0):
         try:
-            # Check engine alive
             if not self._engine_alive():
-                print("[ENGINE] ⚠️ Engine dead -> restart")
-                self._init_engine()
-                if not self.engine:
-                    print("[ENGINE] ❌ Restart failed")
-                    return None
-            
-            # Stop search cũ (timeout 0.5s - fixed!)
-            self._stop_engine_search(timeout=0.5)
-            
-            # Wait ready (timeout 3s, if fail then restart + skip)
-            if not self._wait_ready(timeout=3.0):
-                print("[ENGINE] ❌ Not ready -> skip move this turn")
                 return None
-            
-            # Setup search
+            self._stop_engine_search(timeout=0.5)
+            if not self._wait_ready(timeout=3.0):
+                return None
             self.multipv.clear()
             self._latest_bestmove = None
             self._mate_status = None
-            
             pos_cmd = f"position fen {fen}"
             if moves:
                 pos_cmd += " moves " + " ".join(moves)
-            
             with self._engine_lock:
                 self._fsf_cmd_unlocked(pos_cmd)
                 self._fsf_cmd_unlocked(f"go movetime {movetime_ms}")
-            
-            # Wait bestmove
             best = self._wait_bestmove(timeout=hard_timeout)
             if best is None:
-                print("[ENGINE] ⚠️ Timeout bestmove -> force stop")
                 with self._engine_lock:
                     self._fsf_cmd_unlocked("stop")
                 _t = time.time()
@@ -936,26 +944,24 @@ class PikafishBot:
                     if self._latest_bestmove:
                         return self._latest_bestmove
                     time.sleep(0.02)
-                print("[ENGINE] ❌ Still no bestmove")
                 return None
-            
             return best
         except Exception as e:
             print(f"[ENGINE] ERROR get_best_move: {e}")
-            traceback.print_exc()
             return None
 
     def _find_legal_fallback(self, fen, moves):
         try:
             if not self._engine_alive():
                 return None
-            self._stop_engine_search(timeout=1.0)
+            self._stop_engine_search(timeout=0.5)
             if not self._wait_ready(timeout=3.0):
                 return None
             self.multipv.clear()
             self._latest_bestmove = None
             pos_cmd = f"position fen {fen}"
-            if moves: pos_cmd += " moves " + " ".join(moves)
+            if moves:
+                pos_cmd += " moves " + " ".join(moves)
             with self._engine_lock:
                 self._fsf_cmd_unlocked("setoption name MultiPV value 10")
                 self._fsf_cmd_unlocked(pos_cmd)
@@ -976,46 +982,6 @@ class PikafishBot:
         except Exception as e:
             print(f"[FALLBACK] Error: {e}")
             return None
-
-    def _find_any_legal_move(self, fen, moves):
-        """Find ANY legal move as last resort"""
-        try:
-            # If we have previous moves, try to reverse the opponent's last move
-            if moves and len(moves[-1]) >= 4:
-                last = moves[-1]
-                try:
-                    # Reverse last move: e2e4 -> e4e2 (assuming it was a capture or simple move)
-                    from_sq = ord(last[2]) - ord('a') + (9 - int(last[1])) * 9
-                    to_sq = ord(last[0]) - ord('a') + (9 - int(last[3])) * 9
-                    if 0 <= from_sq < 90 and 0 <= to_sq < 90:
-                        # Basic validation: is there a piece at from_sq belonging to us?
-                        # In real implementation, you'd check board state
-                        # For now, just return the reversed move as hope
-                        rev_move = f"{last[2]}{last[3]}{last[0]}{last[1]}"
-                        if rev_move not in self._rejected_moves:
-                            return rev_move
-                except:
-                    pass
-            
-            # Try a few simple forward moves for each piece
-            for sq in range(90):
-                piece_side = 'w' if sq < 45 else 'b'  # Simplified: assume red pieces bottom half
-                if piece_side == self.board.side_to_move:
-                    # Try moving one step forward (simplified)
-                    forward = sq + (9 if self.board.side_to_move == 'w' else -9)
-                    if 0 <= forward < 90:
-                        move_sq = f"{chr(97+sq%9)}{9-sq//9}{chr(97+forward%9)}{9-forward//9}"
-                        if move_sq not in self._rejected_moves:
-                            return move_sq
-                        
-            # Last resort: return first move from history if valid
-            if moves:
-                for mv in reversed(moves):
-                    if len(mv) >= 4 and mv not in self._rejected_moves:
-                        return mv
-        except:
-            pass
-        return None
 
     # ==================== WEBSOCKET ====================
     def connect(self):
@@ -1379,7 +1345,7 @@ class PikafishBot:
                                          daemon=True).start()
                 else:
                     if not self.board.is_playing and self.opponent_player_id() is None:
-                        print(f"[TABLE] No opponent, waiting 30s...")
+                        print("[TABLE] No opponent, waiting 30s...")
                         self._sit_alone_since = time.time()
         except Exception:
             pass
@@ -1510,45 +1476,78 @@ class PikafishBot:
         if not ch: return None
         return ch.upper() if v > 0 else ch
 
+    # ★★★ v6.7 — _handle_move ĐƯỢC VIẾT LẠI HOÀN TOÀN ★★★
     def _handle_move(self, msg):
         with self._move_lock:
             self._move_recv_count += 1
             try:
+                # ★ GUARD 1: nước về sau GAMEOVER -> bỏ qua (không nhiễm bàn mới)
+                if not self.board.is_playing:
+                    self._move_skip_count += 1
+                    print(f"[MOVE] ⚠️ Stale move sau GAMEOVER — bỏ qua "
+                          f"(recv#{self._move_recv_count})", flush=True)
+                    return
+
                 source_pos = msg.read_byte()
                 target_pos = msg.read_byte()
+
+                # ★ GUARD 2: tọa độ ngoài 0..89 (byte 0xFF=-1...) -> bỏ qua
+                # Trước đây pos=-1 sinh UCI rác "i10i10" -> engine crash khi parse!
+                if not (0 <= source_pos < 90 and 0 <= target_pos < 90):
+                    self._move_skip_count += 1
+                    print(f"[MOVE] ⚠️ Tọa độ lệch ({source_pos}->{target_pos}) — bỏ qua "
+                          f"(recv#{self._move_recv_count})", flush=True)
+                    return
+
                 engine_move = self.board.pos_to_engine_move(source_pos, target_pos)
                 self.last_action_timestamp = time.time()
+
+                # ★ GUARD 3: UCI phải đúng format (cột a-i, hàng 0-9)
+                if not UCI_MOVE_RE.match(engine_move):
+                    self._move_error_count += 1
+                    print(f"[MOVE] ⚠️ UCI sai format '{engine_move}' — bỏ qua", flush=True)
+                    return
+
                 rest = list(msg.data[msg.offset:]) if msg.offset < len(msg.data) else []
-                rest_hex = bytes(rest).hex()
+
+                is_dark_move = source_pos in self.board.dark_positions
+                is_flip_move = (source_pos == target_pos)  # lật quân tại chỗ
+
+                # ★ Chỉ nhận reveal khi quân ĐI là quân úp (hoặc lật tại chỗ).
+                # Quân đã mở đi -> rest là dữ liệu khác, KHÔNG tính reveal
+                # (trước đây false-positive làm BAG tụt nhanh).
                 revealed_char = None
-                if rest and rest[0] > 0 and len(rest) >= 3:
+                if (is_dark_move or is_flip_move) and rest and rest[0] > 0 and len(rest) >= 3:
                     cand = self._sid_to_fen_char(rest[2])
                     if cand and cand not in ('k', 'K'):
                         revealed_char = cand
-                is_dark_move = source_pos in self.board.dark_positions
+
                 self.board.dark_positions.discard(source_pos)
                 self.board.dark_positions.discard(target_pos)
-                uci_suffix = None
-                if revealed_char:
-                    uci_suffix = revealed_char
-                    self.board.revealed_chars.append(revealed_char)
-                elif is_dark_move:
-                    uci_suffix = '?'
-                full_uci = engine_move + (uci_suffix or "")
+
+                full_uci = engine_move + (revealed_char or "")
+
                 now = time.time()
                 if (self._last_move_uci == full_uci
                         and (now - self._last_move_time) < MOVE_DEDUP_WINDOW):
                     self._move_skip_count += 1
-                    print(f"[MOVE] ⚠️ Dup: {full_uci}", flush=True)
                     return
+
+                # ★★★ FIX LỖI CHÍNH v6.7: KHÔNG append revealed_chars ở đây!
+                # record_move là nguồn DUY NHẤT append (trước đây append 2 lần
+                # -> BAG về A0B0N0R0C0P0a0b0n0r0c0p0 -> PKJQ crash).
                 self.board.record_move(engine_move, revealed_char)
+
                 self._last_move_uci = full_uci
                 self._last_move_time = now
                 self._played_this_turn = False
+
                 _rev = f" 🔓{revealed_char}" if revealed_char else ""
+                _flip = " 🔄flip" if is_flip_move else ""
                 print(f"[MOVE] #{self._move_recv_count} {engine_move} -> "
-                      f"'{full_uci}'{_rev} "
-                      f"| uci_total={len(self.board.uci_moves)} "
+                      f"'{full_uci}'{_rev}{_flip} "
+                      f"| uci={len(self.board.uci_moves)} "
+                      f"revealed={len(self.board.revealed_chars)} "
                       f"| side={self.board.side_to_move} "
                       f"| BAG={self.board.bag_string()}", flush=True)
             except Exception as e:
@@ -1631,9 +1630,10 @@ class PikafishBot:
         if bot_won: print("[GAME] 🏁 WIN")
         elif bot_lost: print("[GAME] 🏁 LOSE")
         elif my_result is None: print("[GAME] 🏁 END")
-        else: print(f"[GAME] 🏁 DRAW")
+        else: print("[GAME] 🏁 DRAW")
 
         print(f"[SUMMARY] #{self._game_seq} | uci={len(self.board.uci_moves)} | "
+              f"revealed={len(self.board.revealed_chars)} | "
               f"recv={self._move_recv_count} skip={self._move_skip_count} "
               f"err={self._move_error_count} reject={self._play_reject_count} "
               f"restart={self._engine_restart_count} "
@@ -1650,10 +1650,11 @@ class PikafishBot:
             victim = (self.slot_players.get(target_sid)
                       if target_sid is not None else self.opponent_player_id())
 
-        self.fixed_pawn_positions.clear()
-        self.board.reset()
+        # ★ is_playing=False TRƯỚC reset để chặn MOVE trễ (guard trong _handle_move)
         self.board.is_playing = False
         self.board.is_my_turn = False
+        self.fixed_pawn_positions.clear()
+        self.board.reset()
         self.in_game = True
         self._joining_table = False
         self.last_action_timestamp = time.time()
@@ -1685,7 +1686,7 @@ class PikafishBot:
                 time.sleep(3.0); self.send_ready(1)
         threading.Thread(target=after_gameover, daemon=True).start()
 
-    # ==================== MOVE ENGINE ====================
+    # ==================== TÍNH NƯỚC ====================
     def _make_auto_move(self):
         if not self.board.is_my_turn or not self.board.is_playing: return
         if self._thinking: return
@@ -1699,23 +1700,7 @@ class PikafishBot:
             self._thinking = False
 
     def _do_auto_move(self):
-        if not self._engine_alive():
-            print("[ENGINE] Dead -> restart")
-            if self._engine_restart_count < MAX_ENGINE_RESTARTS_PER_GAME:
-                self._engine_restart_count += 1
-                self._init_engine()
-            if not self.engine:
-                print("[ENGINE] ❌ Restart fail"); return
-
-        # Safe mode after too many crashes
-        safe_mode = self._engine_restart_count >= 3
-        if safe_mode:
-            print(f"[ENGINE] ⚠️ Safe mode ON (crash {self._engine_restart_count}x)")
-            # Reduce thinking time and MultiPV
-            movetime_ms = min(movetime_ms, 500)  # Max 500ms
-            with self._engine_lock:
-                self._fsf_cmd_unlocked("setoption name MultiPV value 1")
-
+        # ★ v6.7: tính movetime TRƯỚC (fix NameError của safe_mode v6.6)
         now = time.time()
         deadline = self._turn_deadline if self._turn_deadline > 0 else (now + MOVE_DEADLINE_SECONDS)
         remain = deadline - now
@@ -1726,93 +1711,77 @@ class PikafishBot:
             hard_timeout = min(remain - 1.0, 6.0)
             movetime_ms = min(3000, int((hard_timeout - 1.0) * 1000))
         if hard_timeout < 1.0:
-            print("[TURN] Time out soon"); return
+            print("[TURN] Sắp hết giờ — bỏ lượt tính")
+            return
 
-        fen, moves = self.board.get_current_fen()
+        # Engine chết -> restart
+        if not self._engine_alive():
+            print("[ENGINE] Dead -> restart")
+            if self._engine_restart_count < MAX_ENGINE_RESTARTS_PER_GAME:
+                self._engine_restart_count += 1
+                self._init_engine()
+            if not self.engine:
+                print("[ENGINE] ❌ Restart fail")
+                return
+
+        # Safe mode SAU khi đã có movetime_ms
+        safe_mode = self._engine_restart_count >= 3
+        if safe_mode:
+            movetime_ms = min(movetime_ms, 500)
+            print(f"[ENGINE] ⚠️ Safe mode (crash {self._engine_restart_count}x, "
+                  f"movetime={movetime_ms}ms)")
+
+        fen, moves = self.board.get_current_fen()  # đã lọc nước sai format bên trong
         fixed = self.fixed_pawn_positions if self.fixed_pawn_positions else None
 
         print(f"[ENGINE-IN] FEN: {fen}", flush=True)
         print(f"[ENGINE-IN] moves({len(moves)})", flush=True)
-        print(f"[ENGINE-IN] timeout={hard_timeout:.1f}s", flush=True)
-        print(f"[ENGINE-IN] safe_mode={safe_mode}", flush=True)
+        print(f"[ENGINE-IN] timeout={hard_timeout:.1f}s safe={safe_mode}", flush=True)
 
         if len(moves) > MAX_SAFE_MOVES:
             if len(self.board.uci_moves) >= TRUST_ENGINE_AFTER:
                 pass
             else:
-                print(f"[ENGINE] ⚠️ Moves too long"); return
+                print(f"[ENGINE] ⚠️ Moves quá dài -> bỏ lượt")
+                return
 
-        # Try engine move with retries
-        raw = None
-        engine_failed = False
-        
-        for attempt in range(3):  # Try up to 3 times
-            # Stop previous search
-            self._stop_engine_search(timeout=0.5)
-            
-            # Wait for ready
-            if not self._wait_ready(timeout=2.0):
-                print("[ENGINE] Not ready -> retry")
-                time.sleep(0.2)
-                continue
-                
-            # Clear state
-            self.multipv.clear()
-            self._latest_bestmove = None
-            self._mate_status = None
-            
-            # Configure for safe mode if needed
-            if safe_mode:
-                self._fsf_cmd("setoption name MultiPV value 1")
-                current_movetime = 300  # 300ms in safe mode
-                print(f"[ENGINE] Safe mode: movetime={current_movetime}ms")
-            else:
-                self._fsf_cmd(f"setoption name MultiPV value {ENGINE_MULTIPV}")
-                current_movetime = movetime_ms
-            
-            # Position and go
-            pos_cmd = f"position fen {fen}"
-            if moves: pos_cmd += " moves " + " ".join(moves)
-            with self._engine_lock:
-                self._fsf_cmd_unlocked(pos_cmd)
-                self._fsf_cmd_unlocked(f"go movetime {current_movetime}")
-            
-            # Wait for bestmove
-            best = self._wait_bestmove(timeout=hard_timeout * 0.8)  # Slightly less timeout
-            if best is not None:
-                raw = best
-                break
-            else:
-                print(f"[ENGINE] Attempt {attempt+1}: No bestmove")
-                self._stop_engine_search(timeout=0.5)
-                if not self._engine_alive():
-                    print("[ENGINE] Process died during search")
-                    engine_failed = True
-                    break
-        
-        # If all engine attempts failed
-        if raw is None:
-            print("[ENGINE] ❌ All engine attempts failed")
-            if safe_mode:
-                print("[ENGINE] → Using random legal move")
-                fallback_move = self._find_any_legal_move(fen, moves)
-                if fallback_move:
-                    raw = f"bestmove {fallback_move}"
-                else:
-                    print("[ENGINE] ❌ No legal move found")
-                    return
-            else:
-                print("[ENGINE] → Trying MultiPV fallback")
-                fallback_move = self._find_legal_fallback(fen, moves)
-                if fallback_move:
-                    raw = f"bestmove {fallback_move}"
-                else:
-                    print("[ENGINE] ❌ MultiPV failed")
-                    return
+        raw = self.get_best_move(fen, moves, movetime_ms=movetime_ms,
+                                 hard_timeout=hard_timeout)
 
-        # Validate and process the move
         if not raw:
-            print("[ENGINE] ❌ No move"); return
+            fp = (fen, tuple(moves))
+            if fp == self._engine_crash_fingerprint:
+                self._engine_crash_count += 1
+            else:
+                self._engine_crash_fingerprint = fp
+                self._engine_crash_count = 1
+            if self._engine_crash_count >= 2:
+                print(f"[ENGINE] Crash x{self._engine_crash_count} -> fallback FEN trần", flush=True)
+                fallback_fen = f"{self.board.start_fen} {self.board.bag_string()} w - - 0 1"
+                raw = self.get_best_move(fallback_fen, [],
+                                         movetime_ms=movetime_ms,
+                                         hard_timeout=hard_timeout)
+            else:
+                for attempt in (1, 2):
+                    if not self._engine_alive():
+                        if self._engine_restart_count >= MAX_ENGINE_RESTARTS_PER_GAME:
+                            break
+                        self._engine_restart_count += 1
+                        self._init_engine()
+                        if not self.engine: break
+                    raw = self.get_best_move(fen, moves, movetime_ms=movetime_ms,
+                                             hard_timeout=hard_timeout)
+                    if raw: break
+
+        if not raw:
+            print("[ENGINE] -> MultiPV fallback", flush=True)
+            fallback_move = self._find_legal_fallback(fen, moves)
+            if fallback_move:
+                raw = f"bestmove {fallback_move}"
+
+        if not raw:
+            print("[ENGINE] ❌ Không có nước — bỏ lượt", flush=True)
+            return
 
         parts = raw.split()
         if len(parts) < 2: return
@@ -1823,25 +1792,25 @@ class PikafishBot:
             alt = self._find_legal_fallback(fen, moves)
             if alt: best_move = alt
         if best_move in ("(none)", "0000"):
-            self.board.is_my_turn = False; return
+            self.board.is_my_turn = False
+            return
 
-        if best_move:
-            try:
-                source_pos, target_pos = self.board.engine_move_to_pos(best_move)
-                _turn_start = self._turn_started_at if self._turn_started_at > 0 else time.time()
-                _remain_min = MIN_MOVE_SECONDS - (time.time() - _turn_start)
-                if _remain_min > 0: time.sleep(_remain_min)
-                if not (self.board.is_my_turn and self.board.is_playing): return
-                if self._played_this_turn: return
+        try:
+            source_pos, target_pos = self.board.engine_move_to_pos(best_move)
+            _turn_start = self._turn_started_at if self._turn_started_at > 0 else time.time()
+            _remain_min = MIN_MOVE_SECONDS - (time.time() - _turn_start)
+            if _remain_min > 0: time.sleep(_remain_min)
+            if not (self.board.is_my_turn and self.board.is_playing): return
+            if self._played_this_turn: return
 
-                print(f"-> Play: {best_move} (pos {source_pos}->{target_pos}) "
-                      f"[{self._last_score} d{self._last_depth}] "
-                      f"| uci={len(self.board.uci_moves)}", flush=True)
-                self._last_sent_move = best_move
-                self.send_play(source_pos, target_pos)
-            except Exception as e:
-                print(f"[BOT ERROR] {e}")
-                traceback.print_exc()
+            print(f"-> Đi: {best_move} (pos {source_pos}->{target_pos}) "
+                  f"[{self._last_score} d{self._last_depth}] "
+                  f"| uci={len(self.board.uci_moves)}", flush=True)
+            self._last_sent_move = best_move
+            self.send_play(source_pos, target_pos)
+        except Exception as e:
+            print(f"[BOT ERROR] {e}")
+            traceback.print_exc()
 
     def _decode_piece_id(self, encoded_id):
         color = 'r'
@@ -1855,20 +1824,21 @@ class PikafishBot:
                 if self.connected: self.send_message("PING")
         threading.Thread(target=loop, daemon=True).start()
 
+    # ==================== VÒNG LẶP CHÍNH ====================
     def run(self):
-        print("[BOT] Starting...")
+        print("[BOT] Khởi chạy cờ úp PKJQ v6.7...")
         while True:
             try:
                 now_ts = time.time()
                 if self.connected and now_ts - self.last_recv_timestamp > 120:
-                    print("[WS] 120s no data -> reconnect")
+                    print("[WS] 120s không nhận dữ liệu -> kết nối lại")
                     if self.ws:
                         try: self.ws.close()
                         except: pass
                     time.sleep(2)
                 elif self.connected and self.board.is_playing:
                     if now_ts - self.last_action_timestamp > 300:
-                        print("[WS] Game hung 300s -> reconnect")
+                        print("[WS] Ván treo 300s -> kết nối lại")
                         if self.ws:
                             try: self.ws.close()
                             except: pass
@@ -1876,10 +1846,10 @@ class PikafishBot:
 
                 if not self.connected:
                     if self._reconnect_streak >= 3:
-                        print(f"[BOT] ⚠️ Account {USER} maybe multi-login")
+                        print(f"[BOT] ⚠️ Tài khoản {USER} có thể đăng nhập chỗ khác")
                     if self._reconnect_streak > 0:
                         delay = min(60, 5 * (2 ** min(self._reconnect_streak - 1, 4)))
-                        print(f"[WS] Streak {self._reconnect_streak} -> wait {delay}s")
+                        print(f"[WS] Rớt liên tiếp {self._reconnect_streak} -> chờ {delay}s")
                         time.sleep(delay)
                     if not fetch_session_info():
                         time.sleep(5); continue
@@ -1895,12 +1865,13 @@ class PikafishBot:
                     self.start_keep_alive()
                     time.sleep(2)
 
+                # Watchdog deadline (sắp hết giờ -> ép tính nhanh)
                 if (self.board.is_playing and self.board.is_my_turn
                         and self._turn_deadline > 0
                         and time.time() > self._turn_deadline - 3.0
                         and not self._played_this_turn):
                     if not self._thinking:
-                        print(f"[DEADLINE] {int(self._turn_deadline - time.time())}s")
+                        print(f"[DEADLINE] Còn {int(self._turn_deadline - time.time())}s")
                         threading.Thread(target=self._make_auto_move, daemon=True).start()
 
                 if self.board.is_playing:
@@ -1914,7 +1885,7 @@ class PikafishBot:
                             else:
                                 elapsed = time.time() - self._sit_alone_since
                                 if elapsed >= 30.0:
-                                    print(f"[TABLE] Wait {int(elapsed)}s -> leave")
+                                    print(f"[TABLE] Chờ {int(elapsed)}s -> rời bàn")
                                     self.leave_table()
                         else:
                             self._sit_alone_since = None
@@ -1922,7 +1893,7 @@ class PikafishBot:
                 if (self._enter_fail_at and self.in_game
                         and not self.board.is_playing
                         and time.time() - self._enter_fail_at > 60):
-                    print(f"[TABLE] 60s no game -> abandon")
+                    print("[TABLE] 60s không vào ván -> bỏ bàn cũ")
                     self._enter_fail_at = 0.0
                     self.leave_table()
 
@@ -1936,20 +1907,22 @@ class PikafishBot:
                             bid = (self._resolved_bet_id
                                    if self._resolved_bet_id is not None
                                    else self.resolve_bet_amt_id())
-                            print(f"[CREATE] 🪑 {BOT_BET_XU} xu (bet_id={bid})")
+                            print(f"[CREATE] 🪑 Tạo bàn {BOT_BET_XU} xu (bet_id={bid})")
                             self.send_create_table(bet_amt_id=bid)
                         else:
                             valid_bets = self.get_1k_to_5k_bet_objs()
                             if valid_bets:
                                 bet_obj = random.choice(valid_bets)
                                 room = random.choice(self.ROOM_LIST)
+                                print(f"[SEARCH] 🔍 Dò bàn {bet_obj['value']} xu phòng '{room}'")
                                 self.send_quick_play(room_id=room, bet_amt_id=bet_obj['id'])
                                 self._quick_play_attempts += 1
                             else:
                                 self.send_create_table()
                                 self._quick_play_attempts = 0
                 time.sleep(1)
-            except KeyboardInterrupt: break
+            except KeyboardInterrupt:
+                break
             except Exception as e:
                 print(f"[RUN ERROR] {e}")
                 traceback.print_exc()
@@ -1967,9 +1940,10 @@ def acquire_single_instance_lock():
         import fcntl
         path = os.path.join(tempfile.gettempdir(), f"xiangqi_bot_{USER}.lock")
         f = open(path, "w")
-        try: fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
-            print(f"[BOT] ❌ Bot already running for {USER}")
+            print(f"[BOT] ❌ Đã có bot khác chạy tài khoản {USER}")
             sys.exit(1)
         f.write(str(os.getpid())); f.flush()
         atexit.register(lambda: (fcntl.flock(f, fcntl.LOCK_UN), f.close()))
@@ -1981,9 +1955,13 @@ def acquire_single_instance_lock():
 if __name__ == "__main__":
     _lock = acquire_single_instance_lock()
     bot = PikafishBot()
+
     def signal_handler(sig, frame):
         bot.cleanup(); sys.exit(0)
+
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
-    try: bot.run()
-    finally: bot.cleanup()
+    try:
+        bot.run()
+    finally:
+        bot.cleanup()
