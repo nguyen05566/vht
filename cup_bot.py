@@ -2,24 +2,27 @@
 """
 cup_bot.py — Cờ Úp Bot (gamevh.net / mystery_xiangqi) — engine PKJQ.exe qua wine
 ================================================================================
-★ v6.7 — FIX 3 LỖI GỐC RỄ LÀM ENGINE CRASH GIỮA VÁN
+★ v6.8 — FIX ENGINE ZOMBIE (sống nhưng không phản hồi isready)
 
-LỖI 1 (FATAL): revealed_chars bị append 2 LẦN (trong _handle_move VÀ record_move)
-      → BAG giảm gấp đôi tốc độ → về A0B0N0R0C0P0a0b0n0r0c0p0 (toàn 0)
-      → PKJQ.exe crash khi nhận thế cờ vô lý (quân úp còn trên bàn, BAG rỗng).
-      FIX: CHỈ append trong record_move (một nguồn duy nhất).
+Bằng chứng log #33:
+  - "Timeout 3.0s ready" lặp 4 lần, engine không chết (không EOF)
+  - SUMMARY restart=0 → logic cũ chỉ restart khi process CHẾT,
+    nhưng wine64 wrapper vẫn sống khi PKJQ.exe crash bên trong → zombie.
 
-LỖI 2: MOVE trễ (đến sau GAMEOVER) vẫn được ghi vào bàn đã reset
-      → uci_moves của ván mới bị nhiễm nước của ván cũ.
-      FIX: guard `not self.board.is_playing` -> bỏ qua.
+FIX v6.8:
+  1. _ensure_ready(): ping isready trước MỌI lượt tính — zombie → kill + restart NGAY
+  2. Watchdog nền (30s): giữa các ván, phát hiện zombie → restart chủ động
+  3. consume_stdout: KHÔNG BAO GIỜ chết vì 1 line lỗi (per-line try/except continue)
+     — trước đây 1 line info malformed giết thread → readyok không bao giờ set → zombie!
+  4. _engine_searching flag: theo dõi engine đang search, tránh watchdog ping nhầm
+  5. fallback FEN trần: bỏ (mâu thuẫn bàn-đầu + bag-hiện-tại, sai bên khi bot đen)
+  6. ucinewgame ở gameover: stop → wait ready → mới gửi (tránh treo)
+  7. MAX_ENGINE_RESTARTS_PER_GAME = 8
+  8. Bỏ suffix '?' — giữ format v5.x đã chạy tốt cả ván (suffix = char lật hoặc rỗng)
 
-LỖI 3: Tọa độ pos=-1 (byte 0xFF) sinh UCI rác "i10i10" (rank 10 không tồn tại)
-      → chuỗi rác nằm trong `moves` gửi engine → PKJQ crash khi parse.
-      FIX: guard tọa độ 0..89 + validate format UCI ^[a-i]\\d[a-i]\\d$ + lọc
-      moves trước khi gửi engine.
-
-LỖI 4: safe_mode dùng movetime_ms trước khi định nghĩa → NameError.
-      FIX: tính movetime TRƯỚC, áp safe_mode SAU.
+Giữ nguyên các fix v6.7:
+  - BAG: revealed_chars chỉ append MỘT lần (trong record_move)
+  - Guard MOVE trễ sau GAMEOVER, guard tọa độ 0..89, validate format UCI
 """
 
 import struct
@@ -142,7 +145,8 @@ MOVE_DEADLINE_SECONDS = 25.0
 MAX_SAFE_MOVES = 250
 TRUST_ENGINE_AFTER = 100
 
-MAX_ENGINE_RESTARTS_PER_GAME = 5
+# ★ v6.8: tăng lên 8 — restart rẻ hơn thua ván
+MAX_ENGINE_RESTARTS_PER_GAME = 8
 
 MOVE_DEDUP_WINDOW = 0.1
 
@@ -439,14 +443,14 @@ for _c in [0, 2, 4, 6, 8]:
     STANDARD_PAWN_POSITIONS.add(3 * 9 + _c)
 
 
-# ★ BAG chuẩn Pikafish cờ úp — thứ tự A,B,N,R,C,P (khớp test_cup_engine.py)
+# ★ BAG chuẩn Pikafish cờ úp — thứ tự A,B,N,R,C,P (khớp test: A2B2N2R2C2P5a2b2n2r2c2p5)
 INITIAL_BAG = {'A': 2, 'B': 2, 'N': 2, 'R': 2, 'C': 2, 'P': 5,
                'a': 2, 'b': 2, 'n': 2, 'r': 2, 'c': 2, 'p': 5}
 BAG_ORDER = ['A', 'B', 'N', 'R', 'C', 'P', 'a', 'b', 'n', 'r', 'c', 'p']
 
 # ★ Format UCI hợp lệ: 4 ký tự tọa độ + tùy chọn 1 ký tự lật quân
 UCI_MOVE_RE = re.compile(r'^[a-i]\d[a-i]\d$')
-UCI_MOVE_WITH_SUFFIX_RE = re.compile(r'^[a-i]\d[a-i]\d[\w?]?$')
+UCI_MOVE_WITH_SUFFIX_RE = re.compile(r'^[a-i]\d[a-i]\d[a-zA-Z]?$')
 
 
 class XiangqiBoardTracker:
@@ -492,7 +496,7 @@ class XiangqiBoardTracker:
                 self.rc_to_pos(9 - t_rank, t_col))
 
     def bag_string(self):
-        """BAG đủ 12 entries. Mỗi char lật chỉ trừ 1 lần (append duy nhất ở record_move)."""
+        """BAG đủ 12 entries. Mỗi quân lật chỉ trừ 1 lần (append duy nhất ở record_move)."""
         bag = dict(INITIAL_BAG)
         for ch in self.revealed_chars:
             if ch in bag:
@@ -501,7 +505,7 @@ class XiangqiBoardTracker:
 
     def get_current_fen(self):
         fen = f"{self.start_fen} {self.bag_string()} {self.start_side} - - 0 1"
-        # ★ v6.7: lọc nước sai format trước khi trả về (phòng thủ)
+        # ★ lọc nước sai format trước khi trả về (phòng thủ)
         moves = [m for m in self.uci_moves if UCI_MOVE_WITH_SUFFIX_RE.match(m)]
         return fen, moves
 
@@ -515,7 +519,7 @@ class XiangqiBoardTracker:
         self.dark_positions.clear()
 
     def record_move(self, mv, revealed_char=None):
-        """★ v6.7: NGUỒN DUY NHẤT append revealed_chars (fix double-append)."""
+        """★ NGUỒN DUY NHẤT append revealed_chars (fix double-append v6.7)."""
         uci = mv + (revealed_char or "")
         self.uci_moves.append(uci)
         if revealed_char:
@@ -527,7 +531,6 @@ class XiangqiBoardTracker:
         self.my_slot_id = slot_id
         self.first_turn_slot_id = first_turn_slot_id
         self.is_red = (self.my_slot_id == self.first_turn_slot_id)
-        self.side_to_move = 'w' if self.is_red else 'b'
 
     def detect_flip(self, pieces):
         red_rows, black_rows = [], []
@@ -595,19 +598,22 @@ class MultiPVCollector:
             self._best_depth = -1
 
     def parse_line(self, line_str):
-        m = self._re.search(line_str)
-        if not m: return
-        depth = int(m.group(1)); rank = int(m.group(2))
-        is_mate = (m.group(3) == "mate"); score = int(m.group(4))
-        move = m.group(5).split()[0]
-        with self.lock:
-            if depth > self._best_depth:
-                self._best_depth = depth
-                self.lines.clear()
-            elif depth < self._best_depth:
-                return
-            self.lines[rank] = {"move": move, "score": score,
-                                "is_mate": is_mate, "depth": depth}
+        try:
+            m = self._re.search(line_str)
+            if not m: return
+            depth = int(m.group(1)); rank = int(m.group(2))
+            is_mate = (m.group(3) == "mate"); score = int(m.group(4))
+            move = m.group(5).split()[0]
+            with self.lock:
+                if depth > self._best_depth:
+                    self._best_depth = depth
+                    self.lines.clear()
+                elif depth < self._best_depth:
+                    return
+                self.lines[rank] = {"move": move, "score": score,
+                                    "is_mate": is_mate, "depth": depth}
+        except Exception:
+            pass  # ★ v6.8: KHÔNG BAO GIỜ ném exception lên consume_stdout
 
     def candidates(self):
         with self.lock:
@@ -662,6 +668,9 @@ class PikafishBot:
         self._engine_crash_fingerprint = None
         self._engine_crash_count = 0
         self._engine_restart_count = 0
+        # ★ v6.8: trạng thái zombie-detection
+        self._engine_searching = False
+        self._engine_last_output = time.time()
 
         # Turn
         self._thinking = False
@@ -684,6 +693,7 @@ class PikafishBot:
         self._moves_len_at_turn_start = 0
 
         self._init_engine()
+        self.start_engine_watchdog()  # ★ v6.8
 
     # ==================== ENGINE ====================
     def _kill_engine(self):
@@ -716,6 +726,7 @@ class PikafishBot:
             self.engine = False
             self._readyok = False
             self._latest_bestmove = None
+            self._engine_searching = False
 
     def _init_engine(self):
         self._kill_engine()
@@ -801,33 +812,40 @@ class PikafishBot:
                          daemon=True).start()
 
         def consume_stdout(proc):
-            try:
-                while proc.poll() is None:
-                    try:
-                        line = proc.stdout.readline()
-                        if not line:
-                            break
-                        line_str = line.strip()
-                        if not line_str:
-                            continue
-                        self.multipv.parse_line(line_str)
-                        m = self._score_regex.search(line_str)
-                        if m:
-                            self._last_depth = m.group(1)
-                            self._last_score = ("mate " + m.group(3)) if m.group(2) == "mate" else f"{int(m.group(3)):+d}"
-                        if "score mate" in line_str:
-                            mm = self._mate_regex.search(line_str)
-                            if mm:
-                                val = int(mm.group(1))
-                                self._mate_status = f"WIN_{val}" if val > 0 else f"LOSE_{abs(val)}"
-                        if line_str == "readyok":
-                            self._readyok = True
-                        if line_str.startswith("bestmove"):
-                            self._latest_bestmove = line_str
-                    except Exception:
-                        break
-            except Exception:
-                pass
+            """★ v6.8: thread BẤT TỬ — mỗi line try/except riêng, LỖI thì CONTINUE.
+            Nếu thread này chết, readyok/bestmove không bao giờ được set
+            -> engine trông như zombie dù vẫn chạy tốt!"""
+            while True:
+                try:
+                    line = proc.stdout.readline()
+                except Exception:
+                    break  # pipe đóng thật sự
+                if not line:
+                    break  # EOF: process kết thúc
+                try:
+                    self._engine_last_output = time.time()
+                    line_str = line.strip()
+                    if not line_str:
+                        continue
+                    self.multipv.parse_line(line_str)
+                    m = self._score_regex.search(line_str)
+                    if m:
+                        self._last_depth = m.group(1)
+                        self._last_score = ("mate " + m.group(3)) if m.group(2) == "mate" else f"{int(m.group(3)):+d}"
+                    if "score mate" in line_str:
+                        mm = self._mate_regex.search(line_str)
+                        if mm:
+                            val = int(mm.group(1))
+                            self._mate_status = f"WIN_{val}" if val > 0 else f"LOSE_{abs(val)}"
+                    if line_str == "readyok":
+                        self._readyok = True
+                    if line_str.startswith("bestmove"):
+                        self._latest_bestmove = line_str
+                        self._engine_searching = False
+                except Exception:
+                    # ★ v6.8: line hỏng -> BỎ QUA, không giết thread
+                    continue
+            print("[ENGINE-STDOUT] Reader kết thúc (EOF)")
 
         threading.Thread(target=consume_stdout, args=(self._engine_proc,),
                          daemon=True).start()
@@ -844,17 +862,18 @@ class PikafishBot:
                 self._fsf_cmd_unlocked("isready")
 
             _t0 = time.time()
-            while not self._readyok and time.time() - _t0 < 20:
+            while not self._readyok and time.time() - _t0 < 25:
                 if self._engine_proc.poll() is not None:
                     print("[ENGINE] ❌ Process exit before ready")
                     return
                 time.sleep(0.1)
 
             if not self._readyok:
-                print("[ENGINE] ⚠️ 20s timeout ready")
+                print("[ENGINE] ⚠️ 25s timeout ready lúc init")
                 self._kill_engine()
                 return
 
+            self._engine_last_output = time.time()
             self.engine = True
             print(f"[ENGINE] ✅ Ready (Threads={_threads})")
         except Exception as e:
@@ -878,6 +897,7 @@ class PikafishBot:
                 and self._engine_proc.poll() is None)
 
     def _wait_ready(self, timeout=5.0):
+        """Đợi readyok THUẦN TÚY (không restart)."""
         self._readyok = False
         if not self._engine_alive():
             return False
@@ -886,16 +906,47 @@ class PikafishBot:
         _t0 = time.time()
         while time.time() - _t0 < timeout:
             if not self._engine_alive():
-                print("[ENGINE] ⚠️ Process died while waiting ready")
                 return False
             if self._readyok:
                 return True
             time.sleep(0.05)
-        print(f"[ENGINE] ⚠️ Timeout {timeout}s ready")
         return False
 
-    def _stop_engine_search(self, timeout=0.5):
-        """v6.6: chỉ đợi NGẮN bestmove sau stop — engine không search thì không có bestmove, cứ tiếp tục."""
+    def _restart_engine(self, count_restart=True):
+        """★ v6.8: kill + init + xác nhận ready. Trả về True nếu engine sẵn sàng."""
+        if count_restart and self._engine_restart_count >= MAX_ENGINE_RESTARTS_PER_GAME:
+            print(f"[ENGINE] ❌ Quá {MAX_ENGINE_RESTARTS_PER_GAME} restart trong ván")
+            return False
+        if count_restart:
+            self._engine_restart_count += 1
+        print(f"[ENGINE] 🔄 Restart (đã dùng {self._engine_restart_count}/{MAX_ENGINE_RESTARTS_PER_GAME})")
+        self._kill_engine()
+        self._init_engine()
+        return bool(self.engine)
+
+    def _ensure_ready(self, budget=None):
+        """★ v6.8 HÀM QUAN TRỌNG NHẤT: đảm bảo engine PHẢI phản hồi.
+        - Chết  -> restart
+        - Zombie (sống nhưng không trả lời isready) -> restart NGAY
+        budget: giây còn lại của lượt (nếu <20s thì không kịp restart -> False)
+        """
+        if not self._engine_alive():
+            return self._restart_engine()
+
+        if self._wait_ready(timeout=3.0):
+            return True
+
+        # ★ ZOMBIE: process sống nhưng im lặng
+        print("[ENGINE] 🧟 ZOMBIE (sống nhưng không trả lời isready)")
+        if budget is not None and budget < 20.0:
+            print(f"[ENGINE] Chỉ còn {budget:.0f}s — không kịp restart, bỏ lượt")
+            return False
+        if self._restart_engine():
+            return self._wait_ready(timeout=3.0)
+        return False
+
+    def _stop_engine_search(self, timeout=1.0):
+        """Dừng search đang chạy. Không có bestmove = engine không search = OK."""
         if not self._engine_alive():
             return
         with self._engine_lock:
@@ -903,10 +954,10 @@ class PikafishBot:
         _t0 = time.time()
         while time.time() - _t0 < timeout:
             if self._latest_bestmove is not None:
-                self._latest_bestmove = None
+                self._latest_bestmove = None  # tiêu thụ bestmove cũ
+                self._engine_searching = False
                 return
             time.sleep(0.01)
-        # Không có bestmove = engine không đang search → OK, tiếp tục
 
     def _wait_bestmove(self, timeout):
         self._latest_bestmove = None
@@ -921,20 +972,31 @@ class PikafishBot:
 
     def get_best_move(self, fen, moves, movetime_ms=3000, hard_timeout=6.0):
         try:
-            if not self._engine_alive():
+            # ★ v6.8: budget = thời gian còn lại của lượt
+            budget = None
+            if self._turn_deadline > 0:
+                budget = self._turn_deadline - time.time()
+
+            # Dừng search cũ (nếu còn)
+            self._stop_engine_search(timeout=1.0)
+
+            # ★ v6.8: ĐẢM BẢO engine sống VÀ phản hồi — zombie sẽ bị restart tại đây
+            if not self._ensure_ready(budget=budget):
                 return None
-            self._stop_engine_search(timeout=0.5)
-            if not self._wait_ready(timeout=3.0):
-                return None
+
             self.multipv.clear()
             self._latest_bestmove = None
             self._mate_status = None
+
             pos_cmd = f"position fen {fen}"
             if moves:
                 pos_cmd += " moves " + " ".join(moves)
+
             with self._engine_lock:
                 self._fsf_cmd_unlocked(pos_cmd)
+                self._engine_searching = True
                 self._fsf_cmd_unlocked(f"go movetime {movetime_ms}")
+
             best = self._wait_bestmove(timeout=hard_timeout)
             if best is None:
                 with self._engine_lock:
@@ -942,18 +1004,22 @@ class PikafishBot:
                 _t = time.time()
                 while time.time() - _t < 1.5:
                     if self._latest_bestmove:
-                        return self._latest_bestmove
+                        best = self._latest_bestmove
+                        break
                     time.sleep(0.02)
-                return None
+            self._engine_searching = False
             return best
         except Exception as e:
+            self._engine_searching = False
             print(f"[ENGINE] ERROR get_best_move: {e}")
+            traceback.print_exc()
             return None
 
     def _find_legal_fallback(self, fen, moves):
         try:
             if not self._engine_alive():
-                return None
+                if not self._ensure_ready():
+                    return None
             self._stop_engine_search(timeout=0.5)
             if not self._wait_ready(timeout=3.0):
                 return None
@@ -965,8 +1031,10 @@ class PikafishBot:
             with self._engine_lock:
                 self._fsf_cmd_unlocked("setoption name MultiPV value 10")
                 self._fsf_cmd_unlocked(pos_cmd)
+                self._engine_searching = True
                 self._fsf_cmd_unlocked("go movetime 500")
             best = self._wait_bestmove(timeout=2.5)
+            self._engine_searching = False
             try:
                 for cand in self.multipv.candidates():
                     if cand not in self._rejected_moves:
@@ -980,8 +1048,43 @@ class PikafishBot:
                     self._fsf_cmd_unlocked(f"setoption name MultiPV value {ENGINE_MULTIPV}")
             return None
         except Exception as e:
+            self._engine_searching = False
             print(f"[FALLBACK] Error: {e}")
             return None
+
+    def start_engine_watchdog(self):
+        """★ v6.8: Watchdog nền — giữa các ván, phát hiện zombie -> restart chủ động.
+        Chạy mỗi 30s, chỉ hoạt động khi KHÔNG trong ván/không đang search."""
+        def watchdog():
+            while True:
+                time.sleep(30)
+                try:
+                    # Bỏ qua khi đang bận
+                    if (self._thinking or self._engine_searching
+                            or self.board.is_playing):
+                        continue
+                    if not self._engine_alive():
+                        continue  # sẽ được restart ở lượt đi
+                    # Ping
+                    self._readyok = False
+                    with self._engine_lock:
+                        self._fsf_cmd_unlocked("isready")
+                    _t0 = time.time()
+                    ok = False
+                    while time.time() - _t0 < 4.0:
+                        if self._readyok:
+                            ok = True
+                            break
+                        if not self._engine_alive():
+                            break
+                        time.sleep(0.05)
+                    if not ok:
+                        print("[WATCHDOG] 🧟 Zombie giữa các ván -> restart (không tốn quota)")
+                        self._restart_engine(count_restart=False)
+                except Exception:
+                    pass
+
+        threading.Thread(target=watchdog, daemon=True).start()
 
     # ==================== WEBSOCKET ====================
     def connect(self):
@@ -1378,6 +1481,10 @@ class PikafishBot:
         self._joining_table = False
         self.last_action_timestamp = time.time()
 
+        # ★ v6.8: đảm bảo engine khỏe TRƯỚC khi ván bắt đầu
+        if not self._ensure_ready(budget=None):
+            print("[GAME] ⚠️ Engine chưa sẵn sàng khi vào ván — watchdog sẽ hồi phục")
+
         try:
             player_count = msg.read_byte()
             for _ in range(player_count):
@@ -1476,12 +1583,12 @@ class PikafishBot:
         if not ch: return None
         return ch.upper() if v > 0 else ch
 
-    # ★★★ v6.7 — _handle_move ĐƯỢC VIẾT LẠI HOÀN TOÀN ★★★
+    # ★ _handle_move v6.8 (giữ fix v6.7, bỏ suffix '?')
     def _handle_move(self, msg):
         with self._move_lock:
             self._move_recv_count += 1
             try:
-                # ★ GUARD 1: nước về sau GAMEOVER -> bỏ qua (không nhiễm bàn mới)
+                # GUARD 1: nước về sau GAMEOVER -> bỏ qua
                 if not self.board.is_playing:
                     self._move_skip_count += 1
                     print(f"[MOVE] ⚠️ Stale move sau GAMEOVER — bỏ qua "
@@ -1491,18 +1598,17 @@ class PikafishBot:
                 source_pos = msg.read_byte()
                 target_pos = msg.read_byte()
 
-                # ★ GUARD 2: tọa độ ngoài 0..89 (byte 0xFF=-1...) -> bỏ qua
-                # Trước đây pos=-1 sinh UCI rác "i10i10" -> engine crash khi parse!
+                # GUARD 2: tọa độ ngoài 0..89 -> bỏ qua (tránh UCI rác "i10i10")
                 if not (0 <= source_pos < 90 and 0 <= target_pos < 90):
                     self._move_skip_count += 1
-                    print(f"[MOVE] ⚠️ Tọa độ lệch ({source_pos}->{target_pos}) — bỏ qua "
-                          f"(recv#{self._move_recv_count})", flush=True)
+                    print(f"[MOVE] ⚠️ Tọa độ lệch ({source_pos}->{target_pos}) — bỏ qua",
+                          flush=True)
                     return
 
                 engine_move = self.board.pos_to_engine_move(source_pos, target_pos)
                 self.last_action_timestamp = time.time()
 
-                # ★ GUARD 3: UCI phải đúng format (cột a-i, hàng 0-9)
+                # GUARD 3: UCI đúng format
                 if not UCI_MOVE_RE.match(engine_move):
                     self._move_error_count += 1
                     print(f"[MOVE] ⚠️ UCI sai format '{engine_move}' — bỏ qua", flush=True)
@@ -1510,21 +1616,29 @@ class PikafishBot:
 
                 rest = list(msg.data[msg.offset:]) if msg.offset < len(msg.data) else []
 
-                is_dark_move = source_pos in self.board.dark_positions
-                is_flip_move = (source_pos == target_pos)  # lật quân tại chỗ
+                mover_dark = source_pos in self.board.dark_positions
+                is_flip_move = (source_pos == target_pos)
 
                 # ★ Chỉ nhận reveal khi quân ĐI là quân úp (hoặc lật tại chỗ).
                 # Quân đã mở đi -> rest là dữ liệu khác, KHÔNG tính reveal
-                # (trước đây false-positive làm BAG tụt nhanh).
+                # (fix BAG tụt nhanh của v5.x).
                 revealed_char = None
-                if (is_dark_move or is_flip_move) and rest and rest[0] > 0 and len(rest) >= 3:
+                if (mover_dark or is_flip_move) and rest and rest[0] > 0 and len(rest) >= 3:
                     cand = self._sid_to_fen_char(rest[2])
                     if cand and cand not in ('k', 'K'):
                         revealed_char = cand
 
+                if (mover_dark or is_flip_move) and revealed_char is None:
+                    # Quân úp đi nhưng không parse được reveal — cảnh báo lớn
+                    print(f"[MOVE] ⚠️⚠️ DARK MOVE không parse được reveal "
+                          f"({source_pos}->{target_pos}, rest={bytes(rest).hex()[:20]})",
+                          flush=True)
+
                 self.board.dark_positions.discard(source_pos)
                 self.board.dark_positions.discard(target_pos)
 
+                # ★ v6.8: KHÔNG dùng '?' — suffix = char lật hoặc rỗng
+                # (format v5.x đã chạy được cả ván với PKJQ)
                 full_uci = engine_move + (revealed_char or "")
 
                 now = time.time()
@@ -1533,9 +1647,8 @@ class PikafishBot:
                     self._move_skip_count += 1
                     return
 
-                # ★★★ FIX LỖI CHÍNH v6.7: KHÔNG append revealed_chars ở đây!
-                # record_move là nguồn DUY NHẤT append (trước đây append 2 lần
-                # -> BAG về A0B0N0R0C0P0a0b0n0r0c0p0 -> PKJQ crash).
+                # ★ FIX v6.7: KHÔNG append revealed_chars ở đây — record_move là
+                # nguồn DUY NHẤT (append 2 lần làm BAG về A0...P0 -> PKJQ crash)
                 self.board.record_move(engine_move, revealed_char)
 
                 self._last_move_uci = full_uci
@@ -1650,7 +1763,7 @@ class PikafishBot:
             victim = (self.slot_players.get(target_sid)
                       if target_sid is not None else self.opponent_player_id())
 
-        # ★ is_playing=False TRƯỚC reset để chặn MOVE trễ (guard trong _handle_move)
+        # is_playing=False TRƯỚC reset để chặn MOVE trễ
         self.board.is_playing = False
         self.board.is_my_turn = False
         self.fixed_pawn_positions.clear()
@@ -1664,11 +1777,19 @@ class PikafishBot:
         self._played_this_turn = False
         self._turn_started_at = 0.0
         self._turn_deadline = 0.0
-        if self._engine_proc and self._engine_proc.poll() is None:
+
+        # ★ v6.8: gameover — stop -> ĐỢI READY -> mới ucinewgame
+        # (gửi ucinewgame khi engine đang search/treo có thể tạo zombie)
+        if self._engine_alive():
             self._stop_engine_search(timeout=1.0)
-            with self._engine_lock:
-                self._fsf_cmd_unlocked("ucinewgame")
-                self._fsf_cmd_unlocked("isready")
+            if self._wait_ready(timeout=3.0):
+                with self._engine_lock:
+                    self._fsf_cmd_unlocked("ucinewgame")
+                    self._fsf_cmd_unlocked("isready")
+                self._wait_ready(timeout=5.0)
+            else:
+                print("[ENGINE] 🧟 Zombie lúc gameover -> restart (miễn phí)")
+                self._restart_engine(count_restart=False)
 
         def after_gameover():
             is_guest = not getattr(self, '_table_created_by_me', False)
@@ -1700,7 +1821,7 @@ class PikafishBot:
             self._thinking = False
 
     def _do_auto_move(self):
-        # ★ v6.7: tính movetime TRƯỚC (fix NameError của safe_mode v6.6)
+        # Tính movetime TRƯỚC (dựa deadline)
         now = time.time()
         deadline = self._turn_deadline if self._turn_deadline > 0 else (now + MOVE_DEADLINE_SECONDS)
         remain = deadline - now
@@ -1714,25 +1835,14 @@ class PikafishBot:
             print("[TURN] Sắp hết giờ — bỏ lượt tính")
             return
 
-        # Engine chết -> restart
-        if not self._engine_alive():
-            print("[ENGINE] Dead -> restart")
-            if self._engine_restart_count < MAX_ENGINE_RESTARTS_PER_GAME:
-                self._engine_restart_count += 1
-                self._init_engine()
-            if not self.engine:
-                print("[ENGINE] ❌ Restart fail")
-                return
-
-        # Safe mode SAU khi đã có movetime_ms
-        safe_mode = self._engine_restart_count >= 3
+        # Safe mode nếu crash nhiều
+        safe_mode = self._engine_restart_count >= 4
         if safe_mode:
             movetime_ms = min(movetime_ms, 500)
-            print(f"[ENGINE] ⚠️ Safe mode (crash {self._engine_restart_count}x, "
+            print(f"[ENGINE] ⚠️ Safe mode (restart {self._engine_restart_count}x, "
                   f"movetime={movetime_ms}ms)")
 
-        fen, moves = self.board.get_current_fen()  # đã lọc nước sai format bên trong
-        fixed = self.fixed_pawn_positions if self.fixed_pawn_positions else None
+        fen, moves = self.board.get_current_fen()  # đã lọc nước sai format
 
         print(f"[ENGINE-IN] FEN: {fen}", flush=True)
         print(f"[ENGINE-IN] moves({len(moves)})", flush=True)
@@ -1745,6 +1855,7 @@ class PikafishBot:
                 print(f"[ENGINE] ⚠️ Moves quá dài -> bỏ lượt")
                 return
 
+        # ★ get_best_move đã chứa _ensure_ready (tự restart zombie)
         raw = self.get_best_move(fen, moves, movetime_ms=movetime_ms,
                                  hard_timeout=hard_timeout)
 
@@ -1755,23 +1866,17 @@ class PikafishBot:
             else:
                 self._engine_crash_fingerprint = fp
                 self._engine_crash_count = 1
-            if self._engine_crash_count >= 2:
-                print(f"[ENGINE] Crash x{self._engine_crash_count} -> fallback FEN trần", flush=True)
-                fallback_fen = f"{self.board.start_fen} {self.board.bag_string()} w - - 0 1"
-                raw = self.get_best_move(fallback_fen, [],
-                                         movetime_ms=movetime_ms,
+
+            # ★ v6.8: thử lại SAU KHI đảm bảo engine (zombie đã bị restart bên trong)
+            for attempt in (1, 2):
+                if not self._engine_alive():
+                    if self._engine_restart_count >= MAX_ENGINE_RESTARTS_PER_GAME:
+                        break
+                    self._restart_engine()
+                    if not self.engine: break
+                raw = self.get_best_move(fen, moves, movetime_ms=movetime_ms,
                                          hard_timeout=hard_timeout)
-            else:
-                for attempt in (1, 2):
-                    if not self._engine_alive():
-                        if self._engine_restart_count >= MAX_ENGINE_RESTARTS_PER_GAME:
-                            break
-                        self._engine_restart_count += 1
-                        self._init_engine()
-                        if not self.engine: break
-                    raw = self.get_best_move(fen, moves, movetime_ms=movetime_ms,
-                                             hard_timeout=hard_timeout)
-                    if raw: break
+                if raw: break
 
         if not raw:
             print("[ENGINE] -> MultiPV fallback", flush=True)
@@ -1826,7 +1931,7 @@ class PikafishBot:
 
     # ==================== VÒNG LẶP CHÍNH ====================
     def run(self):
-        print("[BOT] Khởi chạy cờ úp PKJQ v6.7...")
+        print("[BOT] Khởi chạy cờ úp PKJQ v6.8...")
         while True:
             try:
                 now_ts = time.time()
@@ -1868,7 +1973,7 @@ class PikafishBot:
                 # Watchdog deadline (sắp hết giờ -> ép tính nhanh)
                 if (self.board.is_playing and self.board.is_my_turn
                         and self._turn_deadline > 0
-                        and time.time() > self._turn_deadline - 3.0
+                        and time.time() > self._turn_deadline - 4.0
                         and not self._played_this_turn):
                     if not self._thinking:
                         print(f"[DEADLINE] Còn {int(self._turn_deadline - time.time())}s")
