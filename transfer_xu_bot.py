@@ -263,7 +263,7 @@ def ws_transfer(ws, dest_id, amount, timeout=12):
 
 
 # ==================== MAIN FUNCTION ====================
-def transfer_xu_sync(user, passwd, dest_id=10055407, reserve=None):
+def transfer_xu_sync(user, passwd, dest_id=51977054, reserve=None):
     """
     Chuyển xu 1 LẦN DUY NHẤT: chừa lại `reserve` xu (mặc định KEEP_RESERVE=3000),
     chuyển phần dư về dest_id.
@@ -332,7 +332,7 @@ def transfer_xu_sync(user, passwd, dest_id=10055407, reserve=None):
             pass
 
 
-def transfer_xu_async(user, passwd, dest_id=10055407, reserve=None):
+def transfer_xu_async(user, passwd, dest_id=51977054, reserve=None):
     """
     Bản bất đồng bộ: chạy transfer_xu_sync trong thread nền.
     Trả về Thread object; kết quả in ra stdout/log.
@@ -347,7 +347,7 @@ def transfer_xu_async(user, passwd, dest_id=10055407, reserve=None):
     return t
 
 
-def start_periodic_transfer(user, passwd, dest_id=10055407, percent=None, interval=None):
+def start_periodic_transfer(user, passwd, dest_id=51977054, percent=None, interval=None):
     """
     DEPRECATED — giữ lại cho tương thích ngược.
     Hiện chỉ chuyển 1 LẦN DUY NHẤT khi gọi (không còn định kỳ).
@@ -366,7 +366,7 @@ if __name__ == "__main__":
 
     user = sys.argv[1]
     passwd = sys.argv[2]
-    dest_id = int(sys.argv[3]) if len(sys.argv) > 3 else 10055407
+    dest_id = int(sys.argv[3]) if len(sys.argv) > 3 else 51977054
     reserve = int(sys.argv[4]) if len(sys.argv) > 4 else KEEP_RESERVE
 
     transfer_xu_sync(user, passwd, dest_id, reserve)
