@@ -8,7 +8,7 @@
 ║  - KHÔNG đổi avatar (đã bỏ mã update_random_avatar / catalog)      ║
 ║  - Tài khoản lấy từ file acc_valid_*.txt / acc_zaro_*.txt           ║
 ║  - Giữ cơ chế chuyển xu qua transfer_xu_bot (1 lần khi bắt đầu,        ║
-║    chừa lại 3000 xu, phần dư về 10055407)                              ║
+║    chừa lại 3000 xu, phần dư về 51977054)                              ║
 ║                                                                    ║
 ║  Cách dùng:                                                        ║
 ║    CARO_ACC_FILE=acc_valid_1.txt CARO_ACC_INDEX=0 python3 caro_bot.py
@@ -460,6 +460,7 @@ RUNTIME = int(os.environ.get("CARO_RUNTIME_SECONDS") or
 AUTO_IDENTITY = os.environ.get("CARO_AUTO_IDENTITY", "1") == "1"
 IDENTITY_TEST_ONLY = os.environ.get("CARO_IDENTITY_TEST_ONLY", "0") == "1"
 BOT_BET_XU = 400
+CARO_TRANSFER_DEST_ID = int(os.environ.get("CARO_TRANSFER_DEST_ID") or "51977054")
 # Hardcode id của mức 400 xu — đã sniff từ LIST_BET_AMT response (12/09/2026):
 #   server trả 12 mức: 20,40,100,200,400,1000,2000,4000,10000,20000,40000,100000
 #   400 xu nằm ở index 4 (zero-based) → id=4
@@ -1684,12 +1685,13 @@ class CaroBot:
 
         # ===== CHUYỂN XU 1 LẦN DUY NHẤT ngay sau login =====
         # Chừa lại CARO_TRANSFER_RESERVE xu (mặc định 3000) để bot có xu chơi,
-        # chuyển phần dư về 10055407. KHÔNG chuyển định kỳ nữa.
+        # chuyển phần dư về CARO_TRANSFER_DEST_ID. KHÔNG chuyển định kỳ nữa.
         try:
             from transfer_xu_bot import transfer_xu_async, KEEP_RESERVE
             _tx_reserve = int(os.environ.get("CARO_TRANSFER_RESERVE") or KEEP_RESERVE)
-            transfer_xu_async(USER, PWWD, dest_id=10055407, reserve=_tx_reserve)
-            log.info(f"[TRANSFER] ✅ Bật chuyển xu 1 lần: chừa lại {_tx_reserve:,} xu, phần dư về 10055407 (thread nền)")
+            transfer_xu_async(USER, PWWD, dest_id=CARO_TRANSFER_DEST_ID, reserve=_tx_reserve)
+            log.info(f"[TRANSFER] ✅ Bật chuyển xu 1 lần: chừa lại {_tx_reserve:,} xu, "
+                     f"phần dư về {CARO_TRANSFER_DEST_ID} (thread nền)")
         except ImportError as ie:
             log.warning(f"[TRANSFER] ❌ Không tìm thấy transfer_xu_bot: {ie}")
         except Exception as e:
