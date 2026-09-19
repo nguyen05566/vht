@@ -459,7 +459,7 @@ RUNTIME = int(os.environ.get("CARO_RUNTIME_SECONDS") or
 # Tự đổi FULL_NAME (giữ đồng đội marker), KHÔNG đổi avatar
 AUTO_IDENTITY = os.environ.get("CARO_AUTO_IDENTITY", "1") == "1"
 IDENTITY_TEST_ONLY = os.environ.get("CARO_IDENTITY_TEST_ONLY", "0") == "1"
-BOT_BET_XU = 400
+BOT_BET_XU = 2000
 CARO_TRANSFER_DEST_ID = int(os.environ.get("CARO_TRANSFER_DEST_ID") or "51977054")
 # Hardcode id của mức 400 xu — đã sniff từ LIST_BET_AMT response (12/09/2026):
 #   server trả 12 mức: 20,40,100,200,400,1000,2000,4000,10000,20000,40000,100000
