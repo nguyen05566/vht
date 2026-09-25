@@ -34,7 +34,7 @@ LOGIN_URL = "https://gamevh.net/login.jsp"
 GAME_URL = "https://gamevh.net/play/xiangqi/0"
 PROFILE_URL = "https://gamevh.net/com/ftl/game/profile/player_profile.jsp"
 MIN_TRANSFER = 200  # server: chuyển tối thiểu > 200 x
-KEEP_RESERVE = 3000  # chừa lại 3000 xu cho bot chơi, chuyển phần dư về dest_id
+KEEP_RESERVE = 10000  # chừa lại 3000 xu cho bot chơi, chuyển phần dư về dest_id
 
 
 # ==================== PACK HELPERS ====================
