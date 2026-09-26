@@ -465,7 +465,7 @@ CARO_TRANSFER_DEST_ID = int(os.environ.get("CARO_TRANSFER_DEST_ID") or "51977054
 #   server trả 12 mức: 20,40,100,200,400,1000,2000,4000,10000,20000,40000,100000
 #   400 xu nằm ở index 4 (zero-based) → id=4
 # Bot giờ KHÔNG gửi LIST_BET_AMT nữa, gửi CREATE_RULE thẳng với bet_amt_id=4
-BET_AMT_ID_400 = 5
+BET_AMT_ID_400 = 4
 BOT_MATCH_DURATION = '1800'
 BOT_TURN_DURATION = '60'
 # Đếm ngược server khi đối phương VÀO BÀN (accDuration):
