@@ -263,7 +263,7 @@ def ws_transfer(ws, dest_id, amount, timeout=12):
 
 
 # ==================== MAIN FUNCTION ====================
-def transfer_xu_sync(user, passwd, dest_id=51977054, reserve=None):
+def transfer_xu_sync(user, passwd, dest_id=0, reserve=None):
     """
     Chuyển xu 1 LẦN DUY NHẤT: chừa lại `reserve` xu (mặc định KEEP_RESERVE=3000),
     chuyển phần dư về dest_id.
