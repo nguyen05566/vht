@@ -394,8 +394,8 @@ class EmbryoEngine:
 WS_URL = "wss://gamevh.net/ws/gameServer"
 GAME_URL = "https://gamevh.net/play/caro/0"
 # === CẤU HÌNH TRỰC TIẾP - KHÔNG CẦN SECRETS ===
-CARO_USER_DIRECT = "arena12"
-CARO_PASSWD_DIRECT = "nhat123456"
+CARO_USER_DIRECT = "test2"
+CARO_PASSWD_DIRECT = "a12346"
 def _clean_env(val: Optional[str], default: str) -> str:
     if val and str(val).strip(): return str(val).strip()
     return default
@@ -409,7 +409,7 @@ RUNTIME = int(os.environ.get("CARO_RUNTIME_SECONDS") or
               float(os.environ.get("CARO_RUNTIME_HOURS", "5.9")) * 3600)
 AUTO_IDENTITY = os.environ.get("CARO_AUTO_IDENTITY", "1") == "1"
 IDENTITY_TEST_ONLY = os.environ.get("CARO_IDENTITY_TEST_ONLY", "0") == "1"
-BOT_BET_XU = 2000
+BOT_BET_XU = 20
 BOT_MATCH_DURATION = '1800'
 BOT_TURN_DURATION = '60'
 EMPTY = -1
