@@ -72,10 +72,8 @@ VN_TEN_KHONG_DAU = [
 ]
 
 def generate_random_full_name() -> str:
-    """Tạo tên người Việt Nam tự nhiên (chỉ gồm 1 từ: tên có dấu hoặc không dấu), không họ/đệm, không số."""
-    has_accent = random.choice([True, False])
-    name_list = VN_TEN_DAU if has_accent else VN_TEN_KHONG_DAU
-    return random.choice(name_list)
+    """Tên cố định theo yêu cầu."""
+    return "nguyen"
 
 
 # ======================== EMBRYO CONFIG ========================
